@@ -776,6 +776,188 @@ loc_CB8C:		ex		de, hl								; DE = dY(E)/dZ(D)
 """
 
 
+# ---------------------------------------------------------------------------
+# move_player, calc_2d_info, set_wipe_and_draw_flags, handle_exit_screen — те же
+# указатели по HL вместо (ix+n). В move_player важно, что `bit 3,c` у Z80 не портит A:
+# на i8080 dZ перечитывается из (hl) после and (MOV A,M флаги не трогает).
+# ---------------------------------------------------------------------------
+N_MOVE_PLAYER = """move_player:
+				ld		a, (obj_dropping_into_cauldron)
+				and		a
+				jp		z, loc_C9AB
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 11
+				ld		l, a
+				ld		(hl), 2								; dZ = 2
+
+loc_C9AB:		ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 12
+				ld		l, a								; ix+12
+				ld		a, (hl)
+				and		8									; уже прыгает?
+				jp		nz, loc_C9BC
+				ld		a, (hl)								; flags12
+				and		0xF0								; входит в комнату?
+				jp		nz, loc_C9BC
+				ld		a, c
+				and		4									; вперёд?
+				jp		z, loc_C9C1
+
+loc_C9BC:		push	bc
+				call	calc_plyr_dXY
+				pop		bc
+
+loc_C9C1:		ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 11
+				ld		l, a								; ix+11
+				ld		a, (hl)								; dZ
+				and		a
+				jp		m, loc_C9CC
+				ld		a, c
+				and		8									; прыжок?
+				ld		a, (hl)								; вернуть dZ, флаги от and целы
+				jp		nz, loc_C9CD
+
+loc_C9CC:		dec		a
+
+loc_C9CD:		dec		a
+				ld		(hl), a								; dZ
+				ld		(tmp_dZ), a
+				add		a, 2
+				call	m, audio_B451
+				call	adj_for_out_of_bounds
+				call	handle_exit_screen
+				call	add_dXYZ
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 12
+				ld		l, a								; ix+12
+				ld		a, (hl)
+				and		4									; Z вышел за границу?
+				jp		z, clear_dX_dY
+				ld		a, (tmp_dZ)
+				and		a
+				jp		p, clear_dX_dY
+				ld		a, (hl)
+				and		0xF7								; res 3 — снять флаг прыжка
+				ld		(hl), a
+
+"""
+
+N_CALC_2D = """calc_2d_info:	; obj[24] = ширина спрайта в байтах (+1, если pixelX не кратен 8), obj[25] = высота
+				call	calc_pixel_XY
+				call	flip_sprite							; DE -> данные спрайта
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 24
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+24
+				inc		hl
+				inc		hl									; ix+26
+				ld		a, (hl)								; pixel X
+				and		7									; смещение в бите
+				ld		a, (de)								; ширина (байт)
+				inc		de
+				jp		z, c2d_1
+				inc		a
+c2d_1:			and		0xF
+				dec		hl
+				dec		hl									; ix+24
+				ld		(hl), a
+				inc		hl									; ix+25
+				ld		a, (de)
+				ld		(hl), a								; высота
+				ret
+; End of function calc_2d_info
+"""
+
+N_SET_WD = """set_wipe_and_draw_flags:
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)
+				or		0x30								; set WIPE & DRAW
+				ld		(hl), a
+				jp		set_draw_objs_overlapped
+; End of function set_wipe_and_draw_flags
+"""
+
+N_HANDLE_EXIT = """handle_exit_screen:
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 12
+				ld		l, a								; ix+12
+				ld		a, (hl)							; flags12
+				and		0xF0								; входит в комнату?
+				ret		nz									; да, выходим
+				ld		a, l
+				sub		5
+				ld		l, a								; ix+7
+				ld		a, (hl)
+				and		1									; рядом с аркой?
+				ret		z									; нет, выходим
+				ld		a, (hl)
+				and		0xFE								; res 0 — снять флаг
+				ld		(hl), a
+				ld		bc, screen_move_tbl
+				ld		hl, (room_size_X)
+				push	hl
+				jp		lookup_plyr_dXY
+; End of function handle_exit_screen
+"""
+
+
+# ---------------------------------------------------------------------------
+# list_objects_to_draw: тот же алгоритм, что в kl_native, но поле флагов читается
+# сдвигом L на +7 без adc и без push/pop, а возврат к базе слит с шагом +32 (+25).
+# 118 -> 62 такта на пустой объект, 101-117 на непустой.
+# ---------------------------------------------------------------------------
+N_LIST_OBJS = """list_objects_to_draw:	; индексы объектов с graphic_no != 0 и DRAW (бит 4 поля 7) -> objects_to_draw, терминатор 0xFF
+				ld		hl, graphic_objs_tbl
+				ld		de, objects_to_draw
+				ld		c, 0
+				ld		b, 40
+lo_1:			ld		a, (hl)
+				or		a
+				jp		z, lo_2
+				ld		a, l
+				add		a, 7
+				ld		l, a								; -> поле флагов (+7 не переносит)
+				ld		a, (hl)
+				and		0x10								; DRAW?
+				jp		z, lo_1b
+				ld		a, c
+				ld		(de), a
+				inc		de
+lo_1b:			ld		a, l								; -7 и +32 одним сложением
+				add		a, 25
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				jp		lo_3
+lo_2:			ld		a, l
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+lo_3:			inc		c
+				dec		b
+				jp		nz, lo_1
+				ld		a, 0xFF
+				ld		(de), a
+				ret
+; End of function list_objects_to_draw
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -798,6 +980,14 @@ def apply(src):
                           ('adj_dZ_for_out_of_bounds', N_ADJ_DZ_OOB, 'adj_dZ_for_out_of_bounds'),
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
+    src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
+    src = _sub(src, r'(?m)^calc_2d_info:[^\n]*\n.*?; End of function calc_2d_info\r?\n', N_CALC_2D, 'calc_2d_info')
+    src = _sub(src, r'(?m)^set_wipe_and_draw_flags:[^\n]*\n.*?; End of function set_wipe_and_draw_flags\r?\n',
+               N_SET_WD, 'set_wipe_and_draw_flags')
+    src = _sub(src, r'(?m)^handle_exit_screen:[^\n]*\n.*?; End of function handle_exit_screen\r?\n',
+               N_HANDLE_EXIT, 'handle_exit_screen')
+    src = _sub(src, r'(?m)^list_objects_to_draw:[^\n]*\n.*?; End of function list_objects_to_draw\r?\n',
+               N_LIST_OBJS, 'list_objects_to_draw')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src

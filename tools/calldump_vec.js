@@ -63,6 +63,9 @@ const RULES={
   clear_dX_dY:{regions:r=>[["o1",r.ix,32]]},
   adj_dZ_for_out_of_bounds:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
   adj_for_out_of_bounds:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
+  move_player:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
+  handle_exit_screen:{regions:r=>[["o1",r.ix,32]]},
+  set_wipe_and_draw_flags:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");
