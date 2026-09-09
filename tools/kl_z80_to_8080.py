@@ -830,6 +830,397 @@ def kl_glue(src, target):
     src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_8080.r0m", 0, 0x10000', src, flags=re.M)
     return src
 
+# ============================ звук: очередь ВИ53, разбираемая прерыванием ============================
+SND_PLAY_NOTE = """play_note:		; A = байт ноты (биты 0-5 нота, 6-7 множитель длительности), DE -> данные. На выходе DE+1.
+				; Ничего не ждём: кладём (делитель, длительность в 1/256 кадра) в очередь, играет ISR.
+				and     0x3F
+				jp      z, snd_delay
+				ld      l, a
+				ld      h, 0
+				add     hl, hl
+				call    add_HL_A                                ; HL = 3*note
+				ld      bc, freq_tbl
+				add     hl, bc
+				ld      b, (hl)                                 ; N low  (счётчик полупериода)
+				inc     hl
+				ld      c, (hl)                                 ; N high (+1)
+				inc     hl
+				ld      l, (hl)                                 ; длительность (периодов), младший байт
+				ld      h, 0
+				ld      a, (de)
+				rlca
+				rlca
+				and     3
+				inc     a                                       ; множитель 1..4
+				push    de
+				ld      e, l
+				ld      d, h
+pn_mul:			dec     a
+				jp      z, pn_done
+				add     hl, de
+				jp      pn_mul
+pn_done:		ld      d, c
+				dec     d
+				ld      e, b                                    ; DE = N = (C-1)*256 + B
+				push    hl                                      ; периодов
+				push    de
+				call    vec_snd_tick                            ; A = тиков на период = (N*3)>>5
+				pop     de
+				pop     hl
+				call    vec_snd_mul                             ; HL = A * HL (тиков всего)
+				ex      de, hl                                  ; DE = тики
+				call    vec_snd_div                             ; HL = делитель ВИ53 из DE?  (нет: из N) — см. ниже
+				pop     de
+				inc     de
+				ret
+"""
+# ВНИМАНИЕ: порядок регистров в play_note собирается ниже кодом, а не этой строкой (см. SND_PLAY_NOTE2)
+SND_PLAY_NOTE2 = """play_note:		; A = байт ноты (биты 0-5 нота, 6-7 множитель длительности), DE -> данные. На выходе DE+1.
+				; Ничего не ждём: кладём (делитель ВИ53, длительность в 1/256 кадра) в очередь, играет ISR.
+				and     0x3F
+				jp      z, snd_delay
+				ld      l, a
+				ld      h, 0
+				add     hl, hl
+				call    add_HL_A                                ; HL = 3*note
+				ld      bc, freq_tbl
+				add     hl, bc
+				ld      b, (hl)                                 ; N low  (счётчик полупериода)
+				inc     hl
+				ld      c, (hl)                                 ; N high (+1)
+				inc     hl
+				ld      l, (hl)                                 ; длительность (периодов), младший байт
+				ld      h, 0
+				ld      a, (de)
+				rlca
+				rlca
+				and     3
+				inc     a                                       ; множитель 1..4
+				push    de
+				ld      e, l
+				ld      d, h
+pn_mul:			dec     a
+				jp      z, pn_done
+				add     hl, de
+				jp      pn_mul
+pn_done:		ld      d, c
+				dec     d
+				ld      e, b                                    ; DE = N
+				call    vec_snd_entry                           ; HL = периодов, DE = N -> в очередь
+				pop     de
+				inc     de
+				ret
+
+snd_delay:		; пауза: (de) биты 6-7 -> 1..4 единиц по ~0x430B*24 тактов = 1506 тиков каждая
+				ld      a, (de)
+				inc     de
+				rlca
+				rlca
+				and     3
+				inc     a
+				push    de
+				ld      hl, 0
+				ld      de, 1506
+sd_mul:			add     hl, de
+				dec     a
+				jp      nz, sd_mul
+				ex      de, hl                                  ; DE = тики
+				ld      hl, 0                                   ; делитель 0 = тишина
+				call    vec_snd_push
+				pop     de
+				ret
+; End of function play_note
+
+toggle_audio_hw:	; один период с полупериодом B (сохраняет B): в очередь, без ожидания
+				push    hl
+				push    de
+				push    bc
+				ld      hl, 1
+				ld      d, 0
+				ld      e, b
+				call    vec_snd_entry
+				pop     bc
+				pop     de
+				pop     hl
+				ret
+
+toggle_audio_hw_xC:	; C периодов с полупериодом B: одна запись длительностью C периодов
+				push    hl
+				push    de
+				push    bc
+				ld      h, 0
+				ld      l, c
+				ld      d, 0
+				ld      e, b
+				call    vec_snd_entry
+				pop     bc
+				pop     de
+				pop     hl
+				ld      c, 0
+				ret
+"""
+
+SND_UNTIL_KEY = """play_audio_until_keypress:	; вся мелодия в очередь; ждать клавишу; по клавише — сбросить очередь
+				call    play_audio
+pauk_wait:		xor     a
+				call    read_port
+				jp      z, pauk_wait
+				jp      vec_snd_flush
+"""
+
+SND_TAIL = """
+; ---- ЗВУК: очередь записей (делитель ВИ53 lo,hi; длительность lo,hi в 1/256 кадра), 64 записи ----
+				ORG		0xE900
+vec_sq:			DS		256
+vec_sq_rd:		DS		1
+vec_sq_wr:		DS		1
+vec_sq_rem:		DS		2			; остаток тиков текущей записи
+vec_sq_on:		DS		1			; 1 = канал звучит
+"""
+
+SND_CODE = """
+; vec_snd_div: DE = N (итераций djnz полупериода) -> HL = делитель ВИ53 = N*11 + N/8. Портит A.
+vec_snd_div:	ld		h, d
+				ld		l, e
+				add		hl, hl
+				add		hl, hl
+				add		hl, hl				; N*8
+				add		hl, de
+				add		hl, de
+				add		hl, de				; N*11
+				push	de
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a				; N/8
+				add		hl, de
+				pop		de
+				ret
+
+; vec_snd_tick: DE = N -> A = тиков (1/256 кадра) на период = 26*N/273 ~ (N*3)>>5, не больше 255. Портит HL.
+vec_snd_tick:	ld		h, d
+				ld		l, e
+				add		hl, hl
+				add		hl, de				; N*3
+				ld		a, h
+				rra
+				ld		h, a
+				ld		a, l
+				rra
+				ld		l, a
+				ld		a, h
+				or		a
+				rra
+				ld		h, a
+				ld		a, l
+				rra
+				ld		l, a
+				ld		a, h
+				or		a
+				rra
+				ld		h, a
+				ld		a, l
+				rra
+				ld		l, a
+				ld		a, h
+				or		a
+				rra
+				ld		h, a
+				ld		a, l
+				rra
+				ld		l, a
+				ld		a, h
+				or		a
+				rra
+				ld		h, a
+				ld		a, l
+				rra
+				ld		l, a				; >>5
+				ld		a, h
+				or		a
+				ld		a, l
+				ret		z
+				ld		a, 0xFF
+				ret
+
+; vec_snd_entry: HL = периодов, DE = N -> запись (делитель(N), тики = tick(N)*HL) в очередь. Портит всё.
+vec_snd_entry:	push	hl
+				push	de
+				call	vec_snd_tick
+				pop		de
+				pop		hl
+				push	de
+				ld		b, a				; B = тиков на период (8 бит), HL = периодов (16 бит)
+				ld		de, 0				; DE = произведение
+				ld		c, 8
+se_mul:			ld		a, b
+				rlca
+				ld		b, a				; старший бит множителя -> CY
+				jp		nc, se_nb
+				ex		de, hl
+				add		hl, de
+				ex		de, hl				; DE += HL
+				jp		nc, se_nb
+				ld		de, 0xFFFF			; переполнение — насыщение
+				jp		se_done
+se_nb:			dec		c
+				jp		z, se_done
+				add		hl, hl				; HL <<= 1
+				jp		se_mul
+se_done:		pop		hl					; HL = N, DE = тики
+				ex		de, hl				; DE = N, HL = тики
+				push	hl					; тики
+				call	vec_snd_div			; DE=N -> HL = делитель
+				pop		de					; DE = тики
+				; падаем в vec_snd_push
+; vec_snd_push: HL = делитель (0 = тишина), DE = тики -> в очередь (если полна — запись теряется)
+vec_snd_push:	push	hl
+				ld		a, (vec_sq_wr)
+				add		a, 4
+				ld		c, a				; следующий wr
+				ld		a, (vec_sq_rd)
+				cp		c
+				jp		z, sp_full
+				ld		a, (vec_sq_wr)
+				pop		hl
+				push	hl
+				ld		h, high vec_sq
+				ld		l, a				; HL -> запись
+				pop		bc					; BC = делитель
+				ld		(hl), c
+				inc		l
+				ld		(hl), b
+				inc		l
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				ld		a, c
+				ld		a, (vec_sq_wr)
+				add		a, 4
+				ld		(vec_sq_wr), a
+				ret
+sp_full:		pop		hl
+				ret
+
+; vec_snd_flush: очистить очередь и заглушить канал
+vec_snd_flush:	xor		a
+				ld		(vec_sq_rd), a
+				ld		(vec_sq_wr), a
+				ld		(vec_sq_rem), a
+				ld		(vec_sq_rem+1), a
+				ld		(vec_sq_on), a
+				ld		a, 0x36
+				out		(0x08), a
+				ret
+
+; vi_snd: вызывается из ISR раз в кадр: списать 256 тиков, при исчерпании взять следующие записи
+vi_snd:			ld		hl, (vec_sq_rem)
+				ld		de, 0xFF00
+				add		hl, de				; rem -= 256; CY=1 если rem был >= 256
+				jp		nc, vs_next
+				ld		(vec_sq_rem), hl
+				ret
+vs_next:		; HL = rem - 256 (отрицательное) ; дефицит = -HL
+				ex		de, hl
+				ld		hl, 0
+				or		a
+				sbc		hl, de				; HL = дефицит (Z80: sbc hl; для i8080 см. транслятор)
+vs_pop:			ld		a, (vec_sq_rd)
+				ld		e, a
+				ld		a, (vec_sq_wr)
+				cp		e
+				jp		z, vs_empty
+				push	hl
+				ld		h, high vec_sq
+				ld		l, e
+				ld		c, (hl)
+				inc		l
+				ld		b, (hl)				; BC = делитель
+				inc		l
+				ld		e, (hl)
+				inc		l
+				ld		d, (hl)				; DE = тики записи
+				ld		a, l
+				inc		a
+				ld		(vec_sq_rd), a
+				ld		a, b
+				or		c
+				jp		z, vs_off
+				ld		a, 0x36
+				out		(0x08), a
+				ld		a, c
+				out		(0x0B), a
+				ld		a, b
+				out		(0x0B), a
+				ld		a, 1
+				ld		(vec_sq_on), a
+				jp		vs_dur
+vs_off:			ld		a, (vec_sq_on)
+				or		a
+				jp		z, vs_dur
+				xor		a
+				ld		(vec_sq_on), a
+				ld		a, 0x36
+				out		(0x08), a
+vs_dur:			pop		hl					; HL = дефицит
+				ex		de, hl				; DE = дефицит, HL = тики записи
+				or		a
+				sbc		hl, de				; rem = тики - дефицит
+				jp		nc, vs_store		; хватило: остаток положительный
+				ex		de, hl
+				ld		hl, 0
+				or		a
+				sbc		hl, de				; дефицит = -(rem)
+				jp		vs_pop
+vs_store:		ld		(vec_sq_rem), hl
+				ret
+vs_empty:		ld		hl, 0
+				ld		(vec_sq_rem), hl
+				ld		a, (vec_sq_on)
+				or		a
+				ret		z
+				xor		a
+				ld		(vec_sq_on), a
+				ld		a, 0x36
+				out		(0x08), a
+				ret
+"""
+
+
+def kl_sound_async(src):
+    """Звук в очередь: play_note/snd_delay/toggle_audio_hw/_xC не ждут; ISR разбирает записи по кадрам."""
+    src, n = re.subn(r'play_note:\n.*?; End of function play_note\r?\n', SND_PLAY_NOTE2, src, count=1, flags=re.S)
+    assert n == 1, "play_note"
+    src, n = re.subn(r'toggle_audio_hw:\n.*?; End of function toggle_audio_hw\r?\n', '', src, count=1, flags=re.S)
+    assert n == 1, "toggle_audio_hw"
+    old = "toggle_audio_hw_xC:\n\t\t\t\tcall    toggle_audio_hw\n\t\t\t\tdec     c\n\t\t\t\tjr      NZ, toggle_audio_hw_xC\n\t\t\t\tret\n"
+    assert old in src, "toggle_audio_hw_xC"
+    src = src.replace(old, "", 1)
+    src = src.replace("jr      toggle_audio_hw_xC", "jp      toggle_audio_hw_xC")   # xC теперь далеко (в хвосте)
+    src, n = re.subn(r'play_audio_until_keypress:\n.*?; End of function play_audio_until_keypress\r?\n', SND_UNTIL_KEY, src, count=1, flags=re.S)
+    assert n == 1, "until_keypress"
+    # экран ZX сдвигаем на страницу: 0xCD00 занимает очередь звука
+    src = src.replace("\t\t\t\tORG 0xCD00\nzx_vram:", "\t\t\t\tORG 0xCE00\nzx_vram:", 1)
+    src = src.replace("\t\t\t\tORG 0xE500\nzx_aram:", "\t\t\t\tORG 0xE600\nzx_aram:", 1)
+    return src
+
 # ============================ Vector glue (общая для z80vec и vec) ============================
 VEC_HEADER = """
 ; ---- Вектор-06Ц: загрузчик (.r0m с 0x0000, PC=0). Всё в подмножестве i8080. ----
@@ -850,6 +1241,7 @@ vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы),
 				out		(0x02), a			; бордюр чёрный, режим 256
 				ld		a, 0xFF
 				out		(0x03), a			; скролл
+				call	vec_snd_flush			; очередь звука пуста, канал молчит
 				ld		a, 1
 				ld		(vec_palreq), a
 				ei						; палитру защёлкивает цвет под лучом -> ISR грузит её в VBlank; прерывания остаются ВКЛ
@@ -900,6 +1292,7 @@ vb_w:			out		(0x0C), a
 				out		(0x02), a			; бордюр чёрный
 				ld		(vec_palreq), a
 vi_kbd:			call	vec_scan
+				call	vi_snd
 				pop		hl
 				pop		de
 				pop		bc
@@ -970,51 +1363,8 @@ vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4
 				DB	vec_kbmat+0,0x04, vec_kbmat+5,0x10, vec_kbmat+5,0x08, vec_kbmat+5,0x04, vec_kbmat+5,0x01	; ENTER L K J H
 				DB	vec_kbmat+7,0x80, vec_kbmat+7,0x10, vec_kbmat+5,0x20, vec_kbmat+5,0x40, vec_kbmat+4,0x04	; SPACE SYM(\\) M N B
 
-; ---- звук: ВИ53 канал A (порт 0x0B, управление 0x08). HL = число итераций djnz полупериода ----
-; период ZX = 2*13*N тактов @3.5 МГц -> делитель ВИ53 @1.5 МГц = N*26*1.5/3.5 = 11.14*N ~ N*11 + N/8
-vec_snd_set:	push	de
-				push	hl
-				add		hl, hl
-				add		hl, hl
-				add		hl, hl				; N*8
-				pop		de					; DE = N
-				add		hl, de
-				add		hl, de
-				add		hl, de				; N*11
-				ld		a, d
-				or		a
-				rra
-				ld		d, a
-				ld		a, e
-				rra
-				ld		e, a
-				ld		a, d
-				or		a
-				rra
-				ld		d, a
-				ld		a, e
-				rra
-				ld		e, a
-				ld		a, d
-				or		a
-				rra
-				ld		d, a
-				ld		a, e
-				rra
-				ld		e, a				; N/8
-				add		hl, de
-				ld		a, 0x36				; канал A, LSB+MSB, режим 3 (меандр)
-				out		(0x08), a
-				ld		a, l
-				out		(0x0B), a
-				ld		a, h
-				out		(0x0B), a
-				pop		de
-				ret
-vec_snd_off:	ld		a, 0x36				; управляющее слово без счётчика = тишина
-				out		(0x08), a
-				ret
 """
+
 
 VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале
 				push	hl
@@ -1114,8 +1464,15 @@ vidbuf_calc_addr_in_hl:	; BC = Y,X -> HL = адрес в буфере (BC сох
 				ld		l, a
 				ret
 
-; DE = экран, HL = буфер, B = высота (строк), C = ширина (байт). Столбцы сплошные.
+; DE = экран, HL = буфер, B = высота (строк), C = ширина (байт). Столбцы сплошные. Нулевой размер — выход
+; (иначе 256 столбцов затирают всю память: объекты у края комнаты дают ширину 0).
 blit_to_screen:
+				inc		b
+				dec		b
+				ret		z
+				inc		c
+				dec		c
+				ret		z
 bts_col:		push	bc
 				push	hl
 				push	de
@@ -1130,21 +1487,34 @@ bts_row:		ld		a, (hl)
 				pop		bc
 				inc		h
 				inc		d
+				ld		a, d
+				cp		0xA0				; за столбцом 31 — стоп (иначе пишем в буфер)
+				ret		z
 				dec		c
 				jp		nz, bts_col
 				ret
 
-; HL = буфер, B = высота, C = ширина (байт), A = значение
+; HL = буфер, B = высота, C = ширина (байт), A = значение. Нулевой размер — выход (A сохраняется).
 vidbuf_fill_window:
+				inc		b
+				dec		b
+				ret		z
+				inc		c
+				dec		c
+				ret		z
+				ld		d, a
 vfw_col:		push	hl
 				push	bc
-vfw_row:		ld		(hl), a
+vfw_row:		ld		(hl), d
 				inc		l
 				dec		b
 				jp		nz, vfw_row
 				pop		bc
 				pop		hl
 				inc		h
+				ld		a, h
+				cp		high vidbuf + 32			; за столбцом 31 — стоп
+				ret		z
 				dec		c
 				jp		nz, vfw_col
 				ret
@@ -1191,8 +1561,12 @@ def kl_vec_glue(src, translate_later):
     # таблицы 0xBE00/0xBF00, "экран ZX" 0xCD00 (только атрибуты как мусорное ОЗУ)
     src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
     src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xE500\nzx_aram:", 1)
-    # переменные с 0xA100: игра делает `ld sp,seed_1` — стек под seed_1 должен быть в НЕВИДИМОЙ плоскости (0xA0xx), не в 0x9Fxx
-    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC000\nclear_start:', src, count=1, flags=re.M)
+    # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
+    # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
+    # Переменные с 0xC800.
+    # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
+    # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
+    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC800\nclear_start:', src, count=1, flags=re.M)
     src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
     # vidbuf — отдельный сегмент; START и build_lookup_tbls (в оригинале лежат ВНУТРИ буфера и
     # затираются им) выносим на 0x7A00 (код кончается ~0x78B1, стек растёт вниз от 0x8000)
@@ -1253,31 +1627,12 @@ def kl_vec_glue(src, translate_later):
     # бордюр ZX (ULA) — убрать
     src = src.replace("\t\t\t\txor     a                                       ; border colour BLACK, activate MIC\n\t\t\t\tout     (0xFE), a                               ; ULA\n",
                       "\t\t\t\txor     a\n", 1)
-    # звук: play_note (loc_B300) — меандр ВИ53 вместо переключений EAR
-    old = "loc_B2FF:\n\t\t\t\tpop     de\n\nloc_B300:\n\t\t\t\tpush    bc\n\t\t\t\txor     a\n\t\t\t\tout     (0xFE), a\n"
-    assert old in src, "play_note out1"
-    src = src.replace(old, "loc_B2FF:\n\t\t\t\tpop     de\n\t\t\t\tpush    hl\n\t\t\t\tld      h, c\t\t\t\t; N = (C-1)*256 + B  (B=0 -> 256)\n\t\t\t\tdec     h\n\t\t\t\tld      l, b\n\t\t\t\tcall    vec_snd_set\n\t\t\t\tpop     hl\n\nloc_B300:\n\t\t\t\tpush    bc\n\t\t\t\txor     a\n", 1)
-    old = "\t\t\t\tpush    bc\n\t\t\t\tld      a, 0x10\n\t\t\t\tout     (0xFE), a\n\nloc_B30F:"
-    assert old in src, "play_note out2"
-    src = src.replace(old, "\t\t\t\tpush    bc\n\t\t\t\tld      a, 0x10\n\nloc_B30F:", 1)
-    old = "\t\t\t\tjr      NZ, loc_B300\n\t\t\t\tinc     de\n\t\t\t\tret\n"
-    assert old in src, "play_note end"
-    src = src.replace(old, "\t\t\t\tjr      NZ, loc_B300\n\t\t\t\tcall    vec_snd_off\n\t\t\t\tinc     de\n\t\t\t\tret\n", 1)
-    # toggle_audio_hw: один период с полупериодом B
-    old = "toggle_audio_hw:\n\t\t\t\tld      a, 0x10                                ; EAR output\n\t\t\t\tout     (0xFE), a                               ; enable\n\t\t\t\tld      a, b\n"
-    assert old in src, "toggle_audio_hw"
-    src = src.replace(old, "toggle_audio_hw:\n\t\t\t\tpush    hl\n\t\t\t\tld      l, b\n\t\t\t\tld      h, 0\n\t\t\t\tcall    vec_snd_set\n\t\t\t\tpop     hl\n\t\t\t\tld      a, b\n", 1)
-    old = "\t\t\t\tld      b, a\n\t\t\t\txor     a                                       ; MIC output\n\t\t\t\tout     (0xFE), a                               ; enable (disable EAR)\n\t\t\t\tld      a, b\n"
-    assert old in src, "toggle_audio_hw 2"
-    src = src.replace(old, "\t\t\t\tld      b, a\n\t\t\t\tld      a, b\n", 1)
-    i = src.index("toggle_audio_hw:")
-    j = src.index("\t\t\t\tld      b, a\n\t\t\t\tret\n", i)
-    src = src[:j] + "\t\t\t\tld      b, a\n\t\t\t\tcall    vec_snd_off\n\t\t\t\tret\n" + src[j + len("\t\t\t\tld      b, a\n\t\t\t\tret\n"):]
+    src = kl_sound_async(src)
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
     # заголовок (и наши экранные процедуры) — ПОСЛЕ удаления старых, иначе регулярки цепляют новые
     src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + VEC_HEADER + "\n", 1)
-    src = re.sub(r'^(\s*SAVESNA)', VEC_TAIL.replace("\\", "\\\\") + VEC_SCREEN.replace("\\", "\\\\") + r"\n\g<1>", src, count=1, flags=re.M)
+    src = re.sub(r'^(\s*SAVESNA)', VEC_TAIL.replace("\\", "\\\\") + VEC_SCREEN.replace("\\", "\\\\") + SND_CODE.replace("\\", "\\\\") + SND_TAIL.replace("\\", "\\\\") + r"\n\g<1>", src, count=1, flags=re.M)
     return src
 
 
