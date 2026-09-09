@@ -703,7 +703,10 @@ il_tmp2:		DS		2
 il_a:			DS		2
 il_outstub:		DS		3
 kl_seed:		DS		1			; seed_1 при старте (у ZX — FRAMES 0x5C78); стенд задаёт
-				ORG		0x0060
+kl_ball_cc:		DS		1			; мяч: 0x30=jr nc / 0x38=jr c (в оригинале самомод. опкод)
+kl_blk_off:		DS		2			; блок: +0 смещение dX/dY (9/10), +1 смещение X/Y (1/2)
+kl_rnd_feed:	DS		1			; lockstep: байт mem[seed_2] из журнала ZX
+				ORG		0x0080			; хелперы ldir (scratch выше кончается на 0x61 — не пересекать!)
 """
 KL_READ_PORT = """read_port:		; A = маска рядов (бит i=0 -> ряд i опрошен). Вместо ULA: AND выбранных рядов vkbd,
 				; затем cpl/and 0x1F как в оригинале. Портит только A и флаги (как оригинал).
@@ -745,6 +748,56 @@ def kl_glue(src, target):
     n0 = src.count('\n')
     # заголовок после DEVICE
     src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER + _LDIR_HELPERS + "\n", 1)
+    # --- самомодифицирующийся код ЛОГИКИ (3 сайта) -> переменные ---
+    # 1) upd_182_183 (мяч): опкод jr nc/jr c писался в loc_B65D и loc_B676
+    old = "\t\t\t\tld      (loc_B65D), a\n\t\t\t\tld      (loc_B676), a                           ; self-modifying code\n"
+    assert old in src, "ball self-mod"
+    src = src.replace(old, "\t\t\t\tld      (kl_ball_cc), a                         ; KL: условие перехода в переменной\n", 1)
+    for lbl, tgt in (("loc_B65D", "loc_B661"), ("loc_B676", "loc_B67A")):
+        i = src.index(lbl + ":"); j = src.index("\n", i) + 1
+        line = src[j:src.index("\n", j)]
+        assert "jr      NC, " + tgt in line, line
+        new = ("\t\t\t\tpush    af\n\t\t\t\tld      a, (kl_ball_cc)\n\t\t\t\tcp      0x38\n\t\t\t\tjp      z, kl_%s_c\n"
+               "\t\t\t\tpop     af\n\t\t\t\tjp      nc, %s\n\t\t\t\tjp      kl_%s_n\n"
+               "kl_%s_c:\t\tpop     af\n\t\t\t\tjp      c, %s\nkl_%s_n:") % (lbl, tgt, lbl, lbl, tgt, lbl)
+        src = src[:j] + new + src[j + len(line):]
+    # 2) upd_54/55 (блоки): смещения (ix+d) патчились в код
+    old = "\t\t\t\tld      a, h\n\t\t\t\tld      (loc_B6DE+2), a                         ; IX+2/1\n\t\t\t\tld      a, l\n\t\t\t\tld      (loc_B6EF+2), a                         ; IX+10/9\n"
+    assert old in src, "block self-mod"
+    src = src.replace(old, "\t\t\t\tld      (kl_blk_off), hl                        ; KL: смещения в переменной\n", 1)
+    i = src.index("loc_B6DE:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
+    assert "ld      a, (ix+1)" in line, line
+    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off+1)\n"
+                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tld      a, (hl)\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
+    i = src.index("loc_B6EF:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
+    assert "ld      (ix+9), a" in line, line
+    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tpush    af\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off)\n"
+                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tpop     af\n\t\t\t\tld      (hl), a\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
+    # 3) flag_room_visited: SET n,(HL) как данные (CB-префикс) -> маска через сдвиг
+    src, n_frv = re.subn(r'flag_room_visited:.*?\n\t+ret\n',
+        "flag_room_visited:\t\t\t\t; KL: переписано без самомодификации (i8080)\n"
+        "\t\t\t\tld      a, (graphic_objs_tbl+8)\n\t\t\t\tld      c, a\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\tand     0x1F\n"
+        "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tld      hl, scrn_visited\n\t\t\t\tadd     hl, de\n"
+        "\t\t\t\tld      a, c\n\t\t\t\tand     7\n\t\t\t\tld      b, a\n\t\t\t\tld      a, 1\n\t\t\t\tinc     b\n"
+        "kl_frv_m:\t\tdec     b\n\t\t\t\tjp      z, kl_frv_d\n\t\t\t\trlca\n\t\t\t\tjp      kl_frv_m\n"
+        "kl_frv_d:\t\tor      (hl)\n\t\t\t\tld      (hl), a\n\t\t\t\tret\n", src, count=1, flags=re.S)
+    assert n_frv == 1
+    # loc_B000: seed_3 += mem[seed_2] + L + H, где HL = ЗНАЧЕНИЕ seed_2 (0x5678+N) — игра читает
+    # байт памяти по адресу-счётчику (на ZX это экранный битмап!). Зависит от раскладки и от
+    # рендера => в цели lockstep байт подаёт стенд через kl_rnd_feed (вычисляется из журнала ZX).
+    old = "\t\t\t\tld      a, (seed_3)\n\t\t\t\tadd     a, (hl)\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n"
+    assert src.count(old) == 1, "seed_3 mem-mix"
+    if target == 'lockstep':
+        src = src.replace(old, "\t\t\t\tld      a, (seed_3)\n\t\t\t\tpush    hl\n\t\t\t\tld      hl, kl_rnd_feed\t\t; KL(lockstep): байт mem[seed_2] подаёт стенд\n\t\t\t\tadd     a, (hl)\n\t\t\t\tpop     hl\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n", 1)
+    # render_dynamic_objects/.copy_loop: оригинал (0xD666) ДЕКРЕМЕНТИРУЕТ objs_wiped_cnt в памяти на
+    # каждом копировании (в конце = 0); jonsole считает в AF' и память не трогает -> журнал расходится.
+    # Восстанавливаем семантику оригинала.
+    src, n_cl = re.subn(r'\t+ld\s+a,\s*\(hl\)\r?\n\t+and\s+a\r?\n\t+jr\s+z,\s*loc_D679\r?\n\s*\.copy_loop:.*?jr\s+nz,\s*\.copy_loop\r?\n',
+        "kl_copy_loop:\t\tld      hl, objs_wiped_cnt\t\t; KL: как в оригинале 0xD666 — счётчик в памяти\n"
+        "\t\t\t\tld      a, (hl)\n\t\t\t\tand     a\n\t\t\t\tjp      z, loc_D679\n\t\t\t\tdec     (hl)\n"
+        "\t\t\t\tpop     bc\n\t\t\t\tpop     hl\n\t\t\t\tpop     de\n\t\t\t\tcall    blit_to_screen\n\t\t\t\tjp      kl_copy_loop\n",
+        src, count=1, flags=re.S)
+    assert n_cl == 1, "copy_loop"
     # read_port -> виртуальная клавиатура
     src = re.sub(r'read_port:\n.*?; End of function read_port', KL_READ_PORT, src, count=1, flags=re.S)
     if target == 'lockstep':
@@ -756,6 +809,12 @@ def kl_glue(src, target):
         src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xF600\nzx_aram:", 1)
         src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC000\nclear_start:', src, count=1, flags=re.M)
         src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
+        # `font` в оригинале лежит сразу за таблицей объектов и служит ограничителем «конец
+        # таблицы» (3 сайта); после ORG 0x0100 он ниже таблицы -> заменяем на clear_end.
+        n_end = src.count("ld      bc, font")
+        src = src.replace("ld      bc, font", "ld      bc, clear_end")
+        src = src.replace("ld      hl, font\n\t\t\t\tand     a", "ld      hl, clear_end\n\t\t\t\tand     a", 1)
+        assert n_end == 2, n_end
         src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xC600\nvidbuf:', src, count=1, flags=re.M)
         src = re.sub(r'^\t+ORG\s+0xF100\nreverse_bits_table:\n\t+DS\t+0x100\nshift_bits_table:\n\t+DS\t+0xE00',
                      '\t\t\t\tORG 0xF900\nreverse_bits_table:\n\t\t\t\tDS\t\t0x100\nshift_bits_table:\tequ 0xDE00\t; alias zx_vram (без читателей)', src, count=1, flags=re.M)
