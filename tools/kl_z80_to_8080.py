@@ -1042,6 +1042,8 @@ pn_mul:			dec     a
 pn_done:		ld      d, c
 				dec     d
 				ld      e, b                                    ; DE = N
+				ld      a, 48
+				ld      (vec_snd_k), a                          ; накладные петли play_note
 				call    vec_snd_entry                           ; HL = периодов, DE = N -> в очередь
 				pop     de
 				inc     de
@@ -1074,6 +1076,8 @@ toggle_audio_hw:	; один период с полупериодом B (сохр
 				ld      hl, 1
 				ld      d, 0
 				ld      e, b
+				ld      a, 35
+				ld      (vec_snd_k), a                          ; накладные toggle_audio_hw (26B+82 T)
 				call    vec_snd_entry
 				pop     bc
 				pop     de
@@ -1088,6 +1092,8 @@ toggle_audio_hw_xC:	; C периодов с полупериодом B: одна
 				ld      l, c
 				ld      d, 0
 				ld      e, b
+				ld      a, 35
+				ld      (vec_snd_k), a
 				call    vec_snd_entry
 				pop     bc
 				pop     de
@@ -1096,12 +1102,25 @@ toggle_audio_hw_xC:	; C периодов с полупериодом B: одна
 				ret
 """
 
-SND_UNTIL_KEY = """play_audio_until_keypress:	; вся мелодия в очередь; ждать клавишу; по клавише — сбросить очередь
-				call    play_audio
-pauk_wait:		xor     a
+SND_UNTIL_KEY = """play_audio_until_keypress:	; как ZX: между нотами опрос клавиш; нота — в очередь, когда есть место;
+				; конец данных — ждать, пока очередь доиграет (или клавишу); клавиша — сброс очереди
+pauk_loop:		xor     a
 				call    read_port
-				jp      z, pauk_wait
-				jp      vec_snd_flush
+				jp      nz, vec_snd_flush                       ; клавиша: прервать мелодию
+				ld      a, (de)
+				cp      0xFF
+				jp      z, pauk_end
+				call    vec_snd_room
+				jp      z, pauk_loop                            ; очередь полна: подождать
+				ld      a, (de)                                 ; (vec_snd_room портит A)
+				call    play_note
+				jp      pauk_loop
+pauk_end:		xor     a
+				call    read_port
+				jp      nz, vec_snd_flush
+				call    vec_snd_idle
+				jp      nz, pauk_end
+				ret
 """
 
 SND_TAIL = """
@@ -1115,7 +1134,7 @@ vec_sq_on:		DS		1			; 1 = канал звучит
 """
 
 SND_CODE = """
-; vec_snd_div: DE = N (итераций djnz полупериода) -> HL = делитель ВИ53 = N*11 + N/8. Портит A.
+; vec_snd_div: DE = N (итераций djnz полупериода) -> HL = делитель ВИ53 = N*11 + N/8 + N/16 + vec_snd_k. Портит A.
 vec_snd_div:	ld		h, d
 				ld		l, e
 				add		hl, hl
@@ -1147,6 +1166,18 @@ vec_snd_div:	ld		h, d
 				rra
 				ld		e, a				; N/8
 				add		hl, de
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a				; N/16
+				add		hl, de				; 11.1875N (ZX: 26.09N тактов * 3/7)
+				ld		a, (vec_snd_k)
+				ld		e, a
+				ld		d, 0
+				add		hl, de				; + накладные такты петли (МНК по журналу ZX: +111 T = 48 делителя; toggle: 82 T = 35)
 				pop		de
 				ret
 
@@ -1207,8 +1238,8 @@ vec_snd_entry:	push	hl
 				ld		de, 0				; DE = произведение
 				ld		c, 8
 se_mul:			ld		a, b
-				rlca
-				ld		b, a				; старший бит множителя -> CY
+				rrca
+				ld		b, a				; младший бит множителя -> CY (HL удваивается на каждом шаге; rlca давало зеркальный множитель)
 				jp		nc, se_nb
 				ex		de, hl
 				add		hl, de
@@ -1253,6 +1284,28 @@ vec_snd_push:	push	hl
 				ld		(vec_sq_wr), a
 				ret
 sp_full:		pop		hl
+				ret
+
+; vec_snd_room: Z = очередь полна (нет места для записи). Портит A, флаги.
+vec_snd_room:	push	hl
+				ld		a, (vec_sq_wr)
+				add		a, 4
+				ld		l, a
+				ld		a, (vec_sq_rd)
+				cp		l
+				pop		hl
+				ret
+
+; vec_snd_idle: Z = очередь пуста и канал молчит. Портит A, флаги.
+vec_snd_idle:	push	hl
+				ld		a, (vec_sq_rd)
+				ld		l, a
+				ld		a, (vec_sq_wr)
+				sub		l
+				ld		l, a
+				ld		a, (vec_sq_on)
+				or		l
+				pop		hl
 				ret
 
 ; vec_snd_flush: очистить очередь и заглушить канал
@@ -1346,6 +1399,9 @@ def kl_sound_async(src):
     assert n == 1, "play_note"
     src, n = re.subn(r'toggle_audio_hw:\n.*?; End of function toggle_audio_hw\r?\n', '', src, count=1, flags=re.S)
     assert n == 1, "toggle_audio_hw"
+    old_pa = "play_audio:\n\t\t\t\tld      a, (de)                                 ; audio data byte\n\t\t\t\tcp      0xFF                                   ; done?\n\t\t\t\tjr      Z, end_audio                            ; yes, return\n"
+    assert old_pa in src, "play_audio"
+    src = src.replace(old_pa, old_pa + "\t\t\t\tcall    vec_snd_room\n\t\t\t\tjr      Z, play_audio                           ; очередь полна: ждать место (ISR разгружает)\n\t\t\t\tld      a, (de)                                 ; (vec_snd_room портит A)\n", 1)
     old = "toggle_audio_hw_xC:\n\t\t\t\tcall    toggle_audio_hw\n\t\t\t\tdec     c\n\t\t\t\tjr      NZ, toggle_audio_hw_xC\n\t\t\t\tret\n"
     assert old in src, "toggle_audio_hw_xC"
     src = src.replace(old, "", 1)
@@ -1386,6 +1442,7 @@ VEC_HEADER = """
 vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active-high (ряд 0..7)
 vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
+vec_snd_k:		DS		1			; звук: константа делителя (накладные такты петли ZX): play_note 48, toggle 35
 				ORG		0x0060
 vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
 				out		(0x00), a
@@ -1677,6 +1734,50 @@ vidbuf_clear_window:
 				xor		a
 				jp		vidbuf_fill_window
 
+; vec_sun_save/restore: столбцы 22, 29, 30 буфера, строки 0..30 (HUD) <-> vec_suntmp (93 байта в защитной зоне)
+vec_sun_save:	ld		hl, vidbuf+22*256+32
+				ld		de, vec_suntmp
+				ld		b, 1
+				call	vsv_cols
+				ld		hl, vidbuf+29*256+32
+				ld		b, 2
+vsv_cols:		push	bc
+				ld		b, 31
+vsv_r:			ld		a, (hl)
+				ld		(de), a
+				inc		l
+				inc		de
+				dec		b
+				jp		nz, vsv_r
+				pop		bc
+				ld		l, 32
+				inc		h
+				dec		b
+				jp		nz, vsv_cols
+				ret
+vec_sun_restore:
+				ld		hl, vidbuf+22*256+32
+				ld		de, vec_suntmp
+				ld		b, 1
+				call	vsr_cols
+				ld		hl, vidbuf+29*256+32
+				ld		b, 2
+vsr_cols:		push	bc
+				ld		b, 31
+vsr_r:			ld		a, (de)
+				ld		(hl), a
+				inc		l
+				inc		de
+				dec		b
+				jp		nz, vsr_r
+				pop		bc
+				ld		l, 32
+				inc		h
+				dec		b
+				jp		nz, vsr_cols
+				ret
+vec_suntmp:		equ		0xC700			; защитная зона за буфером: 93 байта временно
+
 update_screen:	; весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0, буфер обнуляется (как оригинал 0xD57D)
 				ld		hl, vidbuf+0x20
 				ld		de, 0x8020
@@ -1774,6 +1875,11 @@ def kl_vec_glue(src, translate_later):
     assert n_cb == 1, "clr_bitmap"
     assert "ld      de, zx_vram+0x17F7" in src
     src = src.replace("ld      de, zx_vram+0x17F7", "ld      de, 0x9720\t\t\t\t; Вектор: (184,0) = столбец 23, lo 32", 1)
+    # солнце/луна рисуется с X=176..225: байты вне окна рамки (столбцы 22, 29, 30) остаются в буфере и всплывают
+    # при update_screen (на ZX их прятал атрибут чернила=фон). Сохраняем эти столбцы до печати и возвращаем после.
+    old_sun = "\t\t\t\tcall    print_sprite                            ; display sun/moon\n"
+    assert src.count(old_sun) == 1, "sun print"
+    src = src.replace(old_sun, "\t\t\t\tcall    vec_sun_save\n" + old_sun + "\t\t\t\tcall    vec_sun_restore\n", 1)
     assert "ld      hl, 0x5800\n" in src
     src = src.replace("ld      hl, 0x5800\n", "ld      hl, zx_aram\n", 1)
     # бордюр ZX (ULA) — убрать
