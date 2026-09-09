@@ -80,7 +80,6 @@ msx_si:			DS		1			; текущий слот эффекта 0..2
 msx_ci:			DS		1			; текущий канал мелодии 0..2 (0 -> AY C, 1 -> B, 2 -> A)
 msx_rem:		DS		1			; сколько «проходов» MSX осталось отмотать в этом кадре
 msx_play:		DS		1			; 1 = мелодия играет
-msx_key:		DS		1			; 1 = мелодию можно прервать клавишей
 msx_end:		DS		1			; 1 = в потоке встретилась команда END
 msx_sfx:		DS		12			; 3 слота по 4 байта: id, тиков, параметр_hi, параметр_lo
 msx_ch:			DS		21			; 3 канала по 7: ptr(2), dur(2), режим громкости(1), начало потока(2)
@@ -136,8 +135,8 @@ msx_silence:	ld		hl, msx_stop
 				jp		msx_wlist
 
 ; ---------------------------------------------------------------- мелодии
-msx_play_tune:	; HL = заголовок мелодии (3 слова), A = 1 «прерывать клавишей»
-				ld		(msx_key), a
+msx_play_tune:	; HL = заголовок мелодии (3 слова). Флага «прерывать клавишей» (MSX 0xD830) нет:
+				; клавишу опрашивает обёртка play_audio_until_keypress, а не сам проигрыватель.
 				xor		a
 				ld		(msx_end), a
 				ld		(msx_play), a		; на время заливки — «не играет» (ISR не влезет)
@@ -668,44 +667,50 @@ msx_frame_off:	; конец игрового кадра: полное глуше
 #  Точки входа, которые видит игровой код (имена ZX сохранены — сайты вызова не трогаем)
 # ---------------------------------------------------------------------------
 GAME_HOOKS = """
-; ---- звук из игрового кода: имена ZX сохранены, внутри — эффекты и мелодии MSX ----
-; Соответствие установлено по вызывателям (SOUND.md §3.6) и по формулам параметров:
-; MSX-эффект 7 берёт период из ~((ix+1)+(ix+2)+(ix+3)) — это ZX audio_B467;
-; MSX-эффект 4 — из ~(ix+3), это ZX audio_B451; MSX-эффект 3 (шаги) считает громкость
-; из координат игрока ровно как ZX loc_B4D1.
+; ---- звук из игрового кода: имена процедур ZX сохранены, внутри — эффекты и мелодии MSX ----
+; Соответствие «вызыватель ZX -> эффект MSX» установлено сверкой кода перед каждым из 22
+; вызовов звука в блоке A MSX (blockA_4000.lst) с тем же местом ZX-исходника; три опорных
+; совпадения формул: MSX-эффект 7 берёт период из ~((ix+1)+(ix+2)+(ix+3)) — это ZX audio_B467;
+; MSX-эффект 4 — из ~(ix+3), это ZX audio_B451; MSX-эффект 3 (шаги) считает громкость из
+; координат игрока ровно как ZX loc_B4D1.
+; Где у MSX звука нет, стоит ret — список расхождений в docs/PORT_RECIPE.md §11.
 
-audio_B3E9:		; ZX «death sparkles» -> MSX эффект 1 (шум с затуханием, слот 0/канал A)
-				ld		a, 1
-				ld		b, 31
-				ld		c, 0
-				ld		de, 0
-				jp		msx_sfx_start
+audio_B3E9:		; ZX: толкаемый блок (upd_62). На MSX в этом месте звука нет.
+				ret
+audio_B403:		; ZX: вспышка котла / распад объекта. На MSX звука нет.
+				ret
+audio_B419:		; ZX: «искры появления» игрока. На MSX звука нет.
+				ret
+audio_B454:		; ZX: общая покадровая проверка «поднимается блок». На MSX звука нет.
+				ret
+audio_B489:		; ZX: решётка ударилась о пол. На MSX в этой ветке вызова звука нет.
+				ret
+toggle_audio_hw_x16:	; ZX: подтверждение подбора предмета и «получена жизнь». На MSX звука нет.
+				ret
 
-audio_B403:		; ZX «player appears sparkles» -> MSX эффект 5 (слот 1/канал B)
-				ld		a, 5
-				ld		b, 31
-				ld		c, 1
-				ld		de, 0
-				jp		msx_sfx_start
-
-audio_B419:		; ZX «ball bouncing around» -> MSX эффект 6 (слот 2/канал C, пила)
-				ld		a, 6
-				ld		b, 31
-				ld		c, 2
-				ld		de, 0
-				jp		msx_sfx_start
-
-audio_B42E:		; ZX «jumping» -> MSX эффект 2 (слот 0/канал A, нисходящий чирп)
+audio_B42E:		; шар/огонь сменил направление (MSX 0x4A07, 0x4C44, 0x4C9C) -> эффект 2, слот 0 / канал A
 				ld		a, 2
 				ld		b, 15
 				ld		c, 0
 				ld		de, 0
 				jp		msx_sfx_start
 
-audio_B441:		; ZX «dropping block / ball up-down» -> MSX эффект 6
-				jp		audio_B419
+audio_B441:		; прыжок игрока (MSX 0x5D8A) -> эффект 5, слот 1 / канал B
+				ld		a, 5
+				ld		b, 31
+				ld		c, 1
+				ld		de, 0
+				jp		msx_sfx_start
 
-audio_B451:		; ZX «rising blocks»: период из Z объекта -> MSX эффект 4 (слот 1/канал B)
+audio_B472:		; превращение человек/волк (MSX 0x5756) -> эффект 6, слот 2 / канал C
+				ld		a, 6
+				ld		b, 31
+				ld		c, 2
+				ld		de, 0
+				jp		msx_sfx_start
+
+audio_B451:		; падающий блок/шипастый шар долетел до пола (MSX 0x4A7B, 0x4BE3)
+				; -> эффект 4, слот 1 / канал B, период = ~(ix+3)
 				ld		a, (ix+3)
 				cpl
 				ld		e, a
@@ -715,24 +720,9 @@ audio_B451:		; ZX «rising blocks»: период из Z объекта -> MSX �
 				ld		c, 1
 				jp		msx_sfx_start
 
-audio_B454:		; хвост ZX (A = координата): на MSX отдельного эффекта нет — берём эффект 4
-				cpl
-				ld		e, a
-				ld		d, 0
-				ld		a, 4
-				ld		b, 31
-				ld		c, 1
-				jp		msx_sfx_start
-
-audio_B45D:		; ZX «block/fire moving (EW)»: X объекта
-				ld		a, (ix+1)
-				jp		audio_B454
-
-audio_B462:		; ZX «fire/block moving (NS)»: Y объекта
-				ld		a, (ix+2)
-				jp		audio_B454
-
-audio_B467:		; ZX «special objects, ghost, portcullis (up)» -> MSX эффект 7 (слот 1/канал B)
+audio_B467:		; спецобъект/привидение/решётка вверх, огонь и блоки в движении
+				; (MSX 0x5632, 0x5A11, 0x5B14, 0x4C0E, 0x4C30, 0x4A93, 0x4AC8, 0x4C86, 0x58C7)
+				; -> эффект 7, слот 1 / канал B, период = ~((ix+1)+(ix+2)+(ix+3))
 				ld		a, (ix+1)
 				add		a, (ix+2)
 				add		a, (ix+3)
@@ -743,26 +733,27 @@ audio_B467:		; ZX «special objects, ghost, portcullis (up)» -> MSX эффек�
 				ld		b, 7
 				ld		c, 1
 				jp		msx_sfx_start
+audio_B45D:		jp		audio_B467		; ZX брал X объекта, MSX — сумму координат (одна точка входа 0x446F)
+audio_B462:		jp		audio_B467		; то же для Y
 
-audio_B472:		; ZX «human/wulf transform» -> MSX эффект 5 (слот 1/канал B)
-				jp		audio_B403
+audio_msx_noise:	; приземление игрока (MSX 0x5A84, прямой вызов 0x4340) -> эффект 1, шум, слот 0 / канал A
+				ld		a, 1
+				ld		b, 31
+				ld		c, 0
+				ld		de, 0
+				jp		msx_sfx_start
 
-audio_B489:		; ZX «portcullis» -> MSX эффект 1 (шум)
-				jp		audio_B3E9
+audio_msx_blip:	; смена настройки в меню и пауза (MSX 0x517A, 0x68C6, 0x68DE) -> мелодия blip 0x46C2
+				ld		de, msx_hdr_blip
+				jp		play_audio
+toggle_audio_hw_x24:	jp		audio_msx_blip
 
-toggle_audio_hw_x16:	; ZX короткий писк (подбор/сброс предмета, upd_103) -> MSX эффект 2
-				jp		audio_B42E
-
-toggle_audio_hw_x24:	; ZX писк паузы/смены пункта меню -> MSX мелодия blip (0x46C2)
-				ld		hl, msx_hdr_blip
-				xor		a
-				jp		msx_play_tune
-
-audio_guard_wizard:		; ZX шаги стража/колдуна: только по чётному кадру анимации
+audio_guard_wizard:		; шаги охранника/колдуна: только по чётному кадру анимации (звук сверх MSX —
+				; там оба вызова эффекта 3 достались игроку, см. §11)
 				ld		a, (ix+0)
 				and		1
 				ret		nz
-audio_B4C1:		; ZX шаги -> MSX эффект 3 (слот 2/канал C, таблица из 8 нот + счётчик шагов)
+audio_B4C1:		; шаги игрока: поворот (MSX 0x5D37) -> эффект 3, слот 2 / канал C
 				ld		hl, msx_stepc
 				inc		(hl)
 				ld		a, 3
@@ -770,7 +761,8 @@ audio_B4C1:		; ZX шаги -> MSX эффект 3 (слот 2/канал C, та�
 				ld		c, 2
 				ld		de, 0
 				jp		msx_sfx_start
-audio_B4BB:		ld		a, (ix+0)
+audio_B4BB:		; шаг вперёд (MSX 0x5DAB)
+				ld		a, (ix+0)
 				and		1
 				ret		nz
 				jp		audio_B4C1
@@ -782,7 +774,6 @@ TUNE_PLAYERS = """play_audio_until_keypress:	; DE = заголовок мело�
 				ret		nz					; клавиша уже нажата — не играем (поведение ZX)
 				ld		h, d
 				ld		l, e
-				ld		a, 1
 				call	msx_play_tune
 pauk_l:			xor		a
 				call	read_port
@@ -794,11 +785,17 @@ pauk_l:			xor		a
 ; End of function play_audio_until_keypress
 """
 
-PLAY_AUDIO = """play_audio:		; DE = заголовок мелодии MSX. Не ждём: мелодию доиграет ISR.
+PLAY_AUDIO = """play_audio:		; DE = заголовок мелодии MSX. Звук делает ISR, а игра ждёт конца — как в оригинале
+				; (на MSX проигрыватель блокирующий, 0x452E). Ждать ОБЯЗАТЕЛЬНО: под `di` в
+				; print_sprite Вектор теряет кадровые прерывания (они не защёлкиваются), и
+				; играющая поверх игрового цикла мелодия растягивается примерно на 20 %.
 				ld		h, d
 				ld		l, e
-				xor		a
-				jp		msx_play_tune
+				call	msx_play_tune
+pa_l:			ld		a, (msx_play)
+				or		a
+				jp		nz, pa_l
+				ret
 ; End of function play_audio
 """
 
@@ -837,13 +834,29 @@ def apply(src):
         'play_audio_until_keypress', TUNE_PLAYERS)
     cut(r'play_audio:\n.*?; End of function play_audio\r?\n', 'play_audio', PLAY_AUDIO)
 
-    # 5. тик эффектов — в объектный цикл, по одному разу на объект (40 объектов = 40 тиков,
+    # 5. три вызова, которые на MSX ведут не туда, куда общая процедура ZX: разводим адресно
+    for old, new, name in (
+        ("\t\t\t\tcall    NZ, toggle_audio_hw_x16                 ; yes\n",
+         "\t\t\t\tcall    NZ, audio_msx_blip                       ; MSX 0x517A: blip при смене настройки\n",
+         'смена настройки в меню -> blip'),
+        ("\t\t\t\tcall    M, audio_B451\n",
+         "\t\t\t\tcall    M, audio_msx_noise                      ; MSX 0x5A84: шум при приземлении\n",
+         'приземление игрока -> эффект 1 (шум)'),
+        ("\t\t\t\tcall    toggle_next_prev_sprite\n\t\t\t\tcall    audio_B451\n\t\t\t\tbit     2, (ix+13)                               ; dir=up?\n",
+         "\t\t\t\tcall    toggle_next_prev_sprite\n\t\t\t\tcall    audio_B467                              ; MSX 0x4C86: эффект 7, не 4\n\t\t\t\tbit     2, (ix+13)                               ; dir=up?\n",
+         'высота отскока шара -> эффект 7'),
+    ):
+        assert src.count(old) == 1, 'kl_sound_ay: сайт не уникален — ' + name
+        src = src.replace(old, new, 1)
+        rep['сайт: ' + name] = 0
+
+    # 6. тик эффектов — в объектный цикл, по одному разу на объект (40 объектов = 40 тиков,
     #    ровно как MSX 0x40FC); вставляем после смены стека, чтобы call лёг на известный стек
     old = "update_sprite_loop:                                             ; init stack\n\t\t\t\tld      sp, seed_1\n"
     assert old in src, 'kl_sound_ay: update_sprite_loop'
     src = src.replace(old, old + "\t\t\t\tcall    msx_sfx_tick                            ; тик эффектов: 1 на объект\n", 1)
 
-    # 6. конец игрового кадра — глушение AY (MSX 0x4136)
+    # 7. конец игрового кадра — глушение AY (MSX 0x4136)
     old = "loc_B000:\n\t\t\t\tld      hl, (seed_2)\n"
     assert old in src, 'kl_sound_ay: loc_B000'
     src = src.replace(old, "loc_B000:\n\t\t\t\tcall    msx_frame_off                           ; глушение AY в конце игрового кадра\n\t\t\t\tld      hl, (seed_2)\n", 1)
