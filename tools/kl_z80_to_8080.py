@@ -94,7 +94,7 @@ def expand(mn, ops, idxinfo):
         return _exaf()
     # --- IX/IY (detected via idxinfo: (cell, regtoken/None)) ---
     if idxinfo is not None:
-        return _ixiy(mn, ops, idxinfo)
+        return _ixiy_compact(mn, ops, idxinfo) if _IX_COMPACT else _ixiy(mn, ops, idxinfo)
     # --- Z80-only LD A,I / LD A,R (ED 57 / ED 5F) ---
     # The i8080 has no I/R register AND no ED prefix: passed through verbatim, the
     # ED byte is an UNDOCUMENTED 3-byte CALL on the 8080, so `ld a,i` (ED 57) plus
@@ -643,6 +643,116 @@ def _ixiy(mn, ops, idxinfo):
     return [f"; UNHANDLED IX/IY {full}"]
 
 
+# ---------------------------------------------------------------------------
+# КОМПАКТНАЯ ЭМУЛЯЦИЯ IX/IY (KL): обращение (ix+d) = `call il_<ix|iy>_<форма>` + inline-байт(ы).
+# Хелпер читает байты за адресом возврата и возвращается за них. Контракты регистров/флагов
+# те же, что у встроенного разворачивания (_ixiy). Эмитятся только использованные хелперы.
+# KL_IX_INLINE=1 -> старое встроенное разворачивание.
+# ---------------------------------------------------------------------------
+_IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
+_ix_used = set()
+# горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
+_IX_INLINE_FUNCS = {'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
+_cur_func = ['']
+
+def _ixiy_compact(mn, ops, idxinfo):
+    cell, _ = idxinfo
+    if _cur_func[0] in _IX_INLINE_FUNCS:
+        return _ixiy(mn, ops, idxinfo)
+    px = 'ix' if cell == 'z80_ix' else 'iy'
+    full = (mn + ' ' + ','.join(ops)).lower()
+    # формы, которые остаются встроенными (регистр IX целиком)
+    if mn in ('push', 'pop') or (mn == 'ld' and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'ld' and len(ops) == 2 and ops[1].lower() in ('ix', 'iy')) \
+            or (mn in ('inc', 'dec', 'add') and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'jp'):
+        return _ixiy(mn, ops, idxinfo)
+    midx = None
+    for i, o in enumerate(ops):
+        if '(ix' in o.lower() or '(iy' in o.lower():
+            midx = i
+    if midx is None:
+        return _ixiy(mn, ops, idxinfo)
+    disp = re.sub(r'^\((ix|iy)', '', ops[midx], flags=re.I)[:-1].strip().lstrip('+') or '0'
+    def use(form, *extra):
+        name = f"il_{px}_{form}"
+        _ix_used.add((px, form))
+        return [f"call {name}", "db " + ", ".join([disp] + list(extra))]
+    if mn == 'ld':
+        if midx == 1:
+            r = ops[0].lower()
+            if r in ('a', 'b', 'c', 'd', 'e', 'h', 'l'):
+                return use('ld' + r)
+        else:
+            src = ops[1].strip(); sl = src.lower()
+            if sl in ('a', 'b', 'c', 'd', 'e', 'h', 'l'):
+                return use('st' + sl)
+            return use('stn', src)
+    if mn in ('inc', 'dec'):
+        return use(mn)
+    if mn == 'bit':
+        return use('bit', f"1<<{ops[0]}")
+    if mn == 'res':
+        return use('res', f"(~(1<<{ops[0]}))&255")
+    if mn == 'set':
+        return use('set', f"1<<{ops[0]}")
+    if mn in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
+        return use(mn)
+    return _ixiy(mn, ops, idxinfo)
+
+_ADDR = ["ld hl,({C})", "add a,l", "ld l,a", "ld a,h", "adc a,0", "ld h,a"]   # HL = cell + A
+_PRO_AF = ["ld (il_tmp2),hl", "push af", "pop hl", "ld (il_f),hl", "pop hl", "ld a,(hl)", "inc hl", "push hl"]
+_EPI_AF = ["ld hl,(il_f)", "push hl", "pop af", "ld hl,(il_tmp2)", "ret"]
+_PRO_A  = ["ld (il_tmp2),hl", "ld (il_a),a", "pop hl", "ld a,(hl)", "inc hl", "push hl"]   # только A (флаги — результат)
+_PRO_AF2 = ["ld (il_tmp2),hl", "push af", "pop hl", "ld (il_f),hl", "pop hl", "ld a,(hl)", "ld (il_tmp),a",
+            "inc hl", "ld a,(hl)", "ld (il_tmp+1),a", "inc hl", "push hl", "ld a,(il_tmp)"]     # d + второй байт в il_tmp+1
+_PRO_A2  = ["ld (il_tmp2),hl", "ld (il_a),a", "pop hl", "ld a,(hl)", "ld (il_tmp),a",
+            "inc hl", "ld a,(hl)", "ld (il_tmp+1),a", "inc hl", "push hl", "ld a,(il_tmp)"]
+
+def _ix_helper(px, form):
+    C = 'z80_' + px
+    A = [x.replace('{C}', C) for x in _ADDR]
+    body = None
+    if form == 'lda':
+        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_a),a", "ld hl,(il_f)", "push hl", "pop af", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
+    elif form in ('ldb', 'ldc', 'ldd', 'lde'):
+        body = _PRO_AF + A + [f"ld {form[2]},(hl)"] + _EPI_AF
+    elif form == 'ldl':
+        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2),a"] + _EPI_AF
+    elif form == 'ldh':
+        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2+1),a"] + _EPI_AF
+    elif form == 'sta':
+        body = _PRO_AF + A + ["ld a,(il_f+1)", "ld (hl),a"] + _EPI_AF
+    elif form in ('stb', 'stc', 'std', 'ste'):
+        body = _PRO_AF + A + [f"ld (hl),{form[2]}"] + _EPI_AF
+    elif form == 'stl':
+        body = _PRO_AF + A + ["ld a,(il_tmp2)", "ld (hl),a"] + _EPI_AF
+    elif form == 'sth':
+        body = _PRO_AF + A + ["ld a,(il_tmp2+1)", "ld (hl),a"] + _EPI_AF
+    elif form == 'stn':
+        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "ld (hl),a"] + _EPI_AF
+    elif form in ('inc', 'dec'):
+        body = _PRO_A + A + [f"{form} (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
+    elif form == 'bit':
+        body = _PRO_A2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
+    elif form == 'res':
+        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld (hl),a"] + _EPI_AF
+    elif form == 'set':
+        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "or (hl)", "ld (hl),a"] + _EPI_AF
+    elif form in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
+        alu = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,', 'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[form]
+        body = _PRO_A + A + ["ld a,(il_a)", f"{alu}(hl)", "ld hl,(il_tmp2)", "ret"]
+    assert body, form
+    return f"il_{px}_{form}:\n" + "\n".join("\t" + x for x in body) + "\n"
+
+def ix_helpers_text():
+    if not _ix_used:
+        return ""
+    out = ["\n; ===== компактные IX/IY-хелперы (только использованные формы) ====="]
+    for px, form in sorted(_ix_used):
+        out.append(_ix_helper(px, form))
+    return "\n".join(out) + "\n"
+
 def has_idx(body):
     """Detect IX/IY usage; return (cell, None) or None."""
     b = body.lower()
@@ -658,6 +768,8 @@ def translate(src):
     inserted_scratch = False
     for line in src.split('\n'):
         label, body, comment = split_line(line)
+        if label and not label.startswith(('loc_', '.')):
+            _cur_func[0] = label.rstrip(':')
         if not body:
             out.append(line)
             continue
@@ -690,6 +802,68 @@ def kl_no_delay(src):
     assert old in src, "game_delay"
     return src.replace(old, "game_delay:\n\t\t\t\tjp      no_delay\t\t\t\t; KL: задержка снята\n\t\t\t\tld      hl, 0x500\n", 1)
 
+def kl_logic_fixes(src):
+    """Самомодифицирующийся код логики -> переменные; .copy_loop как в оригинале (счётчик в памяти)."""
+    # --- самомодифицирующийся код ЛОГИКИ (3 сайта) -> переменные ---
+    # 1) upd_182_183 (мяч): опкод jr nc/jr c писался в loc_B65D и loc_B676
+    old = "\t\t\t\tld      (loc_B65D), a\n\t\t\t\tld      (loc_B676), a                           ; self-modifying code\n"
+    assert old in src, "ball self-mod"
+    src = src.replace(old, "\t\t\t\tld      (kl_ball_cc), a                         ; KL: условие перехода в переменной\n", 1)
+    for lbl, tgt in (("loc_B65D", "loc_B661"), ("loc_B676", "loc_B67A")):
+        i = src.index(lbl + ":"); j = src.index("\n", i) + 1
+        line = src[j:src.index("\n", j)]
+        assert "jr      NC, " + tgt in line, line
+        new = ("\t\t\t\tpush    af\n\t\t\t\tld      a, (kl_ball_cc)\n\t\t\t\tcp      0x38\n\t\t\t\tjp      z, kl_%s_c\n"
+               "\t\t\t\tpop     af\n\t\t\t\tjp      nc, %s\n\t\t\t\tjp      kl_%s_n\n"
+               "kl_%s_c:\t\tpop     af\n\t\t\t\tjp      c, %s\nkl_%s_n:") % (lbl, tgt, lbl, lbl, tgt, lbl)
+        src = src[:j] + new + src[j + len(line):]
+    # 2) upd_54/55 (блоки): смещения (ix+d) патчились в код
+    old = "\t\t\t\tld      a, h\n\t\t\t\tld      (loc_B6DE+2), a                         ; IX+2/1\n\t\t\t\tld      a, l\n\t\t\t\tld      (loc_B6EF+2), a                         ; IX+10/9\n"
+    assert old in src, "block self-mod"
+    src = src.replace(old, "\t\t\t\tld      (kl_blk_off), hl                        ; KL: смещения в переменной\n", 1)
+    i = src.index("loc_B6DE:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
+    assert "ld      a, (ix+1)" in line, line
+    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off+1)\n"
+                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tld      a, (hl)\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
+    i = src.index("loc_B6EF:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
+    assert "ld      (ix+9), a" in line, line
+    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tpush    af\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off)\n"
+                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tpop     af\n\t\t\t\tld      (hl), a\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
+    # 3) flag_room_visited: SET n,(HL) как данные (CB-префикс) -> маска через сдвиг
+    src, n_frv = re.subn(r'flag_room_visited:.*?\n\t+ret\n',
+        "flag_room_visited:\t\t\t\t; KL: переписано без самомодификации (i8080)\n"
+        "\t\t\t\tld      a, (graphic_objs_tbl+8)\n\t\t\t\tld      c, a\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\tand     0x1F\n"
+        "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tld      hl, scrn_visited\n\t\t\t\tadd     hl, de\n"
+        "\t\t\t\tld      a, c\n\t\t\t\tand     7\n\t\t\t\tld      b, a\n\t\t\t\tld      a, 1\n\t\t\t\tinc     b\n"
+        "kl_frv_m:\t\tdec     b\n\t\t\t\tjp      z, kl_frv_d\n\t\t\t\trlca\n\t\t\t\tjp      kl_frv_m\n"
+        "kl_frv_d:\t\tor      (hl)\n\t\t\t\tld      (hl), a\n\t\t\t\tret\n", src, count=1, flags=re.S)
+    assert n_frv == 1
+    # --- print_sprite: ld a,(ix+25) стояло ПОСЛЕ ld sp,hl (SP = данные спрайта). На i8080 это call il_ix_lda,
+    #     и адрес возврата + push хелпера пишутся в стек = в спрайт (порча со spr-2). Читать высоту ДО смены SP.
+    src, n_ps = re.subn(r'(\t+ld      \(tmp_SP\), sp\n\t+ex      de, hl\n\t+ld      sp, hl\n\t+ex      de, hl\n)(\t+ld      a, \(ix\+25\)[^\n]*\n)',
+                        lambda m: m.group(2) + m.group(1), src, count=1)
+    assert n_ps == 1, "print_sprite ld sp order"
+    return src
+
+def kl_seed_oracle(src, target):
+    # loc_B000: seed_3 += mem[seed_2] + L + H, где HL = ЗНАЧЕНИЕ seed_2 (0x5678+N) — игра читает
+    # байт памяти по адресу-счётчику (на ZX это экранный битмап!). Зависит от раскладки и от
+    # рендера => в цели lockstep байт подаёт стенд через kl_rnd_feed (вычисляется из журнала ZX).
+    old = "\t\t\t\tld      a, (seed_3)\n\t\t\t\tadd     a, (hl)\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n"
+    assert src.count(old) == 1, "seed_3 mem-mix"
+    if target == 'lockstep':
+        src = src.replace(old, "\t\t\t\tld      a, (seed_3)\n\t\t\t\tpush    hl\n\t\t\t\tld      hl, kl_rnd_feed\t\t; KL(lockstep): байт mem[seed_2] подаёт стенд\n\t\t\t\tadd     a, (hl)\n\t\t\t\tpop     hl\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n", 1)
+    # render_dynamic_objects/.copy_loop: оригинал (0xD666) ДЕКРЕМЕНТИРУЕТ objs_wiped_cnt в памяти на
+    # каждом копировании (в конце = 0); jonsole считает в AF' и память не трогает -> журнал расходится.
+    # Восстанавливаем семантику оригинала.
+    src, n_cl = re.subn(r'\t+ld\s+a,\s*\(hl\)\r?\n\t+and\s+a\r?\n\t+jr\s+z,\s*loc_D679\r?\n\s*\.copy_loop:.*?jr\s+nz,\s*\.copy_loop\r?\n',
+        "kl_copy_loop:\t\tld      hl, objs_wiped_cnt\t\t; KL: как в оригинале 0xD666 — счётчик в памяти\n"
+        "\t\t\t\tld      a, (hl)\n\t\t\t\tand     a\n\t\t\t\tjp      z, loc_D679\n\t\t\t\tdec     (hl)\n"
+        "\t\t\t\tpop     bc\n\t\t\t\tpop     hl\n\t\t\t\tpop     de\n\t\t\t\tcall    blit_to_screen\n\t\t\t\tjp      kl_copy_loop\n",
+        src, count=1, flags=re.S)
+    assert n_cl == 1, "copy_loop"
+    return src
+
 # ============================ Knight Lore glue ============================
 KL_HEADER = """
 ; ---- Vector-06C boot stub (.r0m грузится с 0x0000, PC=0) ----
@@ -709,6 +883,7 @@ z80_hl_alt:		DS		2
 il_tmp:			DS		2
 il_tmp2:		DS		2
 il_a:			DS		2
+il_f:			DS		2			; компактные IX-хелперы: сохранённый AF
 il_outstub:		DS		3
 kl_seed:		DS		1			; seed_1 при старте (у ZX — FRAMES 0x5C78); стенд задаёт
 kl_ball_cc:		DS		1			; мяч: 0x30=jr nc / 0x38=jr c (в оригинале самомод. опкод)
@@ -757,56 +932,8 @@ def kl_glue(src, target):
     n0 = src.count('\n')
     # заголовок после DEVICE
     src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER.replace("__KL_SCRATCH__", kl_native.SCRATCH) + _LDIR_HELPERS + "\n", 1)
-    # --- самомодифицирующийся код ЛОГИКИ (3 сайта) -> переменные ---
-    # 1) upd_182_183 (мяч): опкод jr nc/jr c писался в loc_B65D и loc_B676
-    old = "\t\t\t\tld      (loc_B65D), a\n\t\t\t\tld      (loc_B676), a                           ; self-modifying code\n"
-    assert old in src, "ball self-mod"
-    src = src.replace(old, "\t\t\t\tld      (kl_ball_cc), a                         ; KL: условие перехода в переменной\n", 1)
-    for lbl, tgt in (("loc_B65D", "loc_B661"), ("loc_B676", "loc_B67A")):
-        i = src.index(lbl + ":"); j = src.index("\n", i) + 1
-        line = src[j:src.index("\n", j)]
-        assert "jr      NC, " + tgt in line, line
-        new = ("\t\t\t\tpush    af\n\t\t\t\tld      a, (kl_ball_cc)\n\t\t\t\tcp      0x38\n\t\t\t\tjp      z, kl_%s_c\n"
-               "\t\t\t\tpop     af\n\t\t\t\tjp      nc, %s\n\t\t\t\tjp      kl_%s_n\n"
-               "kl_%s_c:\t\tpop     af\n\t\t\t\tjp      c, %s\nkl_%s_n:") % (lbl, tgt, lbl, lbl, tgt, lbl)
-        src = src[:j] + new + src[j + len(line):]
-    # 2) upd_54/55 (блоки): смещения (ix+d) патчились в код
-    old = "\t\t\t\tld      a, h\n\t\t\t\tld      (loc_B6DE+2), a                         ; IX+2/1\n\t\t\t\tld      a, l\n\t\t\t\tld      (loc_B6EF+2), a                         ; IX+10/9\n"
-    assert old in src, "block self-mod"
-    src = src.replace(old, "\t\t\t\tld      (kl_blk_off), hl                        ; KL: смещения в переменной\n", 1)
-    i = src.index("loc_B6DE:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
-    assert "ld      a, (ix+1)" in line, line
-    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off+1)\n"
-                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tld      a, (hl)\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
-    i = src.index("loc_B6EF:"); j = src.index("\n", i) + 1; line = src[j:src.index("\n", j)]
-    assert "ld      (ix+9), a" in line, line
-    src = src[:j] + ("\t\t\t\tpush    hl\n\t\t\t\tpush    de\n\t\t\t\tpush    af\n\t\t\t\tld      hl, (z80_ix)\n\t\t\t\tld      a, (kl_blk_off)\n"
-                     "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tadd     hl, de\n\t\t\t\tpop     af\n\t\t\t\tld      (hl), a\n\t\t\t\tpop     de\n\t\t\t\tpop     hl") + src[j + len(line):]
-    # 3) flag_room_visited: SET n,(HL) как данные (CB-префикс) -> маска через сдвиг
-    src, n_frv = re.subn(r'flag_room_visited:.*?\n\t+ret\n',
-        "flag_room_visited:\t\t\t\t; KL: переписано без самомодификации (i8080)\n"
-        "\t\t\t\tld      a, (graphic_objs_tbl+8)\n\t\t\t\tld      c, a\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\trrca\n\t\t\t\tand     0x1F\n"
-        "\t\t\t\tld      e, a\n\t\t\t\tld      d, 0\n\t\t\t\tld      hl, scrn_visited\n\t\t\t\tadd     hl, de\n"
-        "\t\t\t\tld      a, c\n\t\t\t\tand     7\n\t\t\t\tld      b, a\n\t\t\t\tld      a, 1\n\t\t\t\tinc     b\n"
-        "kl_frv_m:\t\tdec     b\n\t\t\t\tjp      z, kl_frv_d\n\t\t\t\trlca\n\t\t\t\tjp      kl_frv_m\n"
-        "kl_frv_d:\t\tor      (hl)\n\t\t\t\tld      (hl), a\n\t\t\t\tret\n", src, count=1, flags=re.S)
-    assert n_frv == 1
-    # loc_B000: seed_3 += mem[seed_2] + L + H, где HL = ЗНАЧЕНИЕ seed_2 (0x5678+N) — игра читает
-    # байт памяти по адресу-счётчику (на ZX это экранный битмап!). Зависит от раскладки и от
-    # рендера => в цели lockstep байт подаёт стенд через kl_rnd_feed (вычисляется из журнала ZX).
-    old = "\t\t\t\tld      a, (seed_3)\n\t\t\t\tadd     a, (hl)\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n"
-    assert src.count(old) == 1, "seed_3 mem-mix"
-    if target == 'lockstep':
-        src = src.replace(old, "\t\t\t\tld      a, (seed_3)\n\t\t\t\tpush    hl\n\t\t\t\tld      hl, kl_rnd_feed\t\t; KL(lockstep): байт mem[seed_2] подаёт стенд\n\t\t\t\tadd     a, (hl)\n\t\t\t\tpop     hl\n\t\t\t\tadd     a, l\n\t\t\t\tadd     a, h\n\t\t\t\tld      (seed_3), a\n", 1)
-    # render_dynamic_objects/.copy_loop: оригинал (0xD666) ДЕКРЕМЕНТИРУЕТ objs_wiped_cnt в памяти на
-    # каждом копировании (в конце = 0); jonsole считает в AF' и память не трогает -> журнал расходится.
-    # Восстанавливаем семантику оригинала.
-    src, n_cl = re.subn(r'\t+ld\s+a,\s*\(hl\)\r?\n\t+and\s+a\r?\n\t+jr\s+z,\s*loc_D679\r?\n\s*\.copy_loop:.*?jr\s+nz,\s*\.copy_loop\r?\n',
-        "kl_copy_loop:\t\tld      hl, objs_wiped_cnt\t\t; KL: как в оригинале 0xD666 — счётчик в памяти\n"
-        "\t\t\t\tld      a, (hl)\n\t\t\t\tand     a\n\t\t\t\tjp      z, loc_D679\n\t\t\t\tdec     (hl)\n"
-        "\t\t\t\tpop     bc\n\t\t\t\tpop     hl\n\t\t\t\tpop     de\n\t\t\t\tcall    blit_to_screen\n\t\t\t\tjp      kl_copy_loop\n",
-        src, count=1, flags=re.S)
-    assert n_cl == 1, "copy_loop"
+    src = kl_logic_fixes(src)
+    src = kl_seed_oracle(src, target)
     # read_port -> виртуальная клавиатура
     src = re.sub(r'read_port:\n.*?; End of function read_port', KL_READ_PORT, src, count=1, flags=re.S)
     if target == 'lockstep':
@@ -1230,6 +1357,22 @@ def kl_sound_async(src):
     src = src.replace("\t\t\t\tORG 0xE500\nzx_aram:", "\t\t\t\tORG 0xE600\nzx_aram:", 1)
     return src
 
+SCRATCH_DEFS_VEC = """z80_ix:			DS		2
+z80_iy:			DS		2
+z80_af_alt:		DS		2
+z80_bc_alt:		DS		2
+z80_de_alt:		DS		2
+z80_hl_alt:		DS		2
+il_tmp:			DS		2
+il_tmp2:		DS		2
+il_a:			DS		2
+il_f:			DS		2
+il_outstub:		DS		3
+kl_ball_cc:		DS		1
+kl_blk_off:		DS		2
+kl_lines:		DS		1			; print_sprite: счётчик строк (вместо AF')
+"""
+
 # ============================ Vector glue (общая для z80vec и vec) ============================
 VEC_HEADER = """
 ; ---- Вектор-06Ц: загрузчик (.r0m с 0x0000, PC=0). Всё в подмножестве i8080. ----
@@ -1639,9 +1782,50 @@ def kl_vec_glue(src, translate_later):
     src = kl_sound_async(src)
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
+    hdr = VEC_HEADER
+    tail = VEC_TAIL + VEC_SCREEN + SND_CODE
+    snd_tail = SND_TAIL
+    if translate_later:
+        # ---- i8080: скретч эмуляции Z80 в нулевой странице, загрузчик на 0x0090 ----
+        hdr = hdr.replace("vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n",
+            "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n" + SCRATCH_DEFS_VEC + kl_native.SCRATCH)
+        hdr = hdr.replace("\t\t\t\tORG\t\t0x0060\nvec_boot:", "\t\t\t\tORG\t\t0x00A0\nvec_boot:")
+        src = kl_logic_fixes(src)
+        # ---- print_sprite под i8080: счётчик строк в ячейке (нет AF'), точка входа = младший байт jp ----
+        src, n_h = re.subn(r'(\t+ld      a, \(ix\+25\)[^\n]*\n)(?=(\t+di[^\n]*\n)?\t+ld      \(tmp_SP\), sp)', lambda m: m.group(1) + "\t\t\t\tld      (kl_lines), a\n", src, count=1)
+        assert n_h == 1, "ps height"
+        old_l = "loc_D7AA:\n\t\t\t\tex      af, af'\n"
+        assert old_l in src, "ps loop head"
+        src = src.replace(old_l, "loc_D7AA:\n", 1)
+        old_e = "\t\t\t\tex      af, af'\n\t\t\t\tdec     a\n\t\t\t\tjp      NZ, loc_D7AA\n"
+        assert old_e in src, "ps loop tail"
+        src = src.replace(old_e, "\t\t\t\tld      a, (kl_lines)\n\t\t\t\tdec     a\n\t\t\t\tld      (kl_lines), a\n\t\t\t\tjp      NZ, loc_D7AA\n", 1)
+        old_s = "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n"
+        assert old_s in src, "ps shifted base"
+        src = src.replace(old_s, "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт адреса входа\n", 1)
+        old_a = "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tjr      loc_D73C\n"
+        assert old_a in src, "ps aligned base"
+        src = src.replace(old_a, "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт входа (+1: перед loc_D7AC убран ex af,af')\n\t\t\t\tjr      loc_D73C\n", 1)
+        i = src.index("\t\t\t\tjr      loc_D73C\n", src.index("print_sprite:")) + len("\t\t\t\tjr      loc_D73C\n")
+        j = src.index("\t\t\t\tpop     de\n", i)
+        src = src[:j] + "\t\t\t\tALIGN 256\t\t\t\t\t; все точки входа развёрнутого цикла в одной странице\n" + src[j:]
+        # ---- разрез памяти: хвост спрайтов (spr_064..) + хелперы + START в верхний регион 0xD400 ----
+        assert "\nspr_064:" in src
+        src = src.replace("\nspr_064:", "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион: хвост спрайтов, IX-хелперы, START\nspr_064:", 1)
+        # блок Вектора (без ORG 0x7B00) — в нижний регион перед разрезом; START — за vidbuf, но в верхнем регионе
+        tail = tail.replace("\t\t\t\tORG\t\t0x7B00\t\t\t; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)\n", "")
+        tail = tail + _LDIR_HELPERS
+        src = src.replace("\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", "\n" + tail + "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", 1)
+        tail = ""
+        src = src.replace("\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера", "vidbuf:\t\t\tequ 0xA000\t\t; плоскость 1; START/build_lookup_tbls — продолжение верхнего региона", 1)
+        assert "vidbuf:\t\t\tequ 0xA000" in src
+        # атрибуты ZX: только 1К реального ОЗУ на 0xCE00 (zx_vram=0xB700 — битмап не пишется), очередь звука 0xD200
+        src = src.replace("\t\t\t\tORG 0xCE00\nzx_vram:", "\t\t\t\tORG 0xB700\nzx_vram:", 1)
+        src = src.replace("\t\t\t\tORG 0xE600\nzx_aram:", "\t\t\t\tORG 0xCF00\nzx_aram:", 1)
+        snd_tail = snd_tail.replace("\t\t\t\tORG\t\t0xE900\nvec_sq:", "\t\t\t\tORG\t\t0xD200\nvec_sq:")
     # заголовок (и наши экранные процедуры) — ПОСЛЕ удаления старых, иначе регулярки цепляют новые
-    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + VEC_HEADER + "\n", 1)
-    src = re.sub(r'^(\s*SAVESNA)', VEC_TAIL.replace("\\", "\\\\") + VEC_SCREEN.replace("\\", "\\\\") + SND_CODE.replace("\\", "\\\\") + SND_TAIL.replace("\\", "\\\\") + r"\n\g<1>", src, count=1, flags=re.M)
+    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + hdr + "\n", 1)
+    src = re.sub(r'^(\s*SAVESNA)', (tail + snd_tail).replace("\\", "\\\\") + r"\n\g<1>", src, count=1, flags=re.M)
     return src
 
 
@@ -1659,6 +1843,25 @@ def main():
         pos.append(a); i += 1
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='latin-1').read()
+    if target == 'vec':
+        src = kl_vec_glue(src, translate_later=True)
+        src = kl_no_delay(src)
+        src = kl_native.apply(src)
+        src, exx_pairs = _classify_exx(src)
+        src = translate(src)
+        helpers = ix_helpers_text()
+        # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
+        # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
+        src, n = re.subn(r'(^\t+ORG 0xD400\t+; верхний регион)', lambda m: helpers + "\t\t\t\tASSERT $ <= 0x7E00\t\t; нижний регион: до стека (SP=0x8000)\n" + m.group(1), src, count=1, flags=re.M)
+        assert n == 1, "место для IX-хелперов (vec)"
+        src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
+        assert n == 1, "ASSERT верхнего региона"
+        src, n = re.subn(r'(^\s*SAVESNA)', r"\t\t\t\tASSERT $ <= 0xD400\t\t; очередь звука до верхнего региона\n\g<1>", src, count=1, flags=re.M)
+        assert n == 1, "ASSERT очереди звука"
+        src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_vec.r0m", 0, 0x10000', src, flags=re.M)
+        open(outp, 'w', encoding='utf-8').write(src)
+        print(f"vector glue + translate (i8080) {inp} -> {outp}; exx-B pairs={exx_pairs}; IX-хелперов {len(_ix_used)}")
+        return
     if target == 'z80vec':
         src = kl_vec_glue(src, translate_later=False)
         src = kl_no_delay(src)
@@ -1671,6 +1874,11 @@ def main():
     src = kl_native.apply(src)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
+    helpers = ix_helpers_text()
+    if helpers:
+        src, n = re.subn(r'(^\t+ORG 0x[0-9A-Fa-f]+\nvidbuf:)', lambda m: helpers + m.group(1), src, count=1, flags=re.M)
+        assert n == 1, "место для IX-хелперов"
+    print(f"IX-хелперов: {len(_ix_used)}")
     open(outp, 'w', encoding='utf-8').write(src)
     print(f"translated {inp} -> {outp} (target={target}); exx-B push/pop pairs={exx_pairs}")
 

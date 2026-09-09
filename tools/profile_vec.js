@@ -8,7 +8,8 @@ const [ROM,SLD,NS,INPUTS]=process.argv.slice(2); const N=+NS||300;
 const L={}; const lab=[];
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}}
 // функции = метки не loc_/. /il_/IL_/vec_ldir внутренние; отсортированные адреса
-const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|il_|IL_|kl_b6|kl_frv|rp_|vb_|us_|bts_|vfw_)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
+const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|kl_b6|kl_frv|rp_|vb_|us_|bts_|vfw_)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
+const isHelper=fn.map(x=>/^il_/.test(x[0]));
 const fa=fn.map(x=>x[1]), fnm=fn.map(x=>x[0]);
 function idx(pc){let lo=0,hi=fa.length-1,r=-1;while(lo<=hi){const m=(lo+hi)>>1;if(fa[m]<=pc){r=m;lo=m+1;}else hi=m-1;}return r;}
 const VARS0=L.clear_start, SEED2HI=L.seed_2+1, ROOM=L.curr_room_attrib, VKBD=L.vkbd;
@@ -42,11 +43,11 @@ memory.write=function(a,w,s){a&=0xffff;
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
-const startIter=iter; let prevPc=-1;
-while(iter-startIter<N&&steps<2e8){const pc=cpu.pc;const c=cpu.instruction();steps++;total+=c;const i=idx(pc);if(i>=0){cyc[i]+=c;if(pc===fa[i])calls[i]++;}}
+const startIter=iter; let cur=-1; const hcyc=new Float64Array(fa.length);
+while(iter-startIter<N&&steps<2e8){const pc=cpu.pc;const c=cpu.instruction();steps++;total+=c;let i=idx(pc);if(i>=0){if(isHelper[i]){if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
 const iters=iter-startIter; console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
-const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i]]);
+const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
-console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер");
-let acc=0;for(const [n,c,sz,cl] of rows_.slice(0,40)){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}`);}
+console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
+let acc=0;for(const [n,c,sz,cl,hc] of rows_.slice(0,40)){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
 console.log(`(топ-40 = ${(100*acc/total).toFixed(1)} %)`);

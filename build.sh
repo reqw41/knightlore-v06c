@@ -6,7 +6,12 @@ set -e
 cd "$(dirname "$0")"
 TARGET=${1:-lockstep}
 mkdir -p build
-if [ "$TARGET" = "z80vec" ]; then
+if [ "$TARGET" = "vec" ]; then
+  python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_vec.asm --target vec
+  ./tools/sjasmplus --lst=build/knightlore_vec.lst --sld=build/knightlore_vec.sld --fullpath build/knightlore_vec.asm
+  python3 tools/check_i8080.py build/knightlore_vec.lst
+  ls -la build/knightlore_vec.r0m
+elif [ "$TARGET" = "z80vec" ]; then
   python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_z80.asm --target z80vec
   ./tools/sjasmplus --lst=build/knightlore_z80.lst --sld=build/knightlore_z80.sld --fullpath build/knightlore_z80.asm
   ls -la build/knightlore_z80.r0m

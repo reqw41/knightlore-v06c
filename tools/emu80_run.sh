@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP=~/projects/emu80v4/Emu80qt-mcp.app/Contents/MacOS
 TMP="${TMPDIR:-/tmp}/kl_emu80"; mkdir -p "$TMP"
 pkill -f "Emu80qt-mcp.*knightlore" 2>/dev/null || true
-if [ "$1" = "8080" ]; then PLAT=vector; IMG=knightlore_8080.r0m; else PLAT=vector.z80; IMG=knightlore_z80.r0m; fi
+if [ "$1" = "8080" ]; then PLAT=vector; IMG=knightlore_vec.r0m; else PLAT=vector.z80; IMG=knightlore_z80.r0m; fi
 cp "$ROOT/build/$IMG" "$TMP/$IMG"
 cd "$APP"
 QT_PLUGIN_PATH=/opt/homebrew/share/qt/plugins EMU80_MCP_PORT=19785 nohup ./Emu80qt-mcp --platform $PLAT --run "$TMP/$IMG" >"$TMP/emu80.log" 2>&1 &
