@@ -66,6 +66,7 @@ const RULES={
   move_player:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
   handle_exit_screen:{regions:r=>[["o1",r.ix,32]]},
   set_wipe_and_draw_flags:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
+  loc_D62C:{point:true,regions:r=>[["o1",r.ix,32]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");

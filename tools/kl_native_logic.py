@@ -3,7 +3,10 @@
 Метод: спецификация на Python (spec/kl_spec_logic.py) -> дамп вызовов (tools/calldump_vec.js) -> asm; см. docs/PORT_RECIPE.md."""
 import re
 
-SCRATCH = ""   # ячейки нулевой страницы (DS), добавляются после kl_native.SCRATCH
+SCRATCH = """
+kl_wl:			DS		1			; wipe_next_object: ширина стирания (уходит в L)
+kl_wh:			DS		1			; wipe_next_object: высота стирания (уходит в H) — обязана идти сразу за kl_wl
+"""
 
 # ---------------------------------------------------------------------------
 # is_near_to: |centre_x-X| < L, |centre_y-Y| < H, |centre_z-Z| < 4 (CY = близко).
@@ -958,6 +961,135 @@ lo_3:			inc		c
 """
 
 
+# ---------------------------------------------------------------------------
+# wipe_next_object: стереть в буфере объединённый прямоугольник старого и нового
+# положения каждого объекта из списка отрисовки. 16 обращений (ix+n) на объект
+# (~1960 тактов на вызов). Здесь адрес объекта, который и так возвращает
+# get_ptr_object, остаётся в HL и служит указателем: все поля 24..31 читаются
+# одним проходом inc/dec hl. Результаты (ширина/высота) копятся в kl_wl/kl_wh и
+# берутся в HL одним ld hl,(kl_wl) перед screen_calc_addr_de.
+# Три push подряд перед jp wipe_next_object — как в оригинале (jonsole их не снимает;
+# стек сбрасывает ld sp,seed_1 в update_sprite_loop следующего кадра).
+# ---------------------------------------------------------------------------
+N_WIPE = """wipe_next_object:
+				ld		hl, (tmp_objects_to_draw)
+				ld		a, (hl)							; индекс объекта
+				inc		hl
+				ld		(tmp_objects_to_draw), hl
+				cp		0xFF								; конец списка?
+				jp		z, loc_D653
+				call	get_ptr_object					; HL = адрес объекта
+				ld		(z80_ix), hl
+				ld		a, l
+				add		a, 7
+				ld		l, a								; obj+7
+				ld		a, (hl)
+				and		0x20								; флаг WIPE?
+				jp		z, wipe_next_object
+				ld		a, (hl)
+				and		0xDF								; снять флаг WIPE
+				ld		(hl), a
+				ld		a, l
+				add		a, 19
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; obj+26 (pixel X)
+				ld		a, (hl)
+				ld		c, a								; C = pixel X
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl								; obj+30 (старый pixel X)
+				ld		a, c
+				sub		(hl)
+				jp		c, wno_x1						; новый левее — C уже = pixel X
+				ld		c, (hl)							; иначе C = старый pixel X
+wno_x1:			ld		a, (hl)							; старый pixel X
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				dec		hl
+				dec		hl								; obj+28 (старая ширина)
+				add		a, (hl)
+				ld		e, a								; правый край старого
+				dec		hl
+				dec		hl								; obj+26
+				ld		a, (hl)
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				dec		hl
+				dec		hl								; obj+24 (ширина)
+				add		a, (hl)
+				cp		e
+				jp		c, wno_x2
+				ld		e, a								; правый край = максимум
+wno_x2:			ld		a, c
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				ld		b, a								; левый байт
+				ld		a, e
+				sub		b
+				ld		(kl_wl), a						; сколько байт стирать
+				inc		hl
+				inc		hl
+				inc		hl								; obj+27 (pixel Y)
+				ld		a, (hl)
+				ld		b, a								; B = pixel Y
+				ld		a, l
+				add		a, 4
+				ld		l, a								; obj+31 (старый pixel Y)
+				ld		a, b
+				sub		(hl)
+				jp		c, wno_y1						; новый ниже — B уже = pixel Y
+				ld		b, (hl)							; иначе B = старый pixel Y
+wno_y1:			ld		a, (hl)							; старый pixel Y
+				dec		hl
+				dec		hl								; obj+29 (старая высота)
+				add		a, (hl)
+				ld		e, a
+				dec		hl
+				dec		hl								; obj+27
+				ld		a, (hl)
+				dec		hl
+				dec		hl								; obj+25 (высота)
+				add		a, (hl)
+				cp		e
+				jp		nc, wno_y2
+				ld		a, e
+wno_y2:			sub		b
+				ld		(kl_wh), a						; сколько строк стирать
+				ld		a, b
+				cp		192								; ниже экрана?
+				jp		nc, wipe_next_object			; да, дальше
+				ld		hl, kl_wh
+				add		a, (hl)
+				sub		192
+				jp		c, wno_go
+				cpl
+				inc		a								; neg
+				add		a, (hl)
+				ld		(hl), a							; обрезать высоту по низу экрана
+wno_go:			ld		hl, (kl_wl)						; L = ширина, H = высота
+loc_D62C:		call	screen_calc_addr_de				; DE = адрес экрана
+				push	de
+				ex		de, hl
+				call	vidbuf_calc_addr_in_hl			; HL = адрес в буфере
+				push	hl
+				push	de
+				ld		b, d
+				call	vidbuf_clear_window
+				ld		hl, objs_wiped_cnt
+				inc		(hl)
+				jp		wipe_next_object
+
+"""
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -988,6 +1120,7 @@ def apply(src):
                N_HANDLE_EXIT, 'handle_exit_screen')
     src = _sub(src, r'(?m)^list_objects_to_draw:[^\n]*\n.*?; End of function list_objects_to_draw\r?\n',
                N_LIST_OBJS, 'list_objects_to_draw')
+    src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
