@@ -7,6 +7,8 @@ Usage: python3 tools/kl_z80_to_8080.py <in.asm> <out.asm> [--target lockstep|vec
 import sys, re
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 import kl_native
+import kl_native_render
+import kl_native_logic
 import kl_sound_ay
 
 
@@ -932,7 +934,7 @@ def _stub_after_label(src, label, note):
 def kl_glue(src, target):
     n0 = src.count('\n')
     # заголовок после DEVICE
-    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER.replace("__KL_SCRATCH__", kl_native.SCRATCH) + _LDIR_HELPERS + "\n", 1)
+    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER.replace("__KL_SCRATCH__", kl_native.SCRATCH + kl_native_render.SCRATCH + kl_native_logic.SCRATCH) + _LDIR_HELPERS + "\n", 1)
     src = kl_logic_fixes(src)
     src = kl_seed_oracle(src, target)
     # read_port -> виртуальная клавиатура
@@ -1489,7 +1491,7 @@ def kl_vec_glue(src, translate_later):
     if translate_later:
         # ---- i8080: скретч эмуляции Z80 в нулевой странице, загрузчик на 0x0090 ----
         hdr = hdr.replace("vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n",
-            "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n" + SCRATCH_DEFS_VEC + kl_native.SCRATCH)
+            "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n" + SCRATCH_DEFS_VEC + kl_native.SCRATCH + kl_native_render.SCRATCH + kl_native_logic.SCRATCH)
         hdr = hdr.replace("\t\t\t\tORG\t\t0x0060\nvec_boot:", "\t\t\t\tORG\t\t0x00A0\nvec_boot:")
         src = kl_logic_fixes(src)
         # ---- print_sprite под i8080: счётчик строк в ячейке (нет AF'), точка входа = младший байт jp ----
@@ -1547,6 +1549,8 @@ def main():
         src = kl_vec_glue(src, translate_later=True)
         src = kl_no_delay(src)
         src = kl_native.apply(src)
+        src = kl_native_render.apply(src)
+        src = kl_native_logic.apply(src)
         src, exx_pairs = _classify_exx(src)
         src = translate(src)
         helpers = ix_helpers_text()
