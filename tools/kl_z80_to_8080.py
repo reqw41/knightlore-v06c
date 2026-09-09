@@ -113,6 +113,15 @@ def expand(mn, ops, idxinfo):
         r = _ld16(ops)
         if r is not None:
             return r
+        # ld (nn),sp / ld sp,(nn): ED 73 / ED 7B — Z80-only. Через HL (HL сохраняется через
+        # стек; SP корректируется на 2 за push). Флаги портятся (Z80 их не трогает) — в KL
+        # оба сайта в print_sprite, где следом ex de,hl / ret: флаги не читаются.
+        if len(ops) == 2 and ops[1].strip().lower() == 'sp' and ops[0].strip().startswith('('):
+            nn = ops[0].strip()[1:-1]
+            return ["push hl", "ld hl,2", "add hl,sp", f"ld ({nn}),hl", "pop hl"]
+        if len(ops) == 2 and ops[0].strip().lower() == 'sp' and ops[1].strip().startswith('('):
+            nn = ops[1].strip()[1:-1]
+            return [f"ld hl,({nn})", "ld sp,hl"]
         return None
     # --- CB: bit/res/set/shifts on registers ---
     if mn == 'bit':
@@ -671,3 +680,116 @@ def translate(src):
     return "\n".join(out)
 
 
+
+
+# ============================ Knight Lore glue ============================
+KL_HEADER = """
+; ---- Vector-06C boot stub (.r0m грузится с 0x0000, PC=0) ----
+				ORG		0x0000
+				di
+				ld		sp, 0xC000
+				jp		START
+; ---- scratch i8080-эмуляции + виртуальная клавиатура (область ПЗУ ZX, на Векторе это RAM) ----
+				ORG		0x0040
+vkbd:			DS		8			; 8 рядов ZX-матрицы, активный ноль, 0xFF = ничего не нажато
+z80_ix:			DS		2
+z80_iy:			DS		2
+z80_af_alt:		DS		2
+z80_bc_alt:		DS		2
+z80_de_alt:		DS		2
+z80_hl_alt:		DS		2
+il_tmp:			DS		2
+il_tmp2:		DS		2
+il_a:			DS		2
+il_outstub:		DS		3
+kl_seed:		DS		1			; seed_1 при старте (у ZX — FRAMES 0x5C78); стенд задаёт
+				ORG		0x0060
+"""
+KL_READ_PORT = """read_port:		; A = маска рядов (бит i=0 -> ряд i опрошен). Вместо ULA: AND выбранных рядов vkbd,
+				; затем cpl/and 0x1F как в оригинале. Портит только A и флаги (как оригинал).
+				push	hl
+				push	bc
+				push	de
+				ld		c, a
+				ld		hl, vkbd
+				ld		b, 8
+				ld		d, 0xFF
+rp_loop:		ld		a, c
+				rra
+				ld		c, a
+				jp		c, rp_skip
+				ld		a, (hl)
+				and		d
+				ld		d, a
+rp_skip:		inc		hl
+				dec		b
+				jp		nz, rp_loop
+				ld		a, d
+				cpl
+				and		0x1F
+				pop		de
+				pop		bc
+				pop		hl
+				ret
+; End of function read_port"""
+
+def _stub_after_label(src, label, note):
+    """Вставить `ret` сразу после строки `label:` (первое вхождение) — тело становится мёртвым."""
+    pat = re.compile(r'^(' + re.escape(label) + r':[^\n]*\n)', re.M)
+    m = pat.search(src)
+    if not m:
+        raise SystemExit(f"glue: метка {label} не найдена")
+    return src[:m.end()] + f"\t\t\t\tret\t\t\t; STUB({note})\n" + src[m.end():]
+
+def kl_glue(src, target):
+    n0 = src.count('\n')
+    # заголовок после DEVICE
+    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER + _LDIR_HELPERS + "\n", 1)
+    # read_port -> виртуальная клавиатура
+    src = re.sub(r'read_port:\n.*?; End of function read_port', KL_READ_PORT, src, count=1, flags=re.S)
+    if target == 'lockstep':
+        # РАСКЛАДКА ЛОКСТЕПА (код после трансляции ~47.6К, в раскладку ZX не влезает):
+        #   0x0000 boot/scratch/ldir | 0x0100 код+данные (~0xBC00) | стек 0xBC00-0xBFFF |
+        #   0xC000 переменные (0x568) | 0xC600 vidbuf 6К | 0xDE00 zx_vram 6К (= shift_bits_table,
+        #   таблица без читателей при заглушенном рендере) | 0xF600 zx_aram | 0xF900 reverse_bits_table
+        src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xDE00\nzx_vram:", 1)
+        src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xF600\nzx_aram:", 1)
+        src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC000\nclear_start:', src, count=1, flags=re.M)
+        src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
+        src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xC600\nvidbuf:', src, count=1, flags=re.M)
+        src = re.sub(r'^\t+ORG\s+0xF100\nreverse_bits_table:\n\t+DS\t+0x100\nshift_bits_table:\n\t+DS\t+0xE00',
+                     '\t\t\t\tORG 0xF900\nreverse_bits_table:\n\t\t\t\tDS\t\t0x100\nshift_bits_table:\tequ 0xDE00\t; alias zx_vram (без читателей)', src, count=1, flags=re.M)
+        src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>0xC000', src, count=1, flags=re.M)
+        src = src.replace("ld      a, (0x5C78)", "ld      a, (kl_seed)", 1)
+        n_org = src.count('ORG')
+        # пиксельный цикл print_sprite: всё после сохранения SP мёртво
+        src = re.sub(r'^\t+ld\s+\(tmp_SP\),\s*sp[^\n]*$', "\t\t\t\tret\t\t\t; STUB(lockstep): пиксельный цикл print_sprite отключён", src, count=1, flags=re.M)
+        for lbl in ('blit_to_screen', 'vidbuf_fill_window', 'vidbuf_clear_window'):
+            src = _stub_after_label(src, lbl, 'lockstep: самомод. djnz, только vidbuf/экран')
+    # выход: SAVEBIN вместо SAVESNA; ASSERT по размеру кода снимаем (код растёт)
+    src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
+    src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_8080.r0m", 0, 0x10000', src, flags=re.M)
+    return src
+
+def main():
+    argv = sys.argv[1:]
+    target = 'lockstep'
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == '--target':
+            target = argv[i + 1]; i += 2; continue
+        if a.startswith('--target='):
+            target = a.split('=', 1)[1]; i += 1; continue
+        pos.append(a); i += 1
+    inp, outp = pos[0], pos[1]
+    src = open(inp, encoding='latin-1').read()
+    src = kl_glue(src, target)
+    src, exx_pairs = _classify_exx(src)
+    src = translate(src)
+    open(outp, 'w', encoding='utf-8').write(src)
+    print(f"translated {inp} -> {outp} (target={target}); exx-B push/pop pairs={exx_pairs}")
+
+if __name__ == '__main__':
+    main()
