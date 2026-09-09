@@ -830,6 +830,378 @@ def kl_glue(src, target):
     src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_8080.r0m", 0, 0x10000', src, flags=re.M)
     return src
 
+# ============================ Vector glue (общая для z80vec и vec) ============================
+VEC_HEADER = """
+; ---- Вектор-06Ц: загрузчик (.r0m с 0x0000, PC=0). Всё в подмножестве i8080. ----
+				ORG		0x0000
+				di
+				ld		sp, 0x8000
+				jp		vec_boot
+				ORG		0x0038
+				jp		vec_pal_isr		; RST 38h: кадровое прерывание (палитра грузится в VBlank)
+				ORG		0x0040
+vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active-high (ряд 0..7)
+vec_tmp:		DS		2
+				ORG		0x0060
+vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
+				out		(0x00), a
+				xor		a
+				out		(0x02), a			; бордюр чёрный, режим 256
+				ld		(vec_tmp), a
+				ei						; палитру защёлкивает цвет под лучом -> грузим в VBlank из ISR
+vb_wait:		ld		a, (vec_tmp)
+				or		a
+				jp		z, vb_wait
+				di
+				ld		a, 0xFF
+				out		(0x03), a			; скролл: строка экрана r показывает lo=255-r
+				ld		hl, 0x8000			; очистить плоскость 0
+				ld		bc, 0x2000
+vb_clr:			ld		(hl), 0
+				inc		hl
+				dec		bc
+				ld		a, b
+				or		c
+				jp		nz, vb_clr
+				jp		START
+"""
+VEC_TAIL = """
+				ORG		0x7B00			; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)
+
+; ---- палитра: idx 8..15 (бит плоскости 0x8000) = белый, остальные чёрный. Только в VBlank. ----
+vec_pal_isr:	push	af
+				push	de
+				ld		e, 0x0F
+vb_pal:			ld		a, e
+				out		(0x02), a			; индекс = цвет бордюра (луч в обратном ходе)
+				ld		a, e
+				and		8
+				jp		z, vb_black
+				ld		a, 0xFF
+				jp		vb_w
+vb_black:		xor		a
+vb_w:			out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				dec		e
+				jp		p, vb_pal
+				xor		a
+				out		(0x02), a			; бордюр чёрный
+				ld		a, 1
+				ld		(vec_tmp), a
+				pop		de
+				pop		af
+				ret
+
+; ---- клавиатура: скан матрицы Вектора -> vec_kbmat, с зеркалом стрелок в буквы ----
+vec_scan:		ld		a, 0x8A				; порт B на вход
+				out		(0x00), a
+				ld		hl, vec_kbmat
+				ld		c, 0xFE				; бит i = 0 -> ряд i
+				ld		b, 8
+vs_l:			ld		a, c
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		(hl), a
+				inc		hl
+				ld		a, c
+				rlca
+				ld		c, a
+				dec		b
+				jp		nz, vs_l
+				ld		a, 0x88
+				out		(0x00), a
+				ld		a, 0xFF
+				out		(0x03), a			; вернуть скролл
+				xor		a
+				out		(0x02), a			; вернуть бордюр/режим
+				; стрелки (ряд 0: DN=7 RT=6 UP=5 LT=4) -> Z / X / A / Q
+				ld		a, (vec_kbmat+0)
+				ld		b, a
+				and		0x10				; LT -> Z (ряд 7 бит 2)
+				jp		z, vs_1
+				ld		a, (vec_kbmat+7)
+				or		0x04
+				ld		(vec_kbmat+7), a
+vs_1:			ld		a, b
+				and		0x40				; RT -> X (ряд 7 бит 0)
+				jp		z, vs_2
+				ld		a, (vec_kbmat+7)
+				or		0x01
+				ld		(vec_kbmat+7), a
+vs_2:			ld		a, b
+				and		0x20				; UP -> A (ряд 4 бит 1)
+				jp		z, vs_3
+				ld		a, (vec_kbmat+4)
+				or		0x02
+				ld		(vec_kbmat+4), a
+vs_3:			ld		a, b
+				and		0x80				; DN -> Q (ряд 6 бит 1)
+				ret		z
+				ld		a, (vec_kbmat+6)
+				or		0x02
+				ld		(vec_kbmat+6), a
+				ret
+
+; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
+; ZX ряды: 0 SHIFT Z X C V | 1 A S D F G | 2 Q W E R T | 3 1 2 3 4 5 | 4 0 9 8 7 6 | 5 P O I U Y | 6 ENTER L K J H | 7 SPACE SYM M N B
+; Вектор: ряд4 @ABCDEFG(бит0..7) ряд5 HIJKLMNO ряд6 PQRSTUVW ряд7 XYZ[\\]^SPC ряд2 0-7 ряд3 8=бит0 9=бит1 ряд0 ВК=бит2
+vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4,0x08, vec_kbmat+6,0x40	; SHIFT(нет) Z X C V
+				DB	vec_kbmat+4,0x02, vec_kbmat+6,0x08, vec_kbmat+4,0x10, vec_kbmat+4,0x40, vec_kbmat+4,0x80	; A S D F G
+				DB	vec_kbmat+6,0x02, vec_kbmat+6,0x80, vec_kbmat+4,0x20, vec_kbmat+6,0x04, vec_kbmat+6,0x10	; Q W E R T
+				DB	vec_kbmat+2,0x02, vec_kbmat+2,0x04, vec_kbmat+2,0x08, vec_kbmat+2,0x10, vec_kbmat+2,0x20	; 1 2 3 4 5
+				DB	vec_kbmat+2,0x01, vec_kbmat+3,0x02, vec_kbmat+3,0x01, vec_kbmat+2,0x80, vec_kbmat+2,0x40	; 0 9 8 7 6
+				DB	vec_kbmat+6,0x01, vec_kbmat+5,0x80, vec_kbmat+5,0x02, vec_kbmat+6,0x20, vec_kbmat+7,0x02	; P O I U Y
+				DB	vec_kbmat+0,0x04, vec_kbmat+5,0x10, vec_kbmat+5,0x08, vec_kbmat+5,0x04, vec_kbmat+5,0x01	; ENTER L K J H
+				DB	vec_kbmat+7,0x80, vec_kbmat+7,0x10, vec_kbmat+5,0x20, vec_kbmat+5,0x40, vec_kbmat+4,0x04	; SPACE SYM(\\) M N B
+
+; ---- звук: ВИ53 канал A (порт 0x0B, управление 0x08). HL = число итераций djnz полупериода ----
+; период ZX = 2*13*N тактов @3.5 МГц -> делитель ВИ53 @1.5 МГц = N*26*1.5/3.5 = 11.14*N ~ N*11 + N/8
+vec_snd_set:	push	de
+				push	hl
+				add		hl, hl
+				add		hl, hl
+				add		hl, hl				; N*8
+				pop		de					; DE = N
+				add		hl, de
+				add		hl, de
+				add		hl, de				; N*11
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a
+				ld		a, d
+				or		a
+				rra
+				ld		d, a
+				ld		a, e
+				rra
+				ld		e, a				; N/8
+				add		hl, de
+				ld		a, 0x36				; канал A, LSB+MSB, режим 3 (меандр)
+				out		(0x08), a
+				ld		a, l
+				out		(0x0B), a
+				ld		a, h
+				out		(0x0B), a
+				pop		de
+				ret
+vec_snd_off:	ld		a, 0x36				; управляющее слово без счётчика = тишина
+				out		(0x08), a
+				ret
+"""
+
+VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале
+				push	hl
+				push	bc
+				push	de
+				push	af				; vec_scan портит A/B/C/HL
+				call	vec_scan
+				pop		af
+				ld		c, a
+				ld		a, 0xFF
+				ld		(vec_tmp), a
+				ld		hl, vec_zxmap
+				ld		b, 8
+rp_row:			ld		a, c
+				rra
+				ld		c, a
+				jp		nc, rp_sel
+				ld		a, l				; ряд не выбран: пропустить 5 записей
+				add		a, 10
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				jp		rp_next
+rp_sel:			ld		d, 0xFF				; байт ZX-ряда, active-low
+				ld		e, 0x01
+rp_key:			ld		a, (hl)
+				inc		hl
+				push	hl
+				ld		l, a
+				ld		h, 0
+				ld		a, (hl)				; биты ряда Вектора (active-high)
+				pop		hl
+				and		(hl)
+				inc		hl
+				jp		z, rp_nk
+				ld		a, e
+				cpl
+				and		d
+				ld		d, a
+rp_nk:			ld		a, e
+				add		a, a
+				ld		e, a
+				cp		0x20
+				jp		nz, rp_key
+				ld		a, (vec_tmp)
+				and		d
+				ld		(vec_tmp), a
+rp_next:		dec		b
+				jp		nz, rp_row
+				ld		a, (vec_tmp)
+				cpl
+				and		0x1F
+				pop		de
+				pop		bc
+				pop		hl
+				ret
+; End of function read_port"""
+
+VEC_SCREEN = """
+; ---- экран Вектора: плоскость 0 (0x8000), столбец X/8 -> +256*col, строка ZX y -> lo = 223-y ----
+screen_calc_addr_de:	; BC = Y,X (пиксели) -> DE = адрес в плоскости. Портит только A/флаги.
+				ld		a, c
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				add		a, 0x80
+				ld		d, a
+				ld		a, 32				; Y растёт ВВЕРХ: lo = 32 + Y (Y=0 — низ поля, строка экрана 223)
+				add		a, b
+				ld		e, a
+				ret
+
+; DE = экран, HL = vidbuf (32 байта/строка), B = высота, C = ширина в байтах
+blit_to_screen:
+bts_col:		push	bc
+				push	hl
+				push	de
+bts_row:		ld		a, (hl)
+				ld		(de), a
+				ld		a, l
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				inc		e				; следующая строка буфера = выше на экране
+				dec		b
+				jp		nz, bts_row
+				pop		de
+				pop		hl
+				pop		bc
+				inc		hl
+				inc		d
+				dec		c
+				jp		nz, bts_col
+				ret
+
+update_screen:	; весь vidbuf 32x192 -> плоскость, буфер обнуляется (как оригинал 0xD57D)
+				ld		hl, vidbuf
+				ld		de, 0x8020			; столбец 0, lo=32 (= игровая Y=0, низ поля)
+				ld		c, 32
+us_col:			push	hl
+				push	de
+				ld		b, 192
+us_row:			ld		a, (hl)
+				ld		(de), a
+				ld		(hl), 0
+				ld		a, l
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				inc		e
+				dec		b
+				jp		nz, us_row
+				pop		de
+				pop		hl
+				inc		hl
+				inc		d
+				dec		c
+				jp		nz, us_col
+				ret
+"""
+
+def _replace_func(src, label, end_marker, new, note=""):
+    """Заменить тело от `label:` до строки end_marker (включительно) на new."""
+    i = src.index(label + ":")
+    j = src.index(end_marker, i) + len(end_marker)
+    return src[:i] + new + src[j:]
+
+def kl_vec_glue(src, translate_later):
+    """Адаптация под Вектор-06Ц (общая для Z80- и i8080-целей): загрузчик, экран, клавиатура, ВИ53."""
+    # заголовок после DEVICE
+    # РАСКЛАДКА: код 0x0100.., стек <0x8000, ПЛОСКОСТЬ 0x8000-0x9FFF, переменные 0xA000, vidbuf 0xA600,
+    # таблицы 0xBE00/0xBF00, "экран ZX" 0xCD00 (только атрибуты как мусорное ОЗУ)
+    src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
+    src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xE500\nzx_aram:", 1)
+    # переменные с 0xA100: игра делает `ld sp,seed_1` — стек под seed_1 должен быть в НЕВИДИМОЙ плоскости (0xA0xx), не в 0x9Fxx
+    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xA100\nclear_start:', src, count=1, flags=re.M)
+    src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
+    # vidbuf — отдельный сегмент; START и build_lookup_tbls (в оригинале лежат ВНУТРИ буфера и
+    # затираются им) выносим на 0x7A00 (код кончается ~0x78B1, стек растёт вниз от 0x8000)
+    src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xA700\nvidbuf:\t\t\tDS 0x1800\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера', src, count=1, flags=re.M)
+    # таблицы сдвига ОСТАЮТСЯ на 0xF100/0xF200: print_sprite адресует страницу таблицы константой (or 0xF0)
+    src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>0x8000', src, count=1, flags=re.M)
+    # font как ограничитель таблицы объектов -> clear_end
+    assert src.count("ld      bc, font") == 2
+    src = src.replace("ld      bc, font", "ld      bc, clear_end")
+    src = src.replace("ld      hl, font\n\t\t\t\tand     a", "ld      hl, clear_end\n\t\t\t\tand     a", 1)
+    # клавиатура
+    src = re.sub(r'read_port:\n.*?; End of function read_port', VEC_READ_PORT, src, count=1, flags=re.S)
+    # экран: старые процедуры целиком долой (наши определены в заголовке)
+    src = re.sub(r'screen_calc_addr_de:\n.*?\n\t+ret\r?\n', '', src, count=1, flags=re.S)
+    src = re.sub(r'\nblit_to_screen:\n.*?\n\.djnz\s+djnz\s+\$\r?\n\t+ret\r?\n', '\n', src, count=1, flags=re.S)
+    src = re.sub(r'update_screen:\n.*?; End of function update_screen', '; (update_screen -> Вектор, см. заголовок)', src, count=1, flags=re.S)
+    src, n_cb = re.subn(r'(clr_bitmap_memory:[^\n]*\n\t+)ld      hl, zx_vram\n(\t+)ld      bc, 0x1800',
+                        r'\g<1>ld      hl, 0x8000\t\t\t; Вектор: плоскость 0 целиком\n\g<2>ld      bc, 0x2000', src, count=1)
+    assert n_cb == 1, "clr_bitmap"
+    assert "ld      de, zx_vram+0x17F7" in src
+    src = src.replace("ld      de, zx_vram+0x17F7", "ld      de, 0x9720\t\t\t\t; Вектор: (184,0) = столбец 23, lo 32", 1)
+    assert "ld      hl, 0x5800\n" in src
+    src = src.replace("ld      hl, 0x5800\n", "ld      hl, zx_aram\n", 1)
+    # бордюр ZX (ULA) — убрать
+    src = src.replace("\t\t\t\txor     a                                       ; border colour BLACK, activate MIC\n\t\t\t\tout     (0xFE), a                               ; ULA\n",
+                      "\t\t\t\txor     a\n", 1)
+    # звук: play_note (loc_B300) — меандр ВИ53 вместо переключений EAR
+    old = "loc_B2FF:\n\t\t\t\tpop     de\n\nloc_B300:\n\t\t\t\tpush    bc\n\t\t\t\txor     a\n\t\t\t\tout     (0xFE), a\n"
+    assert old in src, "play_note out1"
+    src = src.replace(old, "loc_B2FF:\n\t\t\t\tpop     de\n\t\t\t\tpush    hl\n\t\t\t\tld      h, c\t\t\t\t; N = (C-1)*256 + B  (B=0 -> 256)\n\t\t\t\tdec     h\n\t\t\t\tld      l, b\n\t\t\t\tcall    vec_snd_set\n\t\t\t\tpop     hl\n\nloc_B300:\n\t\t\t\tpush    bc\n\t\t\t\txor     a\n", 1)
+    old = "\t\t\t\tpush    bc\n\t\t\t\tld      a, 0x10\n\t\t\t\tout     (0xFE), a\n\nloc_B30F:"
+    assert old in src, "play_note out2"
+    src = src.replace(old, "\t\t\t\tpush    bc\n\t\t\t\tld      a, 0x10\n\nloc_B30F:", 1)
+    old = "\t\t\t\tjr      NZ, loc_B300\n\t\t\t\tinc     de\n\t\t\t\tret\n"
+    assert old in src, "play_note end"
+    src = src.replace(old, "\t\t\t\tjr      NZ, loc_B300\n\t\t\t\tcall    vec_snd_off\n\t\t\t\tinc     de\n\t\t\t\tret\n", 1)
+    # toggle_audio_hw: один период с полупериодом B
+    old = "toggle_audio_hw:\n\t\t\t\tld      a, 0x10                                ; EAR output\n\t\t\t\tout     (0xFE), a                               ; enable\n\t\t\t\tld      a, b\n"
+    assert old in src, "toggle_audio_hw"
+    src = src.replace(old, "toggle_audio_hw:\n\t\t\t\tpush    hl\n\t\t\t\tld      l, b\n\t\t\t\tld      h, 0\n\t\t\t\tcall    vec_snd_set\n\t\t\t\tpop     hl\n\t\t\t\tld      a, b\n", 1)
+    old = "\t\t\t\tld      b, a\n\t\t\t\txor     a                                       ; MIC output\n\t\t\t\tout     (0xFE), a                               ; enable (disable EAR)\n\t\t\t\tld      a, b\n"
+    assert old in src, "toggle_audio_hw 2"
+    src = src.replace(old, "\t\t\t\tld      b, a\n\t\t\t\tld      a, b\n", 1)
+    i = src.index("toggle_audio_hw:")
+    j = src.index("\t\t\t\tld      b, a\n\t\t\t\tret\n", i)
+    src = src[:j] + "\t\t\t\tld      b, a\n\t\t\t\tcall    vec_snd_off\n\t\t\t\tret\n" + src[j + len("\t\t\t\tld      b, a\n\t\t\t\tret\n"):]
+    assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
+    src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
+    # заголовок (и наши экранные процедуры) — ПОСЛЕ удаления старых, иначе регулярки цепляют новые
+    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + VEC_HEADER + "\n", 1)
+    src = re.sub(r'^(\s*SAVESNA)', VEC_TAIL.replace("\\", "\\\\") + VEC_SCREEN.replace("\\", "\\\\") + r"\n\g<1>", src, count=1, flags=re.M)
+    return src
+
+
 def main():
     argv = sys.argv[1:]
     target = 'lockstep'
@@ -844,6 +1216,12 @@ def main():
         pos.append(a); i += 1
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='latin-1').read()
+    if target == 'z80vec':
+        src = kl_vec_glue(src, translate_later=False)
+        src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_z80.r0m", 0, 0x10000', src, flags=re.M)
+        open(outp, 'w', encoding='utf-8').write(src)
+        print(f"vector glue (Z80, без трансляции) {inp} -> {outp}")
+        return
     src = kl_glue(src, target)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
