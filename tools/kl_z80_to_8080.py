@@ -1574,6 +1574,8 @@ def main():
     src = kl_glue(src, target)
     src = kl_no_delay(src)
     src = kl_native.apply(src)
+    src = kl_native_render.apply(src)
+    src = kl_native_logic.apply(src)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
     helpers = ix_helpers_text()
