@@ -109,6 +109,164 @@ cpa_n:			ld		a, e								; следующий объект
 """
 
 
+# ---------------------------------------------------------------------------
+# set_draw_objs_overlapped: пролог (calc_2d_info + объединённый прямоугольник) оставлен как был,
+# переписан ГОРЯЧИЙ цикл по 40 объектам (78 проходов на итерацию, 2 вызова).
+# Что изменилось против версии kl_native:
+#   * четыре параметра прямоугольника (левый край, ширина, нижний Y, высота) пролог кладёт
+#     НЕПОСРЕДСТВЕННО в иммедиаты sub/cp внутри цикла -> сравнение стоит 7 тактов и не занимает
+#     регистров; DE освобождён под постоянный шаг 32 (add hl,de вместо ld de,32 + add hl,de);
+#   * поле флагов адресуется как l+7 без adc: младший байт объекта <= (база&31)+224, а
+#     (graphic_objs_tbl & 31) = 8, значит +7 никогда не переносит (см. ASSERT);
+#   * pixel X/Y читаются одним проходом вперёд (inc hl), возврат к базе — единственный pop.
+# Такты на объект: пусто 46 (было 56), уже DRAW 100 (было 128), полная проверка 208-227 (было 283-290).
+# ---------------------------------------------------------------------------
+N_SET_DRAW = """set_draw_objs_overlapped:	; DRAW всем объектам, попавшим в объединённый прямоугольник старого и нового положения (ix)
+				ASSERT (graphic_objs_tbl & 31) <= 24		; иначе l+7 переносит и адресация поля флагов ломается
+				call	calc_2d_info
+				ld		hl, (z80_ix)
+				ld		de, 24
+				add		hl, de
+				ld		a, (hl)
+				ld		(kl_pw), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_ph), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_px), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_py), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_opw), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_oph), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_opx), a
+				inc		hl
+				ld		a, (hl)
+				ld		(kl_opy), a
+				ld		a, (kl_px)
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				ld		c, a								; xb
+				ld		a, (kl_opx)
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				ld		b, a								; oxb
+				cp		c
+				jp		c, sd_1
+				ld		a, c
+sd_1:			ld		(sd_ie+1), a						; левый край -> иммедиат
+				ld		a, c
+				ld		hl, kl_pw
+				add		a, (hl)
+				ld		c, a								; xb + pw
+				ld		a, b
+				ld		hl, kl_opw
+				add		a, (hl)
+				cp		c
+				jp		nc, sd_2
+				ld		a, c
+sd_2:			ld		hl, sd_ie+1
+				sub		(hl)
+				ld		(sd_id+1), a						; объединённая ширина -> иммедиат
+				ld		a, (kl_py)
+				ld		hl, kl_opy
+				cp		(hl)
+				jp		c, sd_3
+				ld		a, (hl)
+sd_3:			ld		(sd_il+1), a						; нижний Y -> иммедиат
+				ld		a, (kl_py)
+				ld		hl, kl_ph
+				add		a, (hl)
+				ld		c, a
+				ld		a, (kl_opy)
+				ld		hl, kl_oph
+				add		a, (hl)
+				cp		c
+				jp		nc, sd_4
+				ld		a, c
+sd_4:			ld		hl, sd_il+1
+				sub		(hl)
+				ld		(sd_ih+1), a						; объединённая высота -> иммедиат
+				ld		hl, graphic_objs_tbl
+				ld		de, 32								; шаг объекта живёт в DE весь цикл
+				ld		b, 40
+sd_loop:		ld		a, (hl)								; graphic no
+				or		a
+				jp		z, sd_next
+				ld		a, l
+				add		a, 7
+				ld		l, a								; -> поле флагов
+				ld		a, (hl)
+				and		0x10								; уже DRAW?
+				jp		nz, sd_n7
+				push	hl
+				ld		a, l
+				add		a, 19
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; -> +26 pixel X
+				ld		a, (hl)
+				rrca
+				rrca
+				rrca
+				and		0x1F								; ax
+sd_ie:			sub		0									; - левый край (иммедиат из пролога)
+				jp		c, sd_xneg
+sd_id:			cp		0									; >= объединённой ширины?
+				jp		nc, sd_pn
+				jp		sd_yc
+sd_xneg:		cpl
+				inc		a									; левый край - ax
+				dec		hl
+				dec		hl									; -> +24 pw объекта
+				cp		(hl)
+				jp		nc, sd_pn
+				inc		hl
+				inc		hl
+sd_yc:			inc		hl									; -> +27 pixel Y
+				ld		a, (hl)
+sd_il:			sub		0									; - нижний Y
+				jp		c, sd_yneg
+sd_ih:			cp		0									; >= объединённой высоты?
+				jp		nc, sd_pn
+				jp		sd_set
+sd_yneg:		cpl
+				inc		a
+				dec		hl
+				dec		hl									; -> +25 ph объекта
+				cp		(hl)
+				jp		nc, sd_pn
+sd_set:			pop		hl									; -> поле флагов
+				ld		a, (hl)
+				or		0x10
+				ld		(hl), a
+				jp		sd_n7
+sd_pn:			pop		hl
+sd_n7:			ld		a, l
+				sub		7
+				ld		l, a
+sd_next:		add		hl, de
+				dec		b
+				jp		nz, sd_loop
+				ld		hl, graphic_objs_tbl+1280			; IY после цикла = конец таблицы (как оригинал)
+				ld		(z80_iy), hl
+				ret
+; End of function set_draw_objs_overlapped
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -119,4 +277,6 @@ def apply(src):
     src = _sub(src, r'(?m)^is_near_to:\n.*?; End of function is_near_to\r?\n', N_IS_NEAR_TO, 'is_near_to')
     src = _sub(src, r'(?m)^chk_plyr_spec_near_arch:\n.*?; End of function chk_plyr_spec_near_arch\r?\n',
                N_CHK_NEAR_ARCH, 'chk_plyr_spec_near_arch')
+    src = _sub(src, r'(?m)^set_draw_objs_overlapped:.*?; End of function set_draw_objs_overlapped\r?\n',
+               N_SET_DRAW, 'set_draw_objs_overlapped')
     return src
