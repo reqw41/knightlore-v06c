@@ -59,6 +59,10 @@ const RULES={
   upd_2_4:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["o1",r.ix,32]]},
   update_sprite_loop:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
   wipe_next_object:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
+  chk_plyr_OOB:{regions:r=>[["o1",r.ix,32]]},
+  clear_dX_dY:{regions:r=>[["o1",r.ix,32]]},
+  adj_dZ_for_out_of_bounds:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
+  adj_for_out_of_bounds:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");

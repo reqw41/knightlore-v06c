@@ -481,6 +481,301 @@ loc_C7D6:		ld		a, e								; следующий объект (указатель
 """
 
 
+# ---------------------------------------------------------------------------
+# do_objs_intersect_on_x/y/z: |коорд1 + d - коорд2| - (размер1 + размер2); CY = пересечение.
+# Оригинал портит только A, D и флаги (B, C, E, H, L целы) — потому промежуточные значения
+# идут через push af, а не через регистр. По четыре обращения (ix/iy+n) на процедуру
+# (~214 тактов каждое через хелпер) сведены к двум загрузкам указателя.
+# ---------------------------------------------------------------------------
+N_DOI_X = """do_objs_intersect_on_x:	; C = new dX; CY = пересечение по X. Портит A, D.
+				push	hl
+				ld		hl, (z80_ix)
+				inc		hl									; ix+1
+				ld		a, (hl)								; objX
+				add		a, c								; + new dX
+				push	af
+				ld		a, l
+				add		a, 3
+				ld		l, a								; ix+4
+				ld		d, (hl)								; objW
+				ld		hl, (z80_iy)
+				ld		a, l
+				add		a, 4
+				ld		l, a								; iy+4
+				ld		a, d
+				add		a, (hl)								; objW + thisW
+				ld		d, a
+				ld		a, l
+				sub		3
+				ld		l, a								; iy+1
+				pop		af
+				sub		(hl)								; objX + newdX - thisX
+				jp		p, doix_1
+				cpl
+				inc		a									; abs()
+doix_1:			sub		d
+				pop		hl
+				ret
+; End of function do_objs_intersect_on_x
+"""
+
+N_DOI_Y = """do_objs_intersect_on_y:	; L = new dY; CY = пересечение по Y. Портит A, D.
+				push	hl
+				ld		d, l								; new dY
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 2
+				ld		l, a								; ix+2
+				ld		a, (hl)								; objY
+				add		a, d								; + new dY
+				push	af
+				ld		a, l
+				add		a, 3
+				ld		l, a								; ix+5
+				ld		d, (hl)								; objD
+				ld		hl, (z80_iy)
+				ld		a, l
+				add		a, 5
+				ld		l, a								; iy+5
+				ld		a, d
+				add		a, (hl)								; objD + thisD
+				ld		d, a
+				ld		a, l
+				sub		3
+				ld		l, a								; iy+2
+				pop		af
+				sub		(hl)								; objY + newdY - thisY
+				jp		p, doiy_1
+				cpl
+				inc		a
+doiy_1:			sub		d
+				pop		hl
+				ret
+; End of function do_objs_intersect_on_y
+"""
+
+N_DOI_Z = """do_objs_intersect_on_z:	; H = new dZ; CY = пересечение по Z. Портит A, D.
+				push	hl
+				ld		d, h								; new dZ
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl
+				inc		hl									; ix+3
+				ld		a, (hl)								; objZ
+				add		a, d								; + new dZ
+				push	af
+				ld		hl, (z80_iy)
+				inc		hl
+				inc		hl
+				inc		hl									; iy+3
+				pop		af
+				sub		(hl)								; objZ + newdZ - thisZ
+				jp		p, doiz_pos
+				cpl
+				inc		a									; abs()
+				push	af
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 6
+				ld		l, a								; ix+6
+				ld		d, (hl)								; objH
+				pop		af
+				jp		doiz_end
+doiz_pos:		push	af
+				ld		a, l
+				add		a, 3
+				ld		l, a								; iy+6
+				ld		d, (hl)								; thisH
+				pop		af
+doiz_end:		sub		d
+				pop		hl
+				ret
+; End of function do_objs_intersect_on_z
+"""
+
+# ---------------------------------------------------------------------------
+# chk_plyr_OOB: CY = игрок внутри комнаты. Оригинал портит A, HL (оставляет в HL
+# room_size-минус-габарит по X и Y) и флаги; BC и DE целы — значит габариты можно
+# посчитать в BC, сохранив BC на стеке, и вернуть их в HL перед ret (MOV флагов не трогает).
+# ---------------------------------------------------------------------------
+N_CHK_OOB = """chk_plyr_OOB:	; CY = внутри комнаты; A = |Y-128|; HL = (sizeX-W, sizeY-D). BC/DE целы.
+				push	bc
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 4
+				ld		l, a								; ix+4
+				ld		b, (hl)								; width
+				inc		hl
+				ld		c, (hl)								; depth
+				ld		hl, (room_size_X)					; L = room_size_X, H = room_size_Y
+				ld		a, l
+				sub		b
+				ld		b, a								; B = size X - width
+				ld		a, h
+				sub		c
+				ld		c, a								; C = size Y - depth
+				ld		hl, (z80_ix)
+				inc		hl									; ix+1
+				ld		a, (hl)								; X
+				sub		128
+				jp		p, cpo_1
+				cpl
+				inc		a
+cpo_1:			cp		b
+				jp		nc, cpo_out							; OOB
+				inc		hl									; ix+2
+				ld		a, (hl)								; Y
+				sub		128
+				jp		p, cpo_2
+				cpl
+				inc		a
+cpo_2:			cp		c
+cpo_out:		ld		l, b
+				ld		h, c
+				pop		bc
+				ret
+; End of function chk_plyr_OOB
+"""
+
+# ---------------------------------------------------------------------------
+# clear_dX_dY (хвост move_player): dX = dY = 0. Оригинал портит только A (=0) и флаги.
+# ---------------------------------------------------------------------------
+N_CLEAR_DXDY = """clear_dX_dY:
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 9
+				ld		l, a								; ix+9
+				xor		a
+				ld		(hl), a								; dX = 0
+				inc		hl
+				ld		(hl), a								; dY = 0
+				pop		hl
+				ret
+; End of function move_player
+"""
+
+# ---------------------------------------------------------------------------
+# adj_dZ_for_out_of_bounds и adj_for_out_of_bounds. Здесь HL занят рабочими значениями
+# (L = dY, H = dZ), поэтому указатель объекта берётся во временное владение HL:
+# в прологе adj_for_out_of_bounds HL ещё свободен, дальше — через ex de,hl (DE в этих
+# процедурах мёртв: adj_dZ_for_out_of_bounds сама кладёт в D room_size_Z) или push/pop hl.
+# ---------------------------------------------------------------------------
+N_ADJ_DZ_OOB = """adj_dZ_for_out_of_bounds:	; H = dZ; прижать dZ так, чтобы Z+dZ не вышел за room_size_Z
+				ld		a, (room_size_Z)
+				ld		d, a
+
+loc_CA5E:		push	hl
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl
+				inc		hl									; ix+3
+				ld		a, (hl)								; Z
+				pop		hl
+				add		a, h								; Z += dZ
+				cp		d									; >= высоты комнаты?
+				ret		nc									; да, выходим
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 12
+				ld		l, a								; ix+12
+				ld		a, (hl)
+				or		4									; set 2 — вышли по Z
+				ld		(hl), a
+				pop		hl
+				ld		a, h								; Z+dZ
+				call	adj_d_for_out_of_bounds
+				ld		h, a								; новый dZ
+				jp		nz, loc_CA5E						; проверить ещё раз
+				ret
+; End of function adj_dZ_for_out_of_bounds
+"""
+
+N_ADJ_OOB = """adj_for_out_of_bounds:	; прижать dX/dY/dZ (C/L/H) к границам комнаты и к другим объектам
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a								; ix+7
+				ld		a, (hl)
+				and		2									; уже внутри?
+				ret		nz
+				ld		a, (hl)
+				or		2
+				ld		(hl), a								; set 1,(ix+7)
+				ld		a, l
+				add		a, 5
+				ld		l, a								; ix+12
+				ld		a, (hl)
+				and		0xF8								; сбросить флаги OOB по X,Y,Z
+				ld		(hl), a
+				dec		hl									; ix+11
+				ld		a, (hl)								; dZ
+				and		a									; ноль?
+				ld		h, a								; H = dZ
+				ld		l, 0								; L = dY = 0
+				ld		c, l								; C = dX = 0
+				jp		z, dZ_ok
+				call	adj_dZ_for_out_of_bounds
+				ld		a, h
+				and		a
+				jp		z, dZ_ok
+				call	adj_dZ_for_obj_intersect
+
+dZ_ok:			ex		de, hl								; dY/dZ спрятать в DE
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 9
+				ld		l, a								; ix+9
+				ld		a, (hl)								; dX
+				ex		de, hl
+				and		a									; ноль?
+				ld		c, a
+				jp		z, loc_CB7B
+				call	adj_dX_for_out_of_bounds
+				ld		a, c
+				and		a
+				jp		z, loc_CB7B
+				call	adj_dX_for_obj_intersect
+
+loc_CB7B:		ex		de, hl
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 10
+				ld		l, a								; ix+10
+				ld		a, (hl)								; dY
+				ex		de, hl
+				and		a									; ноль?
+				ld		l, a
+				jp		z, loc_CB8C
+				call	adj_dY_for_out_of_bounds
+				ld		a, l
+				and		a
+				jp		z, loc_CB8C
+				call	adj_dY_for_obj_intersect
+
+loc_CB8C:		ex		de, hl								; DE = dY(E)/dZ(D)
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 9
+				ld		l, a								; ix+9
+				ld		(hl), c								; новый dX
+				inc		hl
+				ld		(hl), e								; новый dY
+				inc		hl
+				ld		(hl), d								; новый dZ
+				ld		a, l
+				sub		4
+				ld		l, a								; ix+7
+				ld		a, (hl)
+				and		0xFD								; res 1,(ix+7)
+				ld		(hl), a
+				ex		de, hl								; вернуть HL = dY/dZ, как у оригинала
+				ret
+; End of function adj_for_out_of_bounds
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -495,6 +790,14 @@ def apply(src):
                N_SET_DRAW, 'set_draw_objs_overlapped')
     src = _sub(src, r'(?m)^upd_3_5:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_3_5, 'upd_3_5')
     src = _sub(src, r'(?m)^upd_2_4:[^\n]*\n.*?(?=^chk_plyr_spec_near_arch:)', N_UPD_2_4, 'upd_2_4 + цикл арки')
+    for lbl, txt, end in (('do_objs_intersect_on_x', N_DOI_X, 'do_objs_intersect_on_x'),
+                          ('do_objs_intersect_on_y', N_DOI_Y, 'do_objs_intersect_on_y'),
+                          ('do_objs_intersect_on_z', N_DOI_Z, 'do_objs_intersect_on_z'),
+                          ('chk_plyr_OOB', N_CHK_OOB, 'chk_plyr_OOB'),
+                          ('clear_dX_dY', N_CLEAR_DXDY, 'move_player'),
+                          ('adj_dZ_for_out_of_bounds', N_ADJ_DZ_OOB, 'adj_dZ_for_out_of_bounds'),
+                          ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
+        src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
