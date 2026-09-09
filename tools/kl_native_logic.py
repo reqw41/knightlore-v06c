@@ -267,6 +267,41 @@ sd_next:		add		hl, de
 """
 
 
+# ---------------------------------------------------------------------------
+# Обвязка перебора объектов (40 объектов на итерацию).
+#
+# ОТВЕРГНУТО: класть адрес возврата диспетчера в seed_1-2 раз за кадр и ставить
+#    ld sp,seed_1-2 вместо ld sp,seed_1 + ld hl,ret_from_tbl_jp + push hl (-21 такт
+#    на объект, -840 на итерацию). Локстеп зелёный, но цель vec виснет: там живо
+#    прерывание RST 38h, а между ret обработчика (SP снова = seed_1) и следующим
+#    ld sp прерывание успевает положить af/bc/de/hl поверх слова в seed_1-2.
+#    Слово, из которого делается ret, обязано лежать НИЖЕ SP всё время — с ret это
+#    невозможно. Оставлен оригинальный push.
+#
+# ret_from_tbl_jp: вместо 16-битного ix+=32 через HL и 16-битного сравнения с концом
+#    таблицы — инкремент младшего байта z80_ix на месте (перенос в старший — 1 раз из 8)
+#    и сравнение младшего байта с младшим байтом clear_end; старший проверяется только
+#    когда младшие совпали (5 объектов из 40). 107 -> ~62 такта на объект.
+# ---------------------------------------------------------------------------
+N_RET_FROM_TBL = """ret_from_tbl_jp:	; (ld a,r -> 0) seed_3 += 0; IX += 32; конец таблицы -> loc_B000, иначе следующий объект
+				ld		hl, z80_ix
+				ld		a, (hl)
+				add		a, 32
+				ld		(hl), a
+				jp		nc, rft_1
+				inc		hl
+				inc		(hl)								; перенос в старший байт (каждый 8-й объект)
+				dec		hl
+rft_1:			cp		low clear_end
+				jp		nz, update_sprite_loop
+				inc		hl
+				ld		a, (hl)
+				cp		high clear_end
+				jp		z, loc_B000
+				jp		update_sprite_loop
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -279,4 +314,6 @@ def apply(src):
                N_CHK_NEAR_ARCH, 'chk_plyr_spec_near_arch')
     src = _sub(src, r'(?m)^set_draw_objs_overlapped:.*?; End of function set_draw_objs_overlapped\r?\n',
                N_SET_DRAW, 'set_draw_objs_overlapped')
+    # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
+    src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
