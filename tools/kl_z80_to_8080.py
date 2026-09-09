@@ -5,6 +5,8 @@ is lifted verbatim from kvalley-v06c/tools/kv_z80_to_8080.py (tag asm-freeze); g
 Usage: python3 tools/kl_z80_to_8080.py <in.asm> <out.asm> [--target lockstep|vector]
 """
 import sys, re
+sys.path.insert(0, __import__('os').path.dirname(__file__))
+import kl_native
 
 
 # scratch cell names (defined as MAP fields appended to the work area)
@@ -682,6 +684,12 @@ def translate(src):
 
 
 
+def kl_no_delay(src):
+    """Искусственная задержка оригинала (при <6 объектов) — снять: на i8080 темп и так ниже; состояние не меняет."""
+    old = "game_delay:\n\t\t\t\tld      hl, 0x500\n"
+    assert old in src, "game_delay"
+    return src.replace(old, "game_delay:\n\t\t\t\tjp      no_delay\t\t\t\t; KL: задержка снята\n\t\t\t\tld      hl, 0x500\n", 1)
+
 # ============================ Knight Lore glue ============================
 KL_HEADER = """
 ; ---- Vector-06C boot stub (.r0m грузится с 0x0000, PC=0) ----
@@ -706,7 +714,8 @@ kl_seed:		DS		1			; seed_1 при старте (у ZX — FRAMES 0x5C78); сте
 kl_ball_cc:		DS		1			; мяч: 0x30=jr nc / 0x38=jr c (в оригинале самомод. опкод)
 kl_blk_off:		DS		2			; блок: +0 смещение dX/dY (9/10), +1 смещение X/Y (1/2)
 kl_rnd_feed:	DS		1			; lockstep: байт mem[seed_2] из журнала ZX
-				ORG		0x0080			; хелперы ldir (scratch выше кончается на 0x61 — не пересекать!)
+__KL_SCRATCH__
+				ORG		0x00A0			; хелперы ldir (scratch выше кончается ~0x85 — не пересекать!)
 """
 KL_READ_PORT = """read_port:		; A = маска рядов (бит i=0 -> ряд i опрошен). Вместо ULA: AND выбранных рядов vkbd,
 				; затем cpl/and 0x1F как в оригинале. Портит только A и флаги (как оригинал).
@@ -747,7 +756,7 @@ def _stub_after_label(src, label, note):
 def kl_glue(src, target):
     n0 = src.count('\n')
     # заголовок после DEVICE
-    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER + _LDIR_HELPERS + "\n", 1)
+    src = src.replace("\tDEVICE ZXSPECTRUM48\n", "\tDEVICE ZXSPECTRUM48\n" + KL_HEADER.replace("__KL_SCRATCH__", kl_native.SCRATCH) + _LDIR_HELPERS + "\n", 1)
     # --- самомодифицирующийся код ЛОГИКИ (3 сайта) -> переменные ---
     # 1) upd_182_183 (мяч): опкод jr nc/jr c писался в loc_B65D и loc_B676
     old = "\t\t\t\tld      (loc_B65D), a\n\t\t\t\tld      (loc_B676), a                           ; self-modifying code\n"
@@ -1652,11 +1661,14 @@ def main():
     src = open(inp, encoding='latin-1').read()
     if target == 'z80vec':
         src = kl_vec_glue(src, translate_later=False)
+        src = kl_no_delay(src)
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_z80.r0m", 0, 0x10000', src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)
         print(f"vector glue (Z80, без трансляции) {inp} -> {outp}")
         return
     src = kl_glue(src, target)
+    src = kl_no_delay(src)
+    src = kl_native.apply(src)
     src, exx_pairs = _classify_exx(src)
     src = translate(src)
     open(outp, 'w', encoding='utf-8').write(src)
