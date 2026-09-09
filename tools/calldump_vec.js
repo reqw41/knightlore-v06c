@@ -50,6 +50,15 @@ const RULES={
   set_draw_objs_overlapped:{regions:r=>{const sp=rd16(L.sprite_tbl+2*rd(r.ix));const w=rd(sp)&15,h=rd(sp+1);return [["obj",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32],["spr",sp,2+w*2*h]];}},
   calc_2d_info:{regions:r=>{const sp=rd16(L.sprite_tbl+2*rd(r.ix));const w=rd(sp)&15,h=rd(sp+1);return [["obj",r.ix,32],["spr",sp,2+w*2*h]];}},
   // не процедура, а точка: класс перекрытия C при известных IX/IY (loc_CF62 = ld l,c)
+  // --- logic (native-logic) ---
+  is_near_to:{regions:r=>[["o1",r.ix,32],["o2",r.iy,32]]},
+  do_objs_intersect_on_x:{regions:r=>[["o1",r.ix,32],["o2",r.iy,32]]},
+  do_objs_intersect_on_y:{regions:r=>[["o1",r.ix,32],["o2",r.iy,32]]},
+  do_objs_intersect_on_z:{regions:r=>[["o1",r.ix,32],["o2",r.iy,32]]},
+  chk_plyr_spec_near_arch:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,4*32]]},
+  upd_2_4:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["o1",r.ix,32]]},
+  update_sprite_loop:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
+  wipe_next_object:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");
