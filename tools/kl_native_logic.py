@@ -104,6 +104,10 @@ cpa_n:			ld		a, e								; следующий объект
 				ld		d, a
 				dec		b
 				jp		nz, cpa_1
+				push	hl
+				ld		hl, graphic_objs_tbl+128			; IY после цикла — как у оригинала
+				ld		(z80_iy), hl
+				pop		hl
 				ret
 ; End of function chk_plyr_spec_near_arch
 """
@@ -302,6 +306,181 @@ rft_1:			cp		low clear_end
 """
 
 
+# ---------------------------------------------------------------------------
+# Блок арок: upd_3_5 и upd_2_4 (+ loc_C74C, loc_C760, adj_2_4_hflip) и цикл loc_C785
+# по 4 объектам, который выставляет соседям арки dX/dY.
+# Все (ix+n) заменены на ход по HL от (z80_ix): смещения 1..11 не переносят младший байт
+# (ASSERT в set_draw_objs_overlapped), поэтому адресация идёт add/sub по L.
+# В цикле loc_C785 указатель объекта живёт в DE, пороги — в HL.
+#
+# ПРИЧУДА ОРИГИНАЛА, которую обязательно сохранить: HL входит в is_near_to как пороги,
+# но путь adj_ew/adj_ns идёт через lookup_plyr_dXY -> jump_to_tbl_entry, который кладёт
+# в HL АДРЕС обработчика. Со следующего объекта «пороги» = байты адреса adj_ew/adj_ns.
+# Поэтому adj_ew/adj_ns оставлены исходным текстом (их (ix/iy+n) сохраняют HL сами),
+# а loc_C7D6 берёт указатель объекта из DE, а не из HL.
+# ---------------------------------------------------------------------------
+N_UPD_3_5 = """upd_3_5:		; дальняя сторона арки: hflip?
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)
+				and		0x40								; hflip?
+				jp		nz, adj_3_5_hflip
+				ld		hl, 0xFDF7							; -3, -9
+"""
+
+N_UPD_2_4 = """upd_2_4:		; ближняя сторона арки: hflip?
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)
+				and		0x40								; hflip?
+				jp		nz, adj_2_4_hflip
+				ld		hl, (z80_ix)
+				ld		a, (hl)								; graphic no
+				cp		4									; tree arch?
+				jp		z, adj_m3_p1
+				ld		hl, 0xFDF9							; -3, -7
+
+loc_C74C:		call	set_pixel_adj
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl									; ix+2 (Y)
+				ld		a, (hl)
+				add		a, 13
+				ld		c, a
+				ld		a, l
+				add		a, 8
+				ld		l, a								; ix+10
+				ld		(hl), c								; dY = Y+13
+				ld		a, l
+				sub		9
+				ld		l, a								; ix+1 (X)
+				ld		a, (hl)
+				ld		c, a
+				ld		a, l
+				add		a, 8
+				ld		l, a								; ix+9
+				ld		(hl), c								; dX = X
+				ld		hl, 0x60F							; +6, +15
+
+loc_C760:		ex		de, hl								; DE = пороги is_near_to
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl
+				inc		hl									; ix+3 (Z)
+				ld		a, (hl)
+				ld		c, a
+				ld		a, l
+				add		a, 8
+				ld		l, a								; ix+11
+				ld		(hl), c								; dZ = Z
+				ex		de, hl								; HL = пороги
+				call	chk_plyr_spec_near_arch
+				jp		loc_C785
+
+adj_2_4_hflip:	; -2, -17
+				ld		hl, 0xFEEF
+				call	set_pixel_adj
+				ld		hl, (z80_ix)
+				inc		hl									; ix+1 (X)
+				ld		a, (hl)
+				sub		13
+				ld		c, a
+				ld		a, l
+				add		a, 8
+				ld		l, a								; ix+9
+				ld		(hl), c								; dX = X-13
+				ld		a, l
+				sub		7
+				ld		l, a								; ix+2 (Y)
+				ld		a, (hl)
+				ld		c, a
+				ld		a, l
+				add		a, 8
+				ld		l, a								; ix+10
+				ld		(hl), c								; dY = Y
+				ld		hl, 0xF06							; +15, +6
+				jp		loc_C760
+
+loc_C785:		; +15, +15
+				ld		hl, 0xF0F
+				ld		de, graphic_objs_tbl
+				ld		b, 4								; игрок и спецобъекты
+
+loc_C791:		ld		a, (de)								; graphic no
+				or		a									; null?
+				jp		z, loc_C7D6
+				push	hl									; пороги
+				ld		h, d
+				ld		l, e
+				ld		(z80_iy), hl						; объект для is_near_to и adj_ew/adj_ns
+				ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)
+				and		8									; auto-adjust?
+				pop		hl
+				jp		z, loc_C7D6
+				call	is_near_to
+				jp		nc, loc_C7D6
+				push	bc
+				ld		bc, adj_arch_tbl
+				jp		lookup_plyr_dXY						; переход по направлению спрайта
+; ---------------------------------------------------------------------------
+adj_arch_tbl:   DW adj_ew
+				DW adj_ew
+				DW adj_ns
+				DW adj_ns
+; ---------------------------------------------------------------------------
+
+adj_ew:                                                         ; dY
+				ld      a, (ix+10)
+				cp      (iy+2)                                   ; Y
+				jr      Z, loc_C7D5
+				ld      a, 1
+				jr      NC, loc_C7BF
+				neg
+
+loc_C7BF:
+				ld      (iy+15), a
+				jr      loc_C7D5
+; ---------------------------------------------------------------------------
+
+adj_ns:                                                         ; dX
+				ld      a, (ix+9)
+				cp      (iy+1)                                   ; X
+				jr      Z, loc_C7D5
+				ld      a, 1
+				jr      NC, loc_C7D2
+				neg
+
+loc_C7D2:
+				ld      (iy+14), a
+
+loc_C7D5:
+				pop     bc
+
+loc_C7D6:		ld		a, e								; следующий объект (указатель в DE)
+				add		a, 32
+				ld		e, a
+				ld		a, d
+				adc		a, 0
+				ld		d, a
+				dec		b
+				jp		nz, loc_C791
+				ld		hl, graphic_objs_tbl+128			; IY после цикла — как у оригинала
+				ld		(z80_iy), hl
+				ret
+
+; =============== S U B R O U T I N E =======================================
+
+
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -314,6 +493,8 @@ def apply(src):
                N_CHK_NEAR_ARCH, 'chk_plyr_spec_near_arch')
     src = _sub(src, r'(?m)^set_draw_objs_overlapped:.*?; End of function set_draw_objs_overlapped\r?\n',
                N_SET_DRAW, 'set_draw_objs_overlapped')
+    src = _sub(src, r'(?m)^upd_3_5:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_3_5, 'upd_3_5')
+    src = _sub(src, r'(?m)^upd_2_4:[^\n]*\n.*?(?=^chk_plyr_spec_near_arch:)', N_UPD_2_4, 'upd_2_4 + цикл арки')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
