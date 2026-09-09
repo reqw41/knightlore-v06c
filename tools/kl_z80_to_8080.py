@@ -838,23 +838,24 @@ VEC_HEADER = """
 				ld		sp, 0x8000
 				jp		vec_boot
 				ORG		0x0038
-				jp		vec_pal_isr		; RST 38h: кадровое прерывание (палитра грузится в VBlank)
+				jp		vec_isr			; RST 38h: кадровое прерывание (палитра в VBlank, скан клавиатуры)
 				ORG		0x0040
 vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active-high (ряд 0..7)
 vec_tmp:		DS		2
+vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
 				ORG		0x0060
 vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
 				out		(0x00), a
 				xor		a
 				out		(0x02), a			; бордюр чёрный, режим 256
-				ld		(vec_tmp), a
-				ei						; палитру защёлкивает цвет под лучом -> грузим в VBlank из ISR
-vb_wait:		ld		a, (vec_tmp)
-				or		a
-				jp		z, vb_wait
-				di
 				ld		a, 0xFF
-				out		(0x03), a			; скролл: строка экрана r показывает lo=255-r
+				out		(0x03), a			; скролл
+				ld		a, 1
+				ld		(vec_palreq), a
+				ei						; палитру защёлкивает цвет под лучом -> ISR грузит её в VBlank; прерывания остаются ВКЛ
+vb_wait:		ld		a, (vec_palreq)
+				or		a
+				jp		nz, vb_wait
 				ld		hl, 0x8000			; очистить плоскость 0
 				ld		bc, 0x2000
 vb_clr:			ld		(hl), 0
@@ -869,8 +870,13 @@ VEC_TAIL = """
 				ORG		0x7B00			; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)
 
 ; ---- палитра: idx 8..15 (бит плоскости 0x8000) = белый, остальные чёрный. Только в VBlank. ----
-vec_pal_isr:	push	af
+vec_isr:		push	af				; RST 38h каждый кадр (VBlank): палитра по запросу, скан клавиатуры
+				push	bc
 				push	de
+				push	hl
+				ld		a, (vec_palreq)
+				or		a
+				jp		z, vi_kbd
 				ld		e, 0x0F
 vb_pal:			ld		a, e
 				out		(0x02), a			; индекс = цвет бордюра (луч в обратном ходе)
@@ -892,10 +898,13 @@ vb_w:			out		(0x0C), a
 				jp		p, vb_pal
 				xor		a
 				out		(0x02), a			; бордюр чёрный
-				ld		a, 1
-				ld		(vec_tmp), a
+				ld		(vec_palreq), a
+vi_kbd:			call	vec_scan
+				pop		hl
 				pop		de
+				pop		bc
 				pop		af
+				ei
 				ret
 
 ; ---- клавиатура: скан матрицы Вектора -> vec_kbmat, с зеркалом стрелок в буквы ----
@@ -1011,10 +1020,7 @@ VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> р�
 				push	hl
 				push	bc
 				push	de
-				push	af				; vec_scan портит A/B/C/HL
-				call	vec_scan
-				pop		af
-				ld		c, a
+				ld		c, a				; матрица vec_kbmat обновляется в прерывании (VBlank)
 				ld		a, 0xFF
 				ld		(vec_tmp), a
 				ld		hl, vec_zxmap
@@ -1066,8 +1072,9 @@ rp_next:		dec		b
 ; End of function read_port"""
 
 VEC_SCREEN = """
-; ---- экран Вектора: плоскость 0 (0x8000), столбец X/8 -> +256*col, строка ZX y -> lo = 223-y ----
-screen_calc_addr_de:	; BC = Y,X (пиксели) -> DE = адрес в плоскости. Портит только A/флаги.
+; ---- НАТИВНЫЙ РЕНДЕР: буфер = плоскость 1 (0xA000-0xBFFF, невидима) в раскладке экрана Вектора:
+; ---- адрес = база + (X/8)*256 + (32+Y), Y растёт вверх (0 = низ поля). Экран = буфер - 0x2000. ----
+screen_calc_addr_de:	; BC = Y,X (пиксели) -> DE = адрес в плоскости 0. Портит только A/флаги.
 				ld		a, c
 				rrca
 				rrca
@@ -1075,39 +1082,82 @@ screen_calc_addr_de:	; BC = Y,X (пиксели) -> DE = адрес в плос�
 				and		0x1F
 				add		a, 0x80
 				ld		d, a
-				ld		a, 32				; Y растёт ВВЕРХ: lo = 32 + Y (Y=0 — низ поля, строка экрана 223)
+				ld		a, 32
 				add		a, b
 				ld		e, a
 				ret
 
-; DE = экран, HL = vidbuf (32 байта/строка), B = высота, C = ширина в байтах
+vidbuf_calc_addr_in_bc:	; BC = Y,X -> BC = адрес в буфере
+				ld		a, c
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				add		a, high vidbuf
+				ld		c, a
+				ld		a, b
+				add		a, 32
+				ld		b, c
+				ld		c, a
+				ret
+
+vidbuf_calc_addr_in_hl:	; BC = Y,X -> HL = адрес в буфере (BC сохраняется)
+				ld		a, c
+				rrca
+				rrca
+				rrca
+				and		0x1F
+				add		a, high vidbuf
+				ld		h, a
+				ld		a, b
+				add		a, 32
+				ld		l, a
+				ret
+
+; DE = экран, HL = буфер, B = высота (строк), C = ширина (байт). Столбцы сплошные.
 blit_to_screen:
 bts_col:		push	bc
 				push	hl
 				push	de
 bts_row:		ld		a, (hl)
 				ld		(de), a
-				ld		a, l
-				add		a, 32
-				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a
-				inc		e				; следующая строка буфера = выше на экране
+				inc		l
+				inc		e
 				dec		b
 				jp		nz, bts_row
 				pop		de
 				pop		hl
 				pop		bc
-				inc		hl
+				inc		h
 				inc		d
 				dec		c
 				jp		nz, bts_col
 				ret
 
-update_screen:	; весь vidbuf 32x192 -> плоскость, буфер обнуляется (как оригинал 0xD57D)
-				ld		hl, vidbuf
-				ld		de, 0x8020			; столбец 0, lo=32 (= игровая Y=0, низ поля)
+; HL = буфер, B = высота, C = ширина (байт), A = значение
+vidbuf_fill_window:
+vfw_col:		push	hl
+				push	bc
+vfw_row:		ld		(hl), a
+				inc		l
+				dec		b
+				jp		nz, vfw_row
+				pop		bc
+				pop		hl
+				inc		h
+				dec		c
+				jp		nz, vfw_col
+				ret
+
+; HL = буфер, B = высота, E = ширина (байт) -> нули
+vidbuf_clear_window:
+				ld		c, e
+				xor		a
+				jp		vidbuf_fill_window
+
+update_screen:	; весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0, буфер обнуляется (как оригинал 0xD57D)
+				ld		hl, vidbuf+0x20
+				ld		de, 0x8020
 				ld		c, 32
 us_col:			push	hl
 				push	de
@@ -1115,18 +1165,13 @@ us_col:			push	hl
 us_row:			ld		a, (hl)
 				ld		(de), a
 				ld		(hl), 0
-				ld		a, l
-				add		a, 32
-				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a
+				inc		l
 				inc		e
 				dec		b
 				jp		nz, us_row
 				pop		de
 				pop		hl
-				inc		hl
+				inc		h
 				inc		d
 				dec		c
 				jp		nz, us_col
@@ -1147,17 +1192,51 @@ def kl_vec_glue(src, translate_later):
     src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
     src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xE500\nzx_aram:", 1)
     # переменные с 0xA100: игра делает `ld sp,seed_1` — стек под seed_1 должен быть в НЕВИДИМОЙ плоскости (0xA0xx), не в 0x9Fxx
-    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xA100\nclear_start:', src, count=1, flags=re.M)
+    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC000\nclear_start:', src, count=1, flags=re.M)
     src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
     # vidbuf — отдельный сегмент; START и build_lookup_tbls (в оригинале лежат ВНУТРИ буфера и
     # затираются им) выносим на 0x7A00 (код кончается ~0x78B1, стек растёт вниз от 0x8000)
-    src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xA700\nvidbuf:\t\t\tDS 0x1800\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера', src, count=1, flags=re.M)
+    src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера', src, count=1, flags=re.M)
     # таблицы сдвига ОСТАЮТСЯ на 0xF100/0xF200: print_sprite адресует страницу таблицы константой (or 0xF0)
     src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>0x8000', src, count=1, flags=re.M)
     # font как ограничитель таблицы объектов -> clear_end
     assert src.count("ld      bc, font") == 2
     src = src.replace("ld      bc, font", "ld      bc, clear_end")
     src = src.replace("ld      hl, font\n\t\t\t\tand     a", "ld      hl, clear_end\n\t\t\t\tand     a", 1)
+    # ---- НАТИВНЫЙ БУФЕР (столбцовый, как экран) ----
+    # print_sprite: шаг вправо = +256 (inc b вместо inc bc), переход на строку выше = B -= (w-1), C += 1
+    i = src.index("print_sprite:"); j = src.index("vidbuf_calc_addr_in_bc:", i)
+    ps = src[i:j]
+    ps = ps.replace("inc     bc", "inc     b")
+    old_adv = "loc_D7FF:\n\t\t\t\tld      a, c\n\nloc_D800:                                                       ; patched\n\t\t\t\tadd     a, 0x1E\n\t\t\t\tld      c, a\n\t\t\t\tld      a, b\n\t\t\t\tadc     a, 0\n\t\t\t\tld      b, a\n"
+    assert old_adv in ps, "print_sprite row advance"
+    ps = ps.replace(old_adv, "loc_D7FF:\n\t\t\t\tld      a, b\n\nloc_D800:                                                       ; patched: w-1\n\t\t\t\tsub     0x1E\n\t\t\t\tld      b, a\n\t\t\t\tinc     c\n")
+    old_pat = "\t\t\t\tld      a, b\n\t\t\t\tcpl\n\t\t\t\tadd     a, 0x22 ; '\"'\n\t\t\t\tld      (loc_D800+1), a\n"
+    assert old_pat in ps, "print_sprite patch calc"
+    ps = ps.replace(old_pat, "\t\t\t\tld      a, b\n\t\t\t\tdec     a\t\t\t\t; столбцовый буфер: откат B на w-1\n\t\t\t\tld      (loc_D800+1), a\n")
+    # прерывания включены всегда: трюк ld sp,hl в пиксельном цикле защитить di/ei
+    ps = ps.replace("\t\t\t\tld      (tmp_SP), sp\n", "\t\t\t\tdi\t\t\t\t\t\t; SP уходит в данные спрайта — прерывание испортило бы их\n\t\t\t\tld      (tmp_SP), sp\n", 1)
+    ps = ps.replace("\t\t\t\tld      sp, (tmp_SP)\n\t\t\t\tret\n", "\t\t\t\tld      sp, (tmp_SP)\n\t\t\t\tei\n\t\t\t\tret\n", 1)
+    src = src[:i] + ps + src[j:]
+    # старые vidbuf_calc_addr_in_bc/in_hl (линейные) — долой, новые в VEC_SCREEN
+    src = re.sub(r'vidbuf_calc_addr_in_bc:\n.*?\n\t+ret\r?\n', '', src, count=1, flags=re.S)
+    src = re.sub(r'vidbuf_calc_addr_in_hl:\n.*?\n\t+ret\r?\n', '', src, count=1, flags=re.S)
+    # vidbuf_fill_window / vidbuf_clear_window (самомод. djnz jonsole) — долой
+    src, n1 = re.subn(r'vidbuf_fill_window:\r?\n.*?\.fill_loop:[^\n]*\r?\n\t+ret\r?\n', '', src, count=1, flags=re.S)
+    src, n2 = re.subn(r'vidbuf_clear_window:\r?\n.*?\.clear_loop:[^\n]*\r?\n\t+ret\r?\n', '', src, count=1, flags=re.S)
+    assert n1 == 1 and n2 == 1, ("fill/clear", n1, n2)
+    # print_8x8: строка ниже = dec l; следующий символ = +0x108
+    old8 = "\t\t\t\tpush    bc\n\t\t\t\tld      bc, 0xFFE0                             ; next video/buffer line\n\t\t\t\tadd     hl, bc\n\t\t\t\tpop     bc\n\t\t\t\tdjnz    loc_BE91                                ; loop until done character\n\t\t\t\tpop     de\n\t\t\t\tld      bc, 0x101\n"
+    assert old8 in src, "print_8x8"
+    src = src.replace(old8, "\t\t\t\tdec     l\t\t\t\t\t\t; столбцовый буфер: строка ниже\n\t\t\t\tdjnz    loc_BE91                                ; loop until done character\n\t\t\t\tpop     de\n\t\t\t\tld      bc, 0x108\t\t\t\t; следующий символ: +столбец, назад на 8 строк\n", 1)
+    # константы vidbuf+N (линейные row*32+col) -> col*256 + 32 + row
+    def conv(m):
+        n = int(m.group(1), 16); row, col = divmod(n, 32)
+        return "vidbuf+0x%X" % (col * 256 + 32 + row)
+    src, nconv = re.subn(r'vidbuf\+0x([0-9A-Fa-f]+)', conv, src)
+    assert nconv == 7, nconv   # 6 разных + vidbuf+0x17 дважды
+    src = src.replace("clear_scrn_buffer:\n\t\t\t\tld      bc, 0x1800", "clear_scrn_buffer:\n\t\t\t\tld      bc, 0x2000", 1)
+    assert "clear_scrn_buffer:\n\t\t\t\tld      bc, 0x2000" in src
     # клавиатура
     src = re.sub(r'read_port:\n.*?; End of function read_port', VEC_READ_PORT, src, count=1, flags=re.S)
     # экран: старые процедуры целиком долой (наши определены в заголовке)
