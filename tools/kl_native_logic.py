@@ -1090,6 +1090,52 @@ loc_D62C:		call	screen_calc_addr_de				; DE = адрес экрана
 
 """
 
+# ---------------------------------------------------------------------------
+# set_pixel_adj (был нативным в kl_native): obj[18] = L, obj[19] = H, A/F/HL/DE целы.
+# 21 вызов на итерацию, поэтому важен каждый такт: HL восстанавливается вторым ex de,hl
+# (после первого DE = значение, HL свободен под указатель), push/pop hl не нужны;
+# смещение 18 не переносит младший байт объекта (<= 232+18 = 250), значит без adc.
+# 140 -> 112 тактов.
+# ---------------------------------------------------------------------------
+N_SET_PIXEL_ADJ = """set_pixel_adj:	; obj[18] = L, obj[19] = H. AF/HL/DE сохраняются (оригинал не трогает A).
+				push	af
+				push	de
+				ex		de, hl								; DE = значение, HL свободен
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 18
+				ld		l, a
+				ld		(hl), e
+				inc		hl
+				ld		(hl), d
+				ex		de, hl								; HL обратно = значение
+				pop		de
+				pop		af
+				ret
+; End of function set_pixel_adj
+"""
+
+# ---------------------------------------------------------------------------
+# is_object_not_ignored: Z = объект пуст или помечен «игнорировать в 3D» (бит 1 поля 7).
+# Оригинал портит только A и флаги.
+# ---------------------------------------------------------------------------
+N_IS_NOT_IGNORED = """is_object_not_ignored:
+				push	hl
+				ld		hl, (z80_iy)
+				ld		a, (hl)							; graphic no
+				and		a									; null?
+				jp		z, ioni_out						; да, выходим
+				ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)							; flags
+				cpl
+				and		2									; бит 1 (ignore)
+ioni_out:		pop		hl
+				ret
+; End of function is_object_not_ignored
+"""
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1121,6 +1167,8 @@ def apply(src):
     src = _sub(src, r'(?m)^list_objects_to_draw:[^\n]*\n.*?; End of function list_objects_to_draw\r?\n',
                N_LIST_OBJS, 'list_objects_to_draw')
     src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
+    src = _sub(src, r'(?m)^set_pixel_adj:[^\n]*\n.*?; End of function set_pixel_adj\r?\n', N_SET_PIXEL_ADJ, 'set_pixel_adj')
+    src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', N_IS_NOT_IGNORED, 'is_object_not_ignored')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
