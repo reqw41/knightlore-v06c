@@ -652,7 +652,7 @@ def _ixiy(mn, ops, idxinfo):
 _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
-_IX_INLINE_FUNCS = {'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
+_IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
 _cur_func = ['']
 
 def _ixiy_compact(mn, ops, idxinfo):
@@ -1443,6 +1443,7 @@ vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active
 vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
 vec_snd_k:		DS		1			; звук: константа делителя (накладные такты петли ZX): play_note 48, toggle 35
+vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
 				ORG		0x0060
 vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
 				out		(0x00), a
@@ -1501,6 +1502,7 @@ vb_w:			out		(0x0C), a
 				out		(0x02), a			; бордюр чёрный
 				ld		(vec_palreq), a
 vi_kbd:			call	vec_scan
+				call	vec_zxbuild
 				call	vi_snd
 				pop		hl
 				pop		de
@@ -1560,6 +1562,62 @@ vs_3:			ld		a, b
 				ld		(vec_kbmat+6), a
 				ret
 
+; vec_zxbuild: vec_kbmat (active-high) -> vec_zxrows: 8 байт рядов ZX, бит i = 0 если клавиша i ряда нажата.
+; Раз в кадр из ISR (~1.4К тактов); read_port потом только AND'ит готовые байты.
+vec_zxbuild:	ld		hl, vec_zxrows
+				ld		a, 0xFF
+				ld		b, 8
+zb_clr:			ld		(hl), a
+				inc		hl
+				dec		b
+				jp		nz, zb_clr
+				ld		hl, vec_kbmat
+				ld		de, vec_kbzx
+				ld		b, 8
+zb_row:			ld		a, (hl)
+				or		a
+				jp		nz, zb_bits
+				ld		a, e				; ряд пуст: пропустить 8 записей
+				add		a, 8
+				ld		e, a
+				jp		zb_next
+zb_bits:		ld		c, a
+zb_bit:			ld		a, c
+				rra
+				ld		c, a
+				jp		nc, zb_skip
+				ld		a, (de)				; запись: биты 7-5 = ряд ZX, биты 4-0 = маска (0 = нажато)
+				push	hl
+				push	bc
+				ld		c, a
+				and		0x1F
+				ld		b, a
+				ld		a, c
+				rlca
+				rlca
+				rlca
+				and		7
+				ld		hl, vec_zxrows
+				add		a, l
+				ld		l, a
+				ld		a, b
+				and		(hl)
+				ld		(hl), a
+				pop		bc
+				pop		hl
+zb_skip:		inc		de
+				ld		a, c
+				or		a
+				jp		nz, zb_bit			; остались нажатые биты
+				ld		a, e				; добрать до конца 8 записей ряда: E выровнен на 8 (таблица ALIGN 8)
+				or		7
+				inc		a
+				ld		e, a
+zb_next:		inc		hl
+				dec		b
+				jp		nz, zb_row
+				ret
+__VEC_KBZX__
 ; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
 ; ZX ряды: 0 SHIFT Z X C V | 1 A S D F G | 2 Q W E R T | 3 1 2 3 4 5 | 4 0 9 8 7 6 | 5 P O I U Y | 6 ENTER L K J H | 7 SPACE SYM M N B
 ; Вектор: ряд4 @ABCDEFG(бит0..7) ряд5 HIJKLMNO ряд6 PQRSTUVW ряд7 XYZ[\\]^SPC ряд2 0-7 ряд3 8=бит0 9=бит1 ряд0 ВК=бит2
@@ -1575,60 +1633,34 @@ vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4
 """
 
 
-VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале
+VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале.
+				; Ряды ZX (active-low) готовит ISR (vec_zxbuild) раз в кадр; здесь только AND выбранных. ~300 тактов.
 				push	hl
 				push	bc
 				push	de
-				ld		c, a				; матрица vec_kbmat обновляется в прерывании (VBlank)
-				ld		a, 0xFF
-				ld		(vec_tmp), a
-				ld		hl, vec_zxmap
+				ld		c, a
+				ld		hl, vec_zxrows
 				ld		b, 8
+				ld		d, 0xFF				; накопитель AND
 rp_row:			ld		a, c
 				rra
 				ld		c, a
-				jp		nc, rp_sel
-				ld		a, l				; ряд не выбран: пропустить 5 записей
-				add		a, 10
-				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a
-				jp		rp_next
-rp_sel:			ld		d, 0xFF				; байт ZX-ряда, active-low
-				ld		e, 0x01
-rp_key:			ld		a, (hl)
-				inc		hl
-				push	hl
-				ld		l, a
-				ld		h, 0
-				ld		a, (hl)				; биты ряда Вектора (active-high)
-				pop		hl
+				jp		c, rp_next			; ряд не выбран
+				ld		a, d
 				and		(hl)
-				inc		hl
-				jp		z, rp_nk
-				ld		a, e
-				cpl
-				and		d
 				ld		d, a
-rp_nk:			ld		a, e
-				add		a, a
-				ld		e, a
-				cp		0x20
-				jp		nz, rp_key
-				ld		a, (vec_tmp)
-				and		d
-				ld		(vec_tmp), a
-rp_next:		dec		b
+rp_next:		inc		hl
+				dec		b
 				jp		nz, rp_row
-				ld		a, (vec_tmp)
+				ld		a, d
 				cpl
 				and		0x1F
 				pop		de
 				pop		bc
 				pop		hl
 				ret
-; End of function read_port"""
+; End of function read_port
+"""
 
 VEC_SCREEN = """
 ; ---- НАТИВНЫЙ РЕНДЕР: буфер = плоскость 1 (0xA000-0xBFFF, невидима) в раскладке экрана Вектора:
@@ -1890,6 +1922,17 @@ def kl_vec_glue(src, translate_later):
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
     hdr = VEC_HEADER
     tail = VEC_TAIL + VEC_SCREEN + SND_CODE
+    # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
+    kbzx = [0xFF]*64
+    zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', tail)
+    assert len(zxrows) == 8, "vec_zxmap: 8 рядов"
+    for zr, line in enumerate(zxrows):
+        for zb, (vr, mask) in enumerate(re.findall(r'vec_kbmat\+(\d),0x([0-9A-Fa-f]{2})', line)):
+            m = int(mask, 16)
+            if m == 0: continue
+            vb = m.bit_length() - 1; assert m == 1 << vb
+            kbzx[int(vr)*8 + vb] = (zr << 5) | (0x1F & ~(1 << zb))
+    tail = tail.replace("__VEC_KBZX__\n", "\t\t\t\tALIGN 8\nvec_kbzx:\t\tDB\t" + ", ".join("0x%02X" % b for b in kbzx) + "\t; (ряд Вектора*8+бит) -> ряд ZX<<5 | маска\n", 1)
     snd_tail = SND_TAIL
     if translate_later:
         # ---- i8080: скретч эмуляции Z80 в нулевой странице, загрузчик на 0x0090 ----
