@@ -16,8 +16,8 @@ run() { # $1 = метка, cwd = дерево сборки
   node "$ROOT"/tools/screendiff_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld "$N" "" "$1"_rest >/dev/null
   node "$ROOT"/tools/screendiff_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld "$N" "$ALIVE" "$1"_alive >/dev/null
   node "$ROOT"/tools/profile_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld "$N" | head -1
-  echo -n "   границы регионов (ASSERT 0x7E00 / 0xF100): "
-  grep -E 'ASSERT \$ <= 0x(7E00|F100)' build/knightlore_vec.lst | awk '{print $2}' | tr '\n' ' '
+  echo -n "   границы регионов (конец нижнего / конец верхнего): "
+  grep -E 'ASSERT \$ <=.*(нижний регион|верхний регион)' build/knightlore_vec.lst | awk '{print $2}' | tr '\n' ' '
   echo
 }
 rm -rf build/ref; mkdir -p build/ref

@@ -653,14 +653,76 @@ def _ixiy(mn, ops, idxinfo):
 # KL_IX_INLINE=1 -> старое встроенное разворачивание.
 # ---------------------------------------------------------------------------
 _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
+# ---- раскладка нижнего региона (цель vec) ----
+VEC_VARS = 0x7A80          # переменные clear_start..clear_end (0x568)
+VEC_CODE_TOP = 0x7980      # потолок кода: ниже 256 байт стека под переменными
+VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xD400'), 16)   # начало верхнего региона (плоскость 3)
+
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
 _IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
 _cur_func = ['']
 
+_ix_form_cnt = {}
+# Редкую форму дешевле развернуть на месте, чем держать хелпер: тело 27..46 байт против
+# 4 байт на `call+db` плюс 13..18 на развёртку. Порог выбран замером (низ региона):
+#   N<=0: 0x7514 (все компактные)  N<=1: 0x74BB  N<=2: 0x7439  N<=3: 0x7597  N<=4: 0x7597
+# То есть выгодно разворачивать формы с 1-2 обращениями; с 3 и более уже дороже.
+# Побочный эффект — темп: развёртка быстрее call+хелпер.
+_IX_RARE = int(__import__('os').environ.get('KL_IX_RARE', '2'))
+
+
+def _ix_form(mn, ops, idxinfo):
+    """(px, form) для обращения к (ix+d)/(iy+d) или None, если форма не компактная."""
+    cell, _ = idxinfo
+    px = 'ix' if cell == 'z80_ix' else 'iy'
+    if mn in ('push', 'pop') or (mn == 'ld' and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'ld' and len(ops) == 2 and ops[1].lower() in ('ix', 'iy')) \
+            or (mn in ('inc', 'dec', 'add') and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'jp'):
+        return None
+    midx = None
+    for i, o in enumerate(ops):
+        if '(ix' in o.lower() or '(iy' in o.lower():
+            midx = i
+    if midx is None:
+        return None
+    if mn == 'ld':
+        if midx == 1:
+            r = ops[0].lower()
+            return (px, 'ld' + r) if r in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else None
+        sl = ops[1].strip().lower()
+        return (px, 'st' + sl) if sl in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else (px, 'stn')
+    if mn in ('inc', 'dec', 'bit', 'res', 'set', 'add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
+        return (px, mn)
+    return None
+
+
+def count_ix_forms(src):
+    """Предпроход: сколько раз встречается каждая компактная форма (ix+d)/(iy+d)."""
+    _ix_form_cnt.clear()
+    cur = ''
+    for line in src.split('\n'):
+        label, body, _c = split_line(line)
+        if label and not label.startswith(('loc_', '.')):
+            cur = label.rstrip(':')
+        if not body or cur in _IX_INLINE_FUNCS:
+            continue
+        mn, ops = operands(body)
+        idx = has_idx(body)
+        if not idx:
+            continue
+        f = _ix_form(mn, ops, idx)
+        if f:
+            _ix_form_cnt[f] = _ix_form_cnt.get(f, 0) + 1
+
+
 def _ixiy_compact(mn, ops, idxinfo):
     cell, _ = idxinfo
     if _cur_func[0] in _IX_INLINE_FUNCS:
+        return _ixiy(mn, ops, idxinfo)
+    f = _ix_form(mn, ops, idxinfo)
+    if f and _ix_form_cnt.get(f, 99) <= _IX_RARE:
         return _ixiy(mn, ops, idxinfo)
     px = 'ix' if cell == 'z80_ix' else 'iy'
     full = (mn + ' ' + ','.join(ops)).lower()
@@ -767,6 +829,7 @@ def has_idx(body):
 
 
 def translate(src):
+    count_ix_forms(src)
     out = []
     inserted_scratch = False
     for line in src.split('\n'):
@@ -1018,7 +1081,7 @@ VEC_HEADER = """
 ; ---- Вектор-06Ц: загрузчик (.r0m с 0x0000, PC=0). Всё в подмножестве i8080. ----
 				ORG		0x0000
 				di
-				ld		sp, 0x8000
+				ld		sp, clear_start
 				jp		vec_boot
 				ORG		0x0038
 				jp		vec_isr			; RST 38h: кадровое прерывание (палитра в VBlank, скан клавиатуры)
@@ -1722,25 +1785,70 @@ def _replace_func(src, label, end_marker, new, note=""):
     j = src.index(end_marker, i) + len(end_marker)
     return src[:i] + new + src[j:]
 
+def kl_cut_zx_attributes(src):
+    """Убрать атрибутную память ZX (vec/z80vec): на Векторе её нет, а адреса zx_aram
+    (0xE400-0xE7FF, считаются в attrib_calc_addr_de от high(zx_vram+0x1700)) попадают
+    В ВЕРХНИЙ РЕГИОН КОДА — clr_attribute_memory затирал спрайты spr_091..spr_095
+    (768 записей 0x46 на каждую очистку экрана). Вырезаем всех писателей и саму область."""
+    def cut(pat, name, repl='', count=1, flags=re.M | re.S):
+        nonlocal src
+        src, n = re.subn(pat, repl, src, count=count, flags=flags)
+        assert n == count, "kl_cut_zx_attributes: " + name + " (%d)" % n
+    RET = "\t\t\t\tret\t\t\t\t\t\t; Вектор: атрибутов ZX нет\n"
+    # 1. print_text: адрес атрибута и запись атрибута на символ
+    cut(r'\t+push    de\r?\n\t+call    attrib_calc_addr_de\r?\n\t+ld      l, e\r?\n'
+        r'\t+ld      h, d[^\n]*\r?\n\t+pop     de\r?\n', 'print_text addr')
+    cut(r'\t+ld      \(hl\), a\s+; store attribute\r?\n\t+inc     l[^\n]*\r?\n', 'print_text store')
+    cut(r'\t+ld      \(hl\), a\s+; store attribute\r?\n', 'print_text store last')
+    # 2. display_object: заливка атрибутов под объектом панели
+    cut(r'\t+ld      l, \(ix\+26\)\s+; pixel X\r?\n\t+ld      a, \(ix\+27\)[^\n]*\r?\n'
+        r'\t+add     a, 23\r?\n\t+ld      h, a\r?\n\t+call    attrib_calc_addr_de\r?\n'
+        r'\t+ex      de, hl\r?\n\t+ld      a, c[^\n]*\r?\n\t+ld      bc,0x0303[^\n]*\r?\n'
+        r'\t+call    vidbuf_fill_window\r?\n', 'display_object fill')
+    # 3. процедуры, целиком работающие с атрибутами
+    cut(r'(print_days:\r?\n(?:[^\n]*\r?\n){4})\t+ld      hl, zx_aram\+0x2EF[^\n]*\r?\n'
+        r'(?:\t+ld      \(hl\), 0x47[^\n]*\r?\n\t+inc     l\r?\n\t+ld      \(hl\), 0x47[^\n]*\r?\n)', 'print_days', r'\g<1>')
+    cut(r'\t+ld      a, 0x47[^\n]*\r?\n\t+ld      de, zx_aram\+0x242\r?\n\t+ld      b, 2\r?\n'
+        r'\t+call    fill_DE\r?\n\t+ld      de, zx_aram\+0x262\r?\n\t+ld      b, 4\r?\n\t+jp      fill_DE\r?\n',
+        'print_lives_gfx', RET)
+    cut(r'colour_panel:\r?\n.*?; End of function colour_panel\r?\n', 'colour_panel', 'colour_panel:\n' + RET)
+    cut(r'colour_sun_moon:\r?\n.*?; End of function colour_sun_moon\r?\n', 'colour_sun_moon', 'colour_sun_moon:\n' + RET)
+    cut(r'clr_attribute_memory:\r?\n.*?; End of function clr_attribute_memory\r?\n', 'clr_attribute_memory',
+        'clr_attribute_memory:\n' + RET)
+    cut(r'fill_attr:\r?\n.*?; End of function fill_attr\r?\n', 'fill_attr', 'fill_attr:\n' + RET)
+    # 4. cycle_colours_with_sound: пробег по атрибутам — долой, звук и задержка остаются
+    cut(r'(loc_C2A7:[^\n]*\r?\n)\t+ld      hl, 0x5800\r?\n\t+ld      bc, 0x300[^\n]*\r?\n'
+        r'\r?\ncycle_attribute_mem:\r?\n(?:[^\n]*\r?\n)*?\t+jr      NZ, cycle_attribute_mem\r?\n',
+        'cycle_attribute_mem', r'\g<1>')
+    # 5. сам расчёт адреса и область
+    cut(r'attrib_calc_addr_de:\r?\n.*?; End of function calc_attrib_addr\r?\n', 'attrib_calc_addr_de')
+    cut(r'\t+ORG 0x5800\r?\nzx_aram:\s+DS 0x300\r?\n', 'zx_aram segment')
+    assert 'zx_aram' not in src, "остались ссылки на zx_aram: " + str(re.findall(r'[^\n]*zx_aram[^\n]*', src))
+    return src
+
+
 def kl_vec_glue(src, translate_later):
     """Адаптация под Вектор-06Ц (общая для Z80- и i8080-целей): загрузчик, экран, клавиатура, ВИ53."""
     # заголовок после DEVICE
     # РАСКЛАДКА: код 0x0100.., стек <0x8000, ПЛОСКОСТЬ 0x8000-0x9FFF, переменные 0xA000, vidbuf 0xA600,
     # таблицы 0xBE00/0xBF00, "экран ZX" 0xCD00 (только атрибуты как мусорное ОЗУ)
-    src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
-    src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xE500\nzx_aram:", 1)
+    src = kl_cut_zx_attributes(src)
     # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
     # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
     # Переменные с 0xC800.
     # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
     # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
-    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC800\nclear_start:', src, count=1, flags=re.M)
+    # ПЕРЕМЕННЫЕ — в нижний регион (0xC000-0xDFFF = плоскость 2 остаётся под полосу HUD).
+    # 0x7A80 кратно 32 (ASSERT'ы на младшие 5 бит graphic_objs_tbl не меняются), под ними
+    # 256 байт стека: и главный стек (SP=clear_start), и временный `ld sp,seed_1` растут вниз
+    # от clear_start. Замерено: главный стек 38 байт, временный 72 байта.
+    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG %s\nclear_start:' % VEC_VARS, src, count=1, flags=re.M)
     src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
     # vidbuf — отдельный сегмент; START и build_lookup_tbls (в оригинале лежат ВНУТРИ буфера и
     # затираются им) выносим на 0x7A00 (код кончается ~0x78B1, стек растёт вниз от 0x8000)
     src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера', src, count=1, flags=re.M)
     # таблицы сдвига ОСТАЮТСЯ на 0xF100/0xF200: print_sprite адресует страницу таблицы константой (or 0xF0)
-    src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>0x8000', src, count=1, flags=re.M)
+    src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>clear_start', src, count=1, flags=re.M)
     # font как ограничитель таблицы объектов -> clear_end
     assert src.count("ld      bc, font") == 2
     src = src.replace("ld      bc, font", "ld      bc, clear_end")
@@ -1795,11 +1903,14 @@ def kl_vec_glue(src, translate_later):
     old_sun = "\t\t\t\tcall    print_sprite                            ; display sun/moon\n"
     assert src.count(old_sun) == 1, "sun print"
     src = src.replace(old_sun, "\t\t\t\tcall    vec_sun_save\n" + old_sun + "\t\t\t\tcall    vec_sun_restore\n", 1)
-    assert "ld      hl, 0x5800\n" in src
-    src = src.replace("ld      hl, 0x5800\n", "ld      hl, zx_aram\n", 1)
+    assert "ld      hl, 0x5800\n" not in src, "0x5800 (атрибуты ZX) должен был уйти в kl_cut_zx_attributes"
     # бордюр ZX (ULA) — убрать
     src = src.replace("\t\t\t\txor     a                                       ; border colour BLACK, activate MIC\n\t\t\t\tout     (0xFE), a                               ; ULA\n",
                       "\t\t\t\txor     a\n", 1)
+    # zx_vram: битмап ZX на Векторе не пишется; читатели заменены выше (clr_bitmap_memory,
+    # update_screen, солнце/луна), attrib_calc_addr_de вырезан вместе с атрибутами — сегмент долой
+    src, _n = re.subn(r'\t+ORG 0x4000\r?\nzx_vram:\s+DS 0x1800\r?\n', '', src, count=1)
+    assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
     src = kl_cut_controls(src)
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
@@ -1852,11 +1963,11 @@ def kl_vec_glue(src, translate_later):
         src = src[:j] + "\t\t\t\tALIGN 256\t\t\t\t\t; все точки входа развёрнутого цикла в одной странице\n" + src[j:]
         # ---- разрез памяти: хвост спрайтов (spr_064..) + хелперы + START в верхний регион 0xD400 ----
         assert "\nspr_064:" in src
-        src = src.replace("\nspr_064:", "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион: хвост спрайтов, IX-хелперы, START\nspr_064:", 1)
+        src = src.replace("\nspr_064:", "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: хвост спрайтов, START\nspr_064:" % VEC_UPPER, 1)
         # блок Вектора (без ORG 0x7B00) — в нижний регион перед разрезом; START — за vidbuf, но в верхнем регионе
         tail = tail.replace("\t\t\t\tORG\t\t0x7B00\t\t\t; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)\n", "")
         tail = tail + _LDIR_HELPERS
-        src = src.replace("\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", "\n" + tail + "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", 1)
+        src = src.replace("\n\t\t\t\tORG %#06x\t\t\t; верхний регион" % VEC_UPPER, "\n" + tail + "\n\t\t\t\tORG %#06x\t\t\t; верхний регион" % VEC_UPPER, 1)
         tail = ""
         src = src.replace("\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера", "vidbuf:\t\t\tequ 0xA000\t\t; плоскость 1; START/build_lookup_tbls — продолжение верхнего региона", 1)
         assert "vidbuf:\t\t\tequ 0xA000" in src
@@ -1894,7 +2005,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG 0xD400\t+; верхний регион)', lambda m: helpers + "\t\t\t\tASSERT $ <= 0x7E00\t\t; нижний регион: до стека (SP=0x8000)\n" + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (256 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
