@@ -657,6 +657,9 @@ _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
 VEC_VARS = 0x7A80          # переменные clear_start..clear_end (0x568)
 VEC_CODE_TOP = 0x7A00      # потолок кода: ниже 128 байт стека под переменными (замер: главный стек 38 Б,
                            # временный `ld sp,seed_1` 72 Б, ISR добавляет 10 -> максимум 82)
+VEC_HOLE_BYTES = int(__import__('os').environ.get('KL_HOLE_BYTES', '-1'))   # сколько байт увозить в дыры (-1 = сколько влезет)
+VEC_HOLE_SKIP = tuple(x for x in __import__('os').environ.get('KL_HOLE_SKIP', '').split(',') if x)
+VEC_HOLE_PLANES = [0xA000]   # плоскости, чьи строки вне картинки отданы под код (1 = буфер)
 VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xD400'), 16)   # начало верхнего региона (плоскость 3)
 
 _ix_used = set()
@@ -1441,6 +1444,22 @@ rp_next:		inc		hl
 ; End of function read_port
 """
 
+VEC_CLR_BUF = """clear_scrn_buffer:								; буфер = строки 32..223 всех 32 столбцов
+\t\t\t\tld      hl, vidbuf + 32
+\t\t\t\txor     a
+\t\t\t\tld      b, 32\t\t\t\t\t; столбцов
+csb_col:\t\tld      c, 192\t\t\t\t\t; строк в столбце
+csb_r:\t\t\tld      (hl), a
+\t\t\t\tinc     l
+\t\t\t\tdec     c
+\t\t\t\tjp      nz, csb_r
+\t\t\t\tinc     h
+\t\t\t\tld      l, 32
+\t\t\t\tdec     b
+\t\t\t\tjp      nz, csb_col
+\t\t\t\tret
+"""
+
 VEC_SCREEN = """
 ; ---- БЮДЖЕТ di-БЛОКА -------------------------------------------------------------------------
 ; Кадровое прерывание Вектора НЕ защёлкивается: если обратный ход пришёлся на di, кадр теряется
@@ -2013,8 +2032,12 @@ def kl_vec_glue(src, translate_later):
         return "vidbuf+0x%X" % (col * 256 + 32 + row)
     src, nconv = re.subn(r'vidbuf\+0x([0-9A-Fa-f]+)', conv, src)
     assert nconv == 7, nconv   # 6 разных + vidbuf+0x17 дважды
-    src = src.replace("clear_scrn_buffer:\n\t\t\t\tld      bc, 0x1800", "clear_scrn_buffer:\n\t\t\t\tld      bc, 0x2000", 1)
-    assert "clear_scrn_buffer:\n\t\t\t\tld      bc, 0x2000" in src
+    # очистка буфера — постолбцово, ТОЛЬКО строки 32..223: строки 0..31 и 224..255 каждого столбца
+    # лежат вне картинки и отданы под код (vec_pack_holes), сплошной clr_mem их бы стирал.
+    # Заодно дешевле: 6144 записи вместо 8192.
+    src, n_csb = re.subn(r'clear_scrn_buffer:\n\t+ld      bc, 0x1800[^\n]*\n\t+ld      hl, vidbuf[^\n]*\n\t+jr      clr_mem\n',
+                         VEC_CLR_BUF, src, count=1)
+    assert n_csb == 1, "clear_scrn_buffer"
     # клавиатура
     src = re.sub(r'read_port:\n.*?; End of function read_port', VEC_READ_PORT, src, count=1, flags=re.S)
     # экран: старые процедуры целиком долой (наши определены в заголовке)
@@ -2169,6 +2192,158 @@ kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
     return src
 
 
+# ---------------------------------------------------------------------------
+# ДЫРЫ ВНЕ КАРТИНКИ (цель vec).
+# Картинка занимает строки 32..223 каждого из 32 столбцов плоскости (адрес = база + столбец*256
+# + 32 + Y). Строки 224..255 столбца c и 0..31 столбца c+1 лежат в памяти подряд — это 64 байта,
+# в которые не пишет ни рендер, ни очистка буфера (замер tools/holescan_vec.js: за 150 итераций
+# в плоскостях 0 и 1 тронуты ровно строки 32..223). Плоскость 1 (буфер) и плоскость 2 (селектор
+# белого HUD) дают по 2048 байт таких дыр. Туда уезжают самостоятельные процедуры нижнего региона:
+# место внизу освобождается под хвост спрайтов, а темп не меняется — у i8080 нет ни кэша, ни
+# штрафа за выравнивание, адрес процедуры на её скорость не влияет.
+# ---------------------------------------------------------------------------
+_R8 = {'a', 'b', 'c', 'd', 'e', 'h', 'l', '(hl)'}
+_RR16 = {'bc', 'de', 'hl', 'sp', 'af'}
+
+
+def _i8080_len(t):
+    """Длина инструкции i8080 в байтах; None — не инструкция.
+    Сверено с листингом сборки: 7685 инструкций, 0 расхождений."""
+    p = t.split(None, 1)
+    mn = p[0].lower()
+    ops = [o.strip().lower() for o in p[1].split(',')] if len(p) > 1 else []
+    if mn in ('nop', 'halt', 'di', 'ei', 'cpl', 'daa', 'scf', 'ccf', 'rlca', 'rrca', 'rla', 'rra',
+              'ex', 'ret', 'rst', 'push', 'pop', 'inc', 'dec'):
+        return 1
+    if mn == 'call':
+        return 3
+    if mn == 'jp':
+        return 1 if ops and ops[-1] == '(hl)' else 3
+    if mn in ('in', 'out'):
+        return 2
+    if mn == 'add' and len(ops) == 2 and ops[0] == 'hl':
+        return 1
+    if mn in ('add', 'adc', 'sub', 'sbc', 'and', 'or', 'xor', 'cp'):
+        return 1 if ops[-1] in _R8 else 2
+    if mn == 'ld':
+        if len(ops) != 2:
+            return None
+        d, s = ops
+        if d == 'sp' and s == 'hl':
+            return 1
+        if d in _RR16 or (s in _RR16 and d.startswith('(')):
+            return 3
+        if (d.startswith('(') and d not in ('(hl)', '(bc)', '(de)')) or \
+           (s.startswith('(') and s not in ('(hl)', '(bc)', '(de)')):
+            return 3
+        if d in ('(bc)', '(de)') or s in ('(bc)', '(de)'):
+            return 1
+        return 1 if s in _R8 else 2
+    return None
+
+
+_H_LBL = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):')
+_H_HARD = re.compile(r'(?i)^(ORG|DEVICE|SAVEBIN|SAVESNA|ASSERT|ALIGN|IF|ELSE|ENDIF|INCBIN|DS|DB|DW|EQU)\b')
+# halt НЕ прерывает поток: после прерывания исполнение идёт дальше (vec_di_budget: ei/halt/ret)
+_H_TERM = re.compile(r'(?i)^(ret$|jp\s+(?!nz\b|z\b|nc\b|c\b|po\b|pe\b|p\b|m\b))')
+
+
+def vec_holes(base, pages=32):
+    """Дыры одной плоскости: (адрес, размер). Строки 224..255 столбца c + 0..31 столбца c+1."""
+    h = [(base, 32)]
+    h += [(base + c * 256 + 224, 64) for c in range(pages - 1)]
+    h.append((base + (pages - 1) * 256 + 224, 32))
+    return h
+
+
+def vec_pack_holes(src, holes, need=-1, exclude=()):
+    """Увезти мелкие самостоятельные процедуры нижнего региона в дыры вне картинки.
+    Движим блок «метка: ... ret/jp», если: весь блок — инструкции; кончается безусловной передачей
+    управления (в него нельзя провалиться из него же); предыдущий блок тоже кончается безусловно и
+    непуст (иначе метка-синоним или провал сверху); перед блоком нет ORG (иначе следующий блок
+    уедет на его адрес). Ссылки на метки символические, поэтому переезд ничего не ломает."""
+    if not holes or need == 0:
+        return src, 0, 0
+    lines = src.split('\n')
+    end = next(i for i, l in enumerate(lines) if 'ASSERT $ <=' in l and 'нижний регион' in l)
+    blocks, cur, org, prev_org = [], None, None, False
+    for i in range(end):
+        raw = lines[i]
+        m = _H_LBL.match(raw)
+        body = raw[m.end():] if m else raw
+        code = ' '.join(body.split(';')[0].split())   # пробелы схлопнуть: иначе `jp\s+` в _H_TERM отступает назад и «jp nz, x» проходит за безусловный
+        hard = bool(code) and bool(_H_HARD.match(code))
+        if m:
+            cur = {'name': m.group(1), 'i0': i, 'iend': i + 1, 'size': 0, 'ok': True,
+                   'org': org, 'after_org': prev_org, 'last': ''}
+            blocks.append(cur)
+        if code:
+            prev_org = code.upper().startswith('ORG')
+            if prev_org:
+                try:
+                    org = int(code.split()[1], 0)
+                except ValueError:
+                    org = None
+            if cur is not None:
+                if hard:
+                    cur['ok'] = False
+                else:
+                    n = _i8080_len(code)
+                    if n is None:
+                        cur['ok'] = False
+                    else:
+                        cur['size'] += n
+                        cur['last'] = code
+                        cur['iend'] = i + 1
+    maxh = max(sz for _, sz in holes)
+    cand = []
+    for k, b in enumerate(blocks):
+        pv = blocks[k - 1] if k else None
+        if not (b['ok'] and 0 < b['size'] <= maxh) or b['after_org'] or b['name'] in exclude:
+            continue
+        if b['org'] is None or not (0x0100 <= b['org'] < 0x8000):
+            continue
+        if not _H_TERM.match(b['last']):
+            continue
+        if pv is None or pv['size'] == 0 or not (pv['ok'] and _H_TERM.match(pv['last'])):
+            continue
+        cand.append(b)
+    cand.sort(key=lambda b: (-b['size'], b['name']))
+    free = [[a, sz] for a, sz in holes]
+    placed, moved = [[] for _ in holes], 0
+    for b in cand:
+        if need >= 0 and moved >= need:
+            break
+        for j, (a, sz) in enumerate(free):
+            if sz >= b['size']:
+                placed[j].append(b)
+                free[j][0] += b['size']
+                free[j][1] -= b['size']
+                moved += b['size']
+                break
+    if not moved:
+        return src, 0, 0
+    drop = set()
+    for lst in placed:
+        for b in lst:
+            drop.update(range(b['i0'], b['iend']))
+    out = ['\n; ==== дыры вне картинки (строки 224..255/0..31 столбцов): мелкие процедуры нижнего региона ====']
+    for j, (a, sz) in enumerate(holes):
+        if not placed[j]:
+            continue
+        out.append('\t\t\t\tORG %#06x' % a)
+        for b in placed[j]:
+            out += [lines[i] for i in range(b['i0'], b['iend'])]
+        out.append('\t\t\t\tASSERT $ <= %#06x\t\t; дыра %#06x (%d Б)' % (a + sz, a, sz))
+    kept = [l for i, l in enumerate(lines) if i not in drop]
+    ei = next(i for i, l in enumerate(kept) if 'ASSERT $ <=' in l and 'нижний регион' in l)
+    return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, sum(len(x) for x in placed)
+
+
+
+VEC_HOLES = [h for b in VEC_HOLE_PLANES for h in vec_holes(b)]
+
+
 def main():
     argv = sys.argv[1:]
     target = 'lockstep'
@@ -2198,9 +2373,11 @@ def main():
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
+        src, moved, nblk = vec_pack_holes(src, VEC_HOLES, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_vec.r0m", 0, 0x10000', src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)
-        print(f"vector glue + translate (i8080) {inp} -> {outp}; exx-B pairs={exx_pairs}; IX-хелперов {len(_ix_used)}")
+        print(f"vector glue + translate (i8080) {inp} -> {outp}; exx-B pairs={exx_pairs}; IX-хелперов {len(_ix_used)}; "
+              f"в дыры вне картинки увезено {moved} Б ({nblk} процедур)")
         return
     if target == 'z80vec':
         src = kl_vec_glue(src, translate_later=False)

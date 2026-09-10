@@ -62,6 +62,9 @@ function key(k,down){
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 // FNV-1a 32 по региону памяти
 function h32(a0,a1){let h=0x811c9dc5>>>0;for(let a=a0;a<a1;a++){h=(h^rd(a))>>>0;h=Math.imul(h,0x01000193)>>>0;}return h>>>0;}
+// Буфер: только строки 32..223 каждого столбца — это и есть картинка. Строки 224..255/0..31 лежат
+// вне картинки и отданы под код (vec_pack_holes), сравнивать их между ревизиями бессмысленно.
+function hbuf(){let h=0x811c9dc5>>>0;for(let p=SCR1;p<END;p+=256)for(let a=p+32;a<p+224;a++){h=(h^rd(a))>>>0;h=Math.imul(h,0x01000193)>>>0;}return h>>>0;}
 const SCR0=0x8000,SCR1=0xA000,END=0xC000;
 let phase="menu",iter=0; const lines=[];
 memory.write=function(a,w,s){a&=0xffff;
@@ -69,7 +72,7 @@ memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);
-    lines.push(`${iter} ${h32(SCR1,END).toString(16).padStart(8,"0")} ${h32(SCR0,SCR1).toString(16).padStart(8,"0")}`);}
+    lines.push(`${iter} ${hbuf().toString(16).padStart(8,"0")} ${h32(SCR0,SCR1).toString(16).padStart(8,"0")}`);}
   return ow(a,w,s);};
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
@@ -79,8 +82,10 @@ const startIter=iter; let steps=0,frc=0,tacc=0;   // tacc: ВИ53 тикает �
 while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
   const c=cpu.instruction();steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
 fs.writeFileSync(`build/scr_${TAG}.txt`,lines.join("\n")+"\n");
-const dump=Buffer.alloc(END-SCR0);for(let a=SCR0;a<END;a++)dump[a-SCR0]=rd(a);
+const dump=Buffer.alloc(SCR1-SCR0+32*192);let di=0;
+for(let a=SCR0;a<SCR1;a++)dump[di++]=rd(a);                      // плоскость 0 целиком (вне картинки обязана быть нулём)
+for(let p=SCR1;p<END;p+=256)for(let a=p+32;a<p+224;a++)dump[di++]=rd(a);   // буфер: только строки картинки
 fs.writeFileSync(`build/scr_${TAG}.bin`,dump);
 if(process.env.KLFULL){const full=new Uint8Array(0x10000);for(let a=0;a<0x10000;a++)full[a]=memory.read(a,false);fs.writeFileSync(`build/mem_${TAG}.bin`,full);}
-console.log(`итераций ${iter-startIter}, снимков ${lines.length} -> build/scr_${TAG}.txt, дамп 0x8000..0xBFFF -> build/scr_${TAG}.bin`);
+console.log(`итераций ${iter-startIter}, снимков ${lines.length} -> build/scr_${TAG}.txt, дамп экран+картинка буфера -> build/scr_${TAG}.bin`);
 console.log(`итог: буфер ${h32(SCR1,END).toString(16).padStart(8,"0")} экран ${h32(SCR0,SCR1).toString(16).padStart(8,"0")}`);
