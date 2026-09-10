@@ -1136,6 +1136,299 @@ ioni_out:		pop		hl
 ; End of function is_object_not_ignored
 """
 
+# ---------------------------------------------------------------------------
+# get_ptr_object: HL = graphic_objs_tbl + 32*(A & 0x7F).
+# Оригинал: HL = A, пять add hl,hl, ld bc,base, add hl,bc, push/pop bc — 120 тактов.
+# Здесь три rrca разводят индекс на «страницу» и «смещение» сразу: после rrca*3
+# младшие 5 бит A = индекс>>3, старшие 3 бита = (индекс&7)<<5 (нужно индекс <= 0x7F).
+# Младший байт базы (0xC868) не помещается в 5 бит, поэтому его старшие биты
+# (KL_GPO_K = 3) вносятся в индекс: base + 32*i = KL_GPO_PG*256 + 32*(i+K) + (base&31),
+# и тогда (A&0xE0) + (base&31) <= 0xE0+24 не переносит. Индексы объектов 0..39,
+# +K не выводит за 0x7F (ASSERT).
+# BC/DE сохраняются, как в оригинале. 77 тактов, 17 байт (было 120 тактов, 17 байт).
+# ---------------------------------------------------------------------------
+N_GET_PTR_OBJ = """get_ptr_object:
+KL_GPO_K		equ		(graphic_objs_tbl >> 5) & 7
+KL_GPO_PG		equ		(graphic_objs_tbl - 32*KL_GPO_K - (graphic_objs_tbl & 31)) >> 8
+				ASSERT (graphic_objs_tbl & 31) <= 24		; иначе (A&0xE0)+(base&31) переносит
+				ASSERT KL_GPO_K + 40 <= 0x7F				; индекс объекта 0..39 плюс K не выходит за 7 бит
+				and		0x7F
+				add		a, KL_GPO_K
+				rrca
+				rrca
+				rrca
+				ld		l, a
+				and		0x1F								; (индекс+K)>>3 = номер страницы
+				add		a, KL_GPO_PG
+				ld		h, a
+				ld		a, l
+				and		0xE0								; ((индекс+K)&7)*32
+				add		a, graphic_objs_tbl & 31
+				ld		l, a
+				ret
+; End of function get_ptr_object
+"""
+
+
+# ---------------------------------------------------------------------------
+# calc_display_order_and_render, тело: перебор пар объектов из objects_to_draw
+# с вычислением класса перекрытия. Самое дорогое место тяжёлых комнат:
+# 124 класса/итерацию по 939 тактов (копии полей в kl_o1/kl_o2 + jump_to_tbl_entry).
+#
+# Что сделано:
+#  * КЛАСС НЕ ВЫЧИСЛЯЕТСЯ ЦЕЛИКОМ. Таблица off_CF69 отдаёт «продолжить цикл» для всех
+#    классов, кроме 3,4,6,7,12,15,16 (-> d_3467121516) и 13 (-> objs_coincide).
+#    В коде c = z + 3*y + 9*x, z/y/x из {0,1,2}; интересны ровно z!=2, y!=0, x!=2,
+#    а класс 13 — это (x=1,y=1,z=1). Значит достаточно дерева ветвлений:
+#    y (первым, потому что y=0 — единственный выход по ПЕРВОМУ сравнению оси), затем x,
+#    затем z; таблица переходов и jump_to_tbl_entry не нужны вовсе.
+#    Соответствие проверено по всем 27 входам таблицы, судья — локстеп.
+#  * ГРАНИЦЫ ОБЪЕКТА 1 (Z1, Z1+H1, Y1±D1, X1±W1) считаются один раз на объект 1
+#    (ov_prep, ~23 раза за итерацию) и живут ИММЕДИАТАМИ внутри сравнений — сравнение
+#    с полем объекта 2 стоит 7 тактов и не занимает регистров.
+#  * ОБЪЕКТ 2 читается указателем HL по месту (inc l / dec l, младший байт не переносит:
+#    (graphic_objs_tbl & 31) = 8, +6 <= 0xEE), копий в память нет.
+#  * «Тот же объект?» — сравнение ИНДЕКСОВ (иммедиат ov_i1) до вызова get_ptr_object,
+#    а не 16-битное вычитание указателей после (get_ptr_object чист, порядок не виден).
+#  * render_obj_2 сохраняется не на каждый объект 2, а только в d_3467121516: до него
+#    DE = тот самый указатель списка (класс перекрытия DE не трогает).
+#  * bit 7 -> or a / jp m; set 7,(hl) -> ld a,(hl)/or 0x80/ld (hl),a без push af.
+# Побочные эффекты сохранены: objs_coincide правит только поле 0 (иммедиаты границ живы),
+# render_list/rendered_objs_cnt/render_obj_1 — как в оригинале.
+# ---------------------------------------------------------------------------
+N_DISPLAY_ORDER = """process_remaining_objs:
+				ASSERT (graphic_objs_tbl & 31) <= 25		; иначе l+6 переносит и чтение полей объекта 2 ломается
+				ld		de, objects_to_draw
+loc_CEC6:		ld		a, (de)								; graphic no
+				inc		de
+				cp		0xFF								; конец списка?
+				jp		z, render_done
+				or		a
+				jp		m, loc_CEC6							; бит 7 = уже отрисован
+				ld		(ov_i1+1), a						; индекс объекта 1 -> иммедиат сравнения
+				call	get_ptr_object
+				ld		(z80_ix), hl
+				call	ov_prep								; шесть границ объекта 1 -> иммедиаты
+				ld		h, d
+				ld		l, e
+				ld		(render_obj_1), hl
+loc_CEDB:		ld		a, (de)								; следующий graphic no
+				inc		de
+				cp		0xFF
+				jp		z, render_obj_no1
+				or		a
+				jp		m, loc_CEDB
+ov_i1:			cp		0									; тот же объект? (иммедиат = индекс объекта 1)
+				jp		z, loc_CEDB
+				call	get_ptr_object						; HL = объект 2
+				ld		(z80_iy), hl
+				inc		l
+				inc		l									; +2 = Y2
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +5 = D2
+				add		a, (hl)								; Y2+D2
+				ld		c, a
+ov_ym:			ld		a, 0								; [Y1-D1]
+				sub		c
+				jp		nc, loc_CEDB						; y=0 -> любой класс продолжает цикл
+				ld		a, b
+				sub		(hl)								; Y2-D2
+ov_yp:			sub		0									; [Y1+D1]
+				jp		c, ov_y1							; y=1
+				; y=2: класс интересен только при x!=2 и z!=2, и это всегда d_3467121516
+				dec		l
+				dec		l
+				dec		l
+				dec		l									; +1 = X2
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +4 = W2
+				add		a, (hl)								; X2+W2
+				ld		c, a
+ov_xm2:			ld		a, 0								; [X1-W1]
+				sub		c
+				jp		nc, ov_zs							; x=0
+				ld		a, b
+				sub		(hl)								; X2-W2
+ov_xp2:			sub		0									; [X1+W1]
+				jp		nc, loc_CEDB						; x=2 -> продолжить цикл
+ov_zs:			dec		l									; +3 = Z2
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +6 = H2
+				add		a, (hl)								; Z2+H2
+				ld		c, a
+ov_z1s:			ld		a, 0								; [Z1]
+				sub		c
+				jp		nc, d_3467121516					; z=0
+				ld		a, b								; Z2
+ov_zhs:			sub		0									; [Z1+H1]
+				jp		nc, loc_CEDB						; z=2 -> продолжить цикл
+				jp		d_3467121516						; z=1
+ov_y1:			dec		l
+				dec		l
+				dec		l
+				dec		l									; +1 = X2
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +4 = W2
+				add		a, (hl)
+				ld		c, a
+ov_xm1:			ld		a, 0								; [X1-W1]
+				sub		c
+				jp		nc, ov_zs							; x=0 -> класс 3/4 (z!=2) = d_3467121516
+				ld		a, b
+				sub		(hl)
+ov_xp1:			sub		0									; [X1+W1]
+				jp		nc, loc_CEDB						; x=2
+				dec		l									; x=1, y=1: +3 = Z2
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +6 = H2
+				add		a, (hl)
+				ld		c, a
+ov_z1f:			ld		a, 0								; [Z1]
+				sub		c
+				jp		nc, d_3467121516					; z=0 -> класс 12
+				ld		a, b
+ov_zhf:			sub		0									; [Z1+H1]
+				jp		nc, loc_CEDB						; z=2 -> класс 14
+				jp		objs_coincide						; z=1 -> класс 13
+; ---------------------------------------------------------------------------
+
+d_3467121516:	ld		h, d								; DE = render_obj_2 (класс перекрытия DE не трогает)
+				ld		l, e
+				ld		(render_obj_2), hl
+				dec		hl									; -> запись объекта 2
+				ld		c, (hl)								; индекс
+				ld		de, render_list
+loc_CFAD:		ld		a, (de)
+				cp		0xFF								; пустая запись?
+				jp		z, loc_CFB8
+				cp		c									; уже в списке?
+				jp		z, loc_CFCE
+				inc		de
+				jp		loc_CFAD
+; ---------------------------------------------------------------------------
+
+loc_CFB8:		ld		a, c
+				ld		(de), a								; добавить в список
+				inc		de
+				ld		a, 0xFF
+				ld		(de), a								; конец списка
+				ld		a, c
+				ld		(ov_i1+1), a						; объект 2 становится объектом 1
+				ld		hl, (z80_iy)
+				ld		(z80_ix), hl
+				call	ov_prep
+				ld		hl, (render_obj_2)
+				ld		(render_obj_1), hl
+				ld		de, objects_to_draw
+				jp		loc_CEDB
+; ---------------------------------------------------------------------------
+
+loc_CFCE:		ld		hl, objects_to_draw
+loc_CFD1:		ld		a, (hl)								; graphic no
+				inc		hl
+				cp		0xFF								; конец списка?
+				jp		z, process_remaining_objs
+				cp		c									; тот, который ищем?
+				jp		nz, loc_CFD1
+				push	hl
+				ld		hl, (z80_iy)
+				ld		(z80_ix), hl						; объект 2 становится объектом 1
+				pop		hl
+				jp		render_obj
+; ---------------------------------------------------------------------------
+
+objs_coincide:	ld		hl, (z80_ix)						; graphic no объекта 1
+				ld		a, (hl)
+				sub		0x60
+				cp		7									; спецобъект?
+				jp		nc, loc_CFF0
+				ld		(hl), 187							; спрайт «искры»
+				jp		loc_CEDB
+loc_CFF0:		ld		hl, (z80_iy)						; graphic no объекта 2
+				ld		a, (hl)
+				sub		0x60
+				cp		7
+				jp		nc, loc_CEDB
+				ld		(hl), 187
+				jp		loc_CEDB
+; ---------------------------------------------------------------------------
+
+render_obj_no1:	ld		hl, (render_obj_1)
+render_obj:		dec		hl									; -> запись объекта в objects_to_draw
+				ld		a, (hl)
+				or		0x80								; пометить отрисованным
+				ld		(hl), a
+				ld		a, 0xFF
+				ld		(render_list), a
+				ld		hl, rendered_objs_cnt
+				inc		(hl)
+				call	calc_pixel_XY_and_render
+				jp		process_remaining_objs
+; ---------------------------------------------------------------------------
+
+ov_prep:		; HL = указатель объекта 1: границы по X/Y/Z -> иммедиаты класса перекрытия. Портит A, B, HL.
+				inc		l									; +1 = X1
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +4 = W1
+				add		a, (hl)
+				ld		(ov_xp1+1), a						; X1+W1
+				ld		(ov_xp2+1), a
+				ld		a, b
+				sub		(hl)
+				ld		(ov_xm1+1), a						; X1-W1
+				ld		(ov_xm2+1), a
+				dec		l
+				dec		l									; +2 = Y1
+				ld		a, (hl)
+				ld		b, a
+				inc		l
+				inc		l
+				inc		l									; +5 = D1
+				add		a, (hl)
+				ld		(ov_yp+1), a						; Y1+D1
+				ld		a, b
+				sub		(hl)
+				ld		(ov_ym+1), a						; Y1-D1
+				dec		l
+				dec		l									; +3 = Z1
+				ld		a, (hl)
+				ld		(ov_z1s+1), a						; Z1
+				ld		(ov_z1f+1), a
+				inc		l
+				inc		l
+				inc		l									; +6 = H1
+				add		a, (hl)
+				ld		(ov_zhs+1), a						; Z1+H1
+				ld		(ov_zhf+1), a
+				ret
+; ---------------------------------------------------------------------------
+
+render_done:	pop		hl									; восстановить IY, IX вызывателя
+				ld		(z80_iy), hl
+				pop		hl
+				ld		(z80_ix), hl
+				ret
+; End of function calc_display_order_and_render
+"""
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1169,6 +1462,9 @@ def apply(src):
     src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
     src = _sub(src, r'(?m)^set_pixel_adj:[^\n]*\n.*?; End of function set_pixel_adj\r?\n', N_SET_PIXEL_ADJ, 'set_pixel_adj')
     src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', N_IS_NOT_IGNORED, 'is_object_not_ignored')
+    src = _sub(src, r'(?m)^get_ptr_object:\n.*?; End of function get_ptr_object\r?\n', N_GET_PTR_OBJ, 'get_ptr_object')
+    src = _sub(src, r'(?m)^process_remaining_objs:\n.*?; End of function calc_display_order_and_render\r?\n',
+               N_DISPLAY_ORDER, 'calc_display_order_and_render')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
