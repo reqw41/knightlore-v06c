@@ -34,9 +34,16 @@ const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
 const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
+// Ввод должен быть НЕЗАВИСИМ от тактов: иначе две сборки с разной скоростью читают клавиши в разные кадры
+// и расходятся законно. Поэтому у цели vec глушим vec_zxbuild (ret) и кладём ряды ZX прямо в vec_zxrows
+// на границе итерации — ровно как на локстепе. KLKB=hw возвращает честный путь через матрицу Вектора.
+const HWKB=process.env.KLKB==="hw";
+const ZXROWS=(!HWKB&&VKBD===undefined&&L.vec_zxbuild!==undefined)?L.vec_zxrows:undefined;
+if(ZXROWS!==undefined){memory.write(L.vec_zxbuild,0xC9,false);     // ret: ISR больше не трогает ряды
+  for(let r=0;r<8;r++)memory.write(ZXROWS+r,0xFF,false);}          // ряды ZX: ничего не нажато
 function key(k,down){
-  if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
-  const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
+  if(VKBD===undefined&&ZXROWS===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
+  const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke((VKBD!==undefined?VKBD:ZXROWS)+r,rows[r]);}
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 // FNV-1a 32 по региону памяти
 function h32(a0,a1){let h=0x811c9dc5>>>0;for(let a=a0;a<a1;a++){h=(h^rd(a))>>>0;h=Math.imul(h,0x01000193)>>>0;}return h>>>0;}
