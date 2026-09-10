@@ -1135,6 +1135,8 @@ vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active
 vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
 vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
+vec_pal:		DS		16			; палитра (индекс = p0<<3|p1<<2|p2<<1|p3), строит vec_set_pal
+				ASSERT $ <= 0x00A0
 				ORG		0x0060
 vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
 				out		(0x00), a
@@ -1146,8 +1148,9 @@ vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы),
 				out		(0x08), a			; секундомер кадра для vec_di_budget (в режиме ВИ53 счётчик 0 забирает музыка)
 				call	msx_snd_init			; зеркало AY, слоты эффектов, заготовка OUT для ВИ53
 				call	msx_snd_probe			; есть AY -> спросим игрока в меню; нет -> молча ВИ53
-				ld		a, 1
-				ld		(vec_palreq), a
+				ld		a, 7
+				call	vec_set_pal			; палитра: белый (меню), запрос загрузки
+				call	vec_hud_mask			; маска цвета HUD в плоскости 2 (статична)
 				ei						; палитру защёлкивает цвет под лучом -> ISR грузит её в VBlank; прерывания остаются ВКЛ
 vb_wait:		ld		a, (vec_palreq)
 				or		a
@@ -1179,15 +1182,12 @@ vi_nostop:		push	bc
 				ld		a, (vec_palreq)
 				or		a
 				jp		z, vi_kbd
+				ld		hl, vec_pal + 15
 				ld		e, 0x0F
 vb_pal:			ld		a, e
 				out		(0x02), a			; индекс = цвет бордюра (луч в обратном ходе)
-				ld		a, e
-				and		8
-				jp		z, vb_black
-				ld		a, 0xFF
-				jp		vb_w
-vb_black:		xor		a
+				ld		a, (hl)
+				dec		hl
 vb_w:			out		(0x0C), a
 				out		(0x0C), a
 				out		(0x0C), a
@@ -1213,6 +1213,66 @@ vi_kbd:			call	vec_scan
 				ret
 
 ; ---- клавиатура: скан матрицы Вектора -> vec_kbmat, с зеркалом стрелок в буквы ----
+; vec_set_pal: A = атрибут ZX (биты 0..2 = чернила комнаты) -> таблица vec_pal, запрос загрузки в VBlank.
+; Индекс цвета = p0<<3|p1<<2|p2<<1|p3: p0 (экран) — точка; p1 (буфер) и p3 (код/таблицы) на цвет не влияют;
+; p2 — маска цвета HUD (vec_hud_mask): точка с p2 — цвет HUD (белый), без — цвет комнаты. Как на ZX: комната красится
+; по атрибуту (3 пурпурный, 4 зелёный, 5 голубой, 6 жёлтый), HUD белый. Портит A, BC, DE, HL.
+vec_set_pal:	and		7
+				ld		c, a
+				ld		b, 0
+				ld		hl, vec_zxcol
+				add		hl, bc
+				ld		c, (hl)				; цвет комнаты %BBGGGRRR
+				ld		hl, vec_pal
+				ld		e, 0				; индекс
+vsp_l:			ld		a, e
+				and		8
+				jp		z, vsp_blk			; без точки экрана — чёрный
+				ld		a, e
+				and		2
+				ld		a, c
+				jp		z, vsp_w
+				ld		a, 0xFF				; HUD: белый
+vsp_w:			ld		(hl), a
+				jp		vsp_n
+vsp_blk:		ld		(hl), 0
+vsp_n:			inc		hl
+				inc		e
+				ld		a, e
+				cp		16
+				jp		nz, vsp_l
+				ld		a, 1
+				ld		(vec_palreq), a
+				ret
+vec_zxcol:		DB		0xFF, 0xC0, 0x07, 0xC7, 0x38, 0xF8, 0x3F, 0xFF	; ZX 0..7: (чёрный->белый) синий красный пурпурный зелёный голубой жёлтый белый
+
+; vec_hud_mask: плоскость 2, строки HUD (0..31 = байты 32..63 столбца): 0xFF в столбцах, где HUD белый
+; (жизни 5..8, DAY и счётчик 15..18, рамка солнца/луны 23..28); остальное (колонны, свиток) — цветом комнаты.
+vec_hud_mask:	ld		hl, vec_hudcols
+vhm_c:			ld		a, (hl)
+				or		a
+				ret		z
+				ld		d, a				; столбец -> страница 0xC0+c
+				inc		hl
+				ld		b, (hl)				; сколько столбцов
+				inc		hl
+vhm_col:		push	hl
+				ld		h, d
+				ld		l, 32
+				ld		c, 32
+vhm_r:			ld		(hl), 0xFF
+				inc		l
+				dec		c
+				jp		nz, vhm_r
+				pop		hl
+				inc		d
+				dec		b
+				jp		nz, vhm_col
+				jp		vhm_c
+; ВНИМАНИЕ: столбцы 20..31 плоскости 2 (0xD400..0xDFFF) заняты верхним регионом кода — маску туда писать нельзя,
+; пока верхний регион не уедет на 0xE000 (тогда добавить рамку солнца/луны: 0xD7, 6). Столбцы 0..7 — зона спиллов.
+vec_hudcols:		DB		0xC8, 1, 0xCF, 4, 0
+
 vec_scan:		ld		a, 0x8A				; порт B на вход
 				out		(0x00), a
 				ld		hl, vec_kbmat
@@ -1963,6 +2023,11 @@ def kl_vec_glue(src, translate_later):
     assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
     src = kl_cut_controls(src)
+    # цвет комнаты как на ZX: после flag_room_visited (конец build_screen_objects) — палитра по атрибуту; меню — белое
+    src, n_rp = re.subn(r'(\t+call    flag_room_visited\r?\n\t+ret\r?\n)', r'\t\t\t\tcall    flag_room_visited\n\t\t\t\tld      a, (curr_room_attrib)\n\t\t\t\tjp      vec_set_pal\n', src, count=1)
+    assert n_rp == 1, "room palette hook"
+    src, n_mp = re.subn(r'(do_menu_selection:\r?\n)', r'\g<1>\t\t\t\tld      a, 7\n\t\t\t\tcall    vec_set_pal\n', src, count=1)
+    assert n_mp == 1, "menu palette hook"
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
     hdr = VEC_HEADER
