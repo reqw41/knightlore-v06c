@@ -1169,6 +1169,90 @@ loc_CE40:		ld		hl, (z80_iy)
 # поэтому здесь два указателя: HL на +1..+3, DE на +9..+11, оба двигаются inc.
 # Оригинал портит только A и флаги — BC/DE/HL уходят на стек. 1180 -> 190 тактов.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# upd_80_to_83 (призрак) и тройка toggle_next_prev_sprite / next_graphic_no_mod_4 /
+# save_graphic_no: 80-89 % тактов уходило в хелперы il_ix_* при одном-двух обращениях
+# к полю. Указатель объекта берётся в HL по месту; после get_delta_from_tbl (портит
+# HL и BC) значение прячется в C — BC у вызывателя всё равно уже мертво.
+# ---------------------------------------------------------------------------
+N_UPD_80_83 = """upd_80_to_83:
+				call    adj_m6_m12
+				call    dec_dZ_and_update_XYZ
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 9
+				ld		l, a								; ix+9
+				ld		a, (hl)								; dX
+				inc		hl									; ix+10
+				or		(hl)								; moving X/Y?
+				jp		z, loc_C5DD							; no, skip
+				inc		hl
+				inc		hl									; ix+12
+				ld		a, (hl)
+				and		3									; OOB X/Y?
+				jp		z, loc_C5FD							; no, continue as-is
+
+loc_C5DD:		ld      a, (seed_3)
+				and     3
+				add     a, 4                                   ; rnd(4-7)= +/-3or4
+				call    get_delta_from_tbl
+				ld		c, a
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 9
+				ld		l, a
+				ld		(hl), c								; set dX
+				ld      a, (seed_2)
+				and     3
+				add     a, 4                                   ; rnd(4-7)= +/-3or4
+				call    get_delta_from_tbl
+				ld		c, a
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 10
+				ld		l, a
+				ld		(hl), c								; dY
+				call    calc_ghost_sprite
+				call    audio_B467
+
+loc_C5FD:		call    toggle_next_prev_sprite
+				jp      set_deadly_wipe_and_draw_flags
+"""
+
+N_TOGGLE_SPR = """toggle_next_prev_sprite:
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, (hl)								; graphic_no
+				xor		1									; toggle next/prev sprite
+				ld		(hl), a
+				pop		hl
+				ret
+; ---------------------------------------------------------------------------
+
+next_graphic_no_mod_4:									; graphic no.
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, (hl)
+				ld		c, a
+				and		0xFC								; mask off low 2 bits
+				ld		b, a
+				ld		a, c
+				inc		a
+				and		3									; inc low 2 bits
+				or		b									; mask them back in
+				ld		(hl), a
+				pop		hl
+				ret
+
+save_graphic_no:										; store new graphic no
+				push	hl
+				ld		hl, (z80_ix)
+				ld		(hl), a
+				pop		hl
+				ret
+; End of function toggle_next_prev_sprite
+"""
+
 N_ADD_DXYZ = """dec_dZ_and_update_XYZ:
 				push	hl
 				ld		hl, (z80_ix)
@@ -2156,9 +2240,11 @@ def apply(src):
                           ('adj_dX_for_out_of_bounds', N_ADJ_DX_OOB, 'adj_dX_for_out_of_bounds'),
                           ('adj_dY_for_out_of_bounds', N_ADJ_DY_OOB, 'adj_dY_for_out_of_bounds'),
                           ('dec_dZ_and_update_XYZ', N_ADD_DXYZ, 'dec_dZ_and_update_XYZ'),
+                          ('toggle_next_prev_sprite', N_TOGGLE_SPR, 'toggle_next_prev_sprite'),
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
+    src = _sub(src, r'(?m)^upd_80_to_83:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_80_83, 'upd_80_to_83')
     src = _sub(src, r'(?m)^upd_player_bottom:[^\n]*\n.*?(?=^; returns NC if out-of-bounds)', N_UPD_PLAYER_BOTTOM, 'upd_player_bottom')
     src = _sub(src, r'(?m)^upd_player_top:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_PLAYER_TOP, 'upd_player_top')
     src = _sub(src, r'(?m)^calc_2d_info:[^\n]*\n.*?; End of function calc_2d_info\r?\n', N_CALC_2D, 'calc_2d_info')
