@@ -656,15 +656,73 @@ _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
 # ---- раскладка нижнего региона (цель vec) ----
 VEC_VARS = 0x7A80          # переменные clear_start..clear_end (0x568)
 VEC_CODE_TOP = 0x7980      # потолок кода: ниже 256 байт стека под переменными
+VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xD400'), 16)   # начало верхнего региона (плоскость 3)
 
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
 _IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
 _cur_func = ['']
 
+_ix_form_cnt = {}
+# Редкую форму дешевле развернуть на месте, чем держать хелпер: тело 27..46 байт против
+# 4 байт на `call+db` плюс 13..18 на развёртку. Порог выбран замером (низ региона):
+#   N<=0: 0x7514 (все компактные)  N<=1: 0x74BB  N<=2: 0x7439  N<=3: 0x7597  N<=4: 0x7597
+# То есть выгодно разворачивать формы с 1-2 обращениями; с 3 и более уже дороже.
+# Побочный эффект — темп: развёртка быстрее call+хелпер.
+_IX_RARE = int(__import__('os').environ.get('KL_IX_RARE', '2'))
+
+
+def _ix_form(mn, ops, idxinfo):
+    """(px, form) для обращения к (ix+d)/(iy+d) или None, если форма не компактная."""
+    cell, _ = idxinfo
+    px = 'ix' if cell == 'z80_ix' else 'iy'
+    if mn in ('push', 'pop') or (mn == 'ld' and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'ld' and len(ops) == 2 and ops[1].lower() in ('ix', 'iy')) \
+            or (mn in ('inc', 'dec', 'add') and ops[0].lower() in ('ix', 'iy')) \
+            or (mn == 'jp'):
+        return None
+    midx = None
+    for i, o in enumerate(ops):
+        if '(ix' in o.lower() or '(iy' in o.lower():
+            midx = i
+    if midx is None:
+        return None
+    if mn == 'ld':
+        if midx == 1:
+            r = ops[0].lower()
+            return (px, 'ld' + r) if r in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else None
+        sl = ops[1].strip().lower()
+        return (px, 'st' + sl) if sl in ('a', 'b', 'c', 'd', 'e', 'h', 'l') else (px, 'stn')
+    if mn in ('inc', 'dec', 'bit', 'res', 'set', 'add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
+        return (px, mn)
+    return None
+
+
+def count_ix_forms(src):
+    """Предпроход: сколько раз встречается каждая компактная форма (ix+d)/(iy+d)."""
+    _ix_form_cnt.clear()
+    cur = ''
+    for line in src.split('\n'):
+        label, body, _c = split_line(line)
+        if label and not label.startswith(('loc_', '.')):
+            cur = label.rstrip(':')
+        if not body or cur in _IX_INLINE_FUNCS:
+            continue
+        mn, ops = operands(body)
+        idx = has_idx(body)
+        if not idx:
+            continue
+        f = _ix_form(mn, ops, idx)
+        if f:
+            _ix_form_cnt[f] = _ix_form_cnt.get(f, 0) + 1
+
+
 def _ixiy_compact(mn, ops, idxinfo):
     cell, _ = idxinfo
     if _cur_func[0] in _IX_INLINE_FUNCS:
+        return _ixiy(mn, ops, idxinfo)
+    f = _ix_form(mn, ops, idxinfo)
+    if f and _ix_form_cnt.get(f, 99) <= _IX_RARE:
         return _ixiy(mn, ops, idxinfo)
     px = 'ix' if cell == 'z80_ix' else 'iy'
     full = (mn + ' ' + ','.join(ops)).lower()
@@ -771,6 +829,7 @@ def has_idx(body):
 
 
 def translate(src):
+    count_ix_forms(src)
     out = []
     inserted_scratch = False
     for line in src.split('\n'):
@@ -1875,11 +1934,11 @@ def kl_vec_glue(src, translate_later):
         src = src[:j] + "\t\t\t\tALIGN 256\t\t\t\t\t; все точки входа развёрнутого цикла в одной странице\n" + src[j:]
         # ---- разрез памяти: хвост спрайтов (spr_064..) + хелперы + START в верхний регион 0xD400 ----
         assert "\nspr_064:" in src
-        src = src.replace("\nspr_064:", "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион: хвост спрайтов, IX-хелперы, START\nspr_064:", 1)
+        src = src.replace("\nspr_064:", "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: хвост спрайтов, START\nspr_064:" % VEC_UPPER, 1)
         # блок Вектора (без ORG 0x7B00) — в нижний регион перед разрезом; START — за vidbuf, но в верхнем регионе
         tail = tail.replace("\t\t\t\tORG\t\t0x7B00\t\t\t; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)\n", "")
         tail = tail + _LDIR_HELPERS
-        src = src.replace("\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", "\n" + tail + "\n\t\t\t\tORG 0xD400\t\t\t; верхний регион", 1)
+        src = src.replace("\n\t\t\t\tORG %#06x\t\t\t; верхний регион" % VEC_UPPER, "\n" + tail + "\n\t\t\t\tORG %#06x\t\t\t; верхний регион" % VEC_UPPER, 1)
         tail = ""
         src = src.replace("\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера", "vidbuf:\t\t\tequ 0xA000\t\t; плоскость 1; START/build_lookup_tbls — продолжение верхнего региона", 1)
         assert "vidbuf:\t\t\tequ 0xA000" in src
@@ -1917,7 +1976,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG 0xD400\t+; верхний регион)', lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (256 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (256 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
