@@ -28,6 +28,10 @@ const memory=new ctx.Memory(),keyboard=new ctx.Keyboard(),timer=new ctx.I8253(),
 const cpu=new ctx.I8080(memory,io),tape={advance:()=>{},sample:0,reset:()=>{}},v06c=new ctx.Vector06c(cpu,memory,io,ay,tape);
 v06c.bmp=new Uint32Array(576*288);v06c.displayFrame=()=>{};v06c.check_breakpoint=()=>false;v06c.dbg=null;
 memory.init_from_array(new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000),0);memory.detach_boot&&memory.detach_boot();
+// Источник звука задаём ДО старта: проба AY в vec_boot находит чип vector06js и вешает стенд
+// на вопросе «SOUND  A AY  T VI53». KL_SND=vi переводит сборку на ВИ53, по умолчанию AY (как было).
+if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==="vi"?2:1,false);
+
 cpu.pc=0;cpu.sp=0xC000;cpu.iff=false;
 if(VKBD!==undefined)for(let r=0;r<8;r++)memory.write(VKBD+r,0xFF,false);
 const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
