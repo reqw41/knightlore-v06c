@@ -1262,6 +1262,11 @@ vidbuf_calc_addr_in_hl:	; BC = Y,X -> HL = адрес в буфере (BC сох
 
 ; DE = экран, HL = буфер, B = высота (строк), C = ширина (байт). Столбцы сплошные. Нулевой размер — выход
 ; (иначе 256 столбцов затирают всю память: объекты у края комнаты дают ширину 0).
+; СТЕКОВЫЙ БЛИТ: SP ставится на начало окна в столбце буфера, pop забирает 2 байта за 10 тактов,
+; приёмник адресуется через HL — 17 тактов на байт против 39 у байтового цикла. Число pop'ов на
+; столбец известно на входе, поэтому цепочка из 16 блоков развёрнута целиком и вход считается один
+; раз на вызов. SP уходит в картинку => блок под di, стек игры в bts_sp.
+; Окна выше 32 строк — прежним байтовым циклом, без di.
 blit_to_screen:
 				inc		b
 				dec		b
@@ -1269,15 +1274,76 @@ blit_to_screen:
 				inc		c
 				dec		c
 				ret		z
-bts_col:		push	bc
+				ld		a, b
+				cp		33
+				jp		nc, bts_slow
+				ld		a, l
+				ld		(bts_off+1), a				; смещение окна в столбце (одно на буфер и экран)
+				ld		a, h
+				ld		(bts_pg+1), a				; страница буфера
+				sub		d
+				ld		(bts_dif+1), a				; страница экрана = страница буфера минус это
+				ld		a, b
+				or		a
+				rra									; A = число pop, CY = нечётная высота
+				ld		b, a
+				ld		hl, bts_next
+				jp		nc, bts_ev
+				ld		hl, bts_lo
+bts_ev:			ld		(bts_odd+1), hl				; хвост столбца: последний байт или пропуск
+				ld		a, b						; блок цепочки — 5 байт, считаем 5*pop
+				add		a, a
+				add		a, a
+				add		a, b
+				ld		b, a
+				ld		hl, bts_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(bts_go+1), hl				; вход в цепочку = конец минус число pop
+				ld		hl, 0
+				add		hl, sp
+				ld		(bts_sp), hl				; стек игры
+				di
+bts_pg:			ld		b, 0						; патч: страница буфера
+bts_col:		ld		h, b
+bts_off:		ld		l, 0						; патч: смещение окна
+				ld		sp, hl						; SP = источник, pop идёт вверх по столбцу
+				ld		a, b
+bts_dif:		sub		0x20						; патч: буфер -> экран
+				ld		h, a						; HL = приёмник, L то же смещение
+bts_go:			jp		bts_pend					; патч: вход в цепочку
+__BTS_CHAIN__
+bts_pend:
+bts_odd:		jp		bts_next					; патч: bts_next или bts_lo
+bts_lo:			pop		de							; нечётная высота: последний байт (D не нужен)
+				ld		(hl), e
+bts_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32			; за столбцом 31 — стоп (иначе пишем в буфер)
+				jp		z, bts_done
+				dec		c
+				jp		nz, bts_col
+bts_done:		ld		hl, (bts_sp)
+				ld		sp, hl
+				ei
+				ret
+bts_sp:			DS		2							; стек игры на время захвата SP
+
+; окно выше 32 строк: прежний байтовый цикл, SP не трогаем
+bts_slow:
+bts_scol:		push	bc
 				push	hl
 				push	de
-bts_row:		ld		a, (hl)
+bts_srow:		ld		a, (hl)
 				ld		(de), a
 				inc		l
 				inc		e
 				dec		b
-				jp		nz, bts_row
+				jp		nz, bts_srow
 				pop		de
 				pop		hl
 				pop		bc
@@ -1287,7 +1353,7 @@ bts_row:		ld		a, (hl)
 				cp		0xA0				; за столбцом 31 — стоп (иначе пишем в буфер)
 				ret		z
 				dec		c
-				jp		nz, bts_col
+				jp		nz, bts_scol
 				ret
 
 ; HL = буфер, B = высота, C = ширина (байт), A = значение. Нулевой размер — выход (A сохраняется).
@@ -1540,6 +1606,9 @@ def kl_vec_glue(src, translate_later):
     # цепочки развёрнутых стековых операций: вход в них считается по высоте окна (см. VEC_SCREEN)
     screen = VEC_SCREEN.replace("__VFW_CHAIN__\n",
         "vfw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 1)
+    screen = screen.replace("__BTS_CHAIN__\n",
+        "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+        "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 1)
     tail = VEC_TAIL + screen + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
     # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
     kbzx = [0xFF]*64
