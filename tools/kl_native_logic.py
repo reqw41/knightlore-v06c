@@ -1227,10 +1227,11 @@ loc_CEC6:		ld		a, (de)								; graphic no
 				call	ov_prep								; шесть границ объекта 1 -> иммедиаты
 loc_CEDB:		ld		a, (de)								; следующий graphic no
 				inc		de
-				cp		0xFF
+				or		a									; бит 7 чист -> объект годится (частый случай: 26 тактов)
+				jp		p, ov_i1
+				cp		0xFF								; конец списка?
 				jp		z, render_obj_no1
-				or		a
-				jp		m, loc_CEDB
+				jp		loc_CEDB							; уже отрисован
 ov_i1:			cp		0									; тот же объект? (иммедиат = индекс объекта 1)
 				jp		z, loc_CEDB
 				add		a, KL_GPO_K							; get_ptr_object по месту (индекс уже без бита 7)
