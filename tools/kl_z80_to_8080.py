@@ -1794,14 +1794,14 @@ def kl_vec_glue(src, translate_later):
             vb = m.bit_length() - 1; assert m == 1 << vb
             kbzx[int(vr)*8 + vb] = (zr << 5) | (0x1F & ~(1 << zb))
     tail = tail.replace("__VEC_KBZX__\n", "\t\t\t\tALIGN 8\nvec_kbzx:\t\tDB\t" + ", ".join("0x%02X" % b for b in kbzx) + "\t; (ряд Вектора*8+бит) -> ряд ZX<<5 | маска\n", 1)
+    if not translate_later:   # z80vec: ячейка kl_lines нужна и Z80-сборке (заголовок print_sprite её использует)
+        hdr = hdr.replace("vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n",
+            "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\nkl_lines:\t\tDS\t\t1\t\t\t; print_sprite: счётчик строк\n")
     if translate_later:
         # ---- i8080: скретч эмуляции Z80 в нулевой странице, загрузчик на 0x0090 ----
         hdr = hdr.replace("vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n",
             "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n" + SCRATCH_DEFS_VEC + kl_native.SCRATCH + kl_native_render.SCRATCH + kl_native_logic.SCRATCH)
         hdr = hdr.replace("\t\t\t\tORG\t\t0x0060\nvec_boot:", "\t\t\t\tORG\t\t0x00A0\nvec_boot:")
-    else:
-        hdr = hdr.replace("vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\n",
-            "vec_palreq:\t\tDS\t\t1\t\t\t; 1 = загрузить палитру в ближайшем VBlank\nkl_lines:\t\tDS\t\t1\t\t\t; print_sprite: счётчик строк\n")
         src = kl_logic_fixes(src)
         # ---- print_sprite под i8080: счётчик строк в ячейке (нет AF'), точка входа = младший байт jp ----
         src, n_h = re.subn(r'(\t+ld      a, \(ix\+25\)[^\n]*\n)(?=(\t+di[^\n]*\n)?\t+ld      \(tmp_SP\), sp)', lambda m: m.group(1) + "\t\t\t\tld      (kl_lines), a\n", src, count=1)
