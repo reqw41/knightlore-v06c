@@ -1291,6 +1291,11 @@ bts_row:		ld		a, (hl)
 				ret
 
 ; HL = буфер, B = высота, C = ширина (байт), A = значение. Нулевой размер — выход (A сохраняется).
+; СТЕКОВАЯ ЗАЛИВКА: столбец буфера сплошной, поэтому SP ставится на конец окна и push кладёт
+; 2 байта за 11 тактов (5.5 такта/байт против 27 у байтового цикла). Число push'ей на столбец
+; известно на входе — цепочка из 16 push разворачивает цикл целиком, вход считается один раз.
+; SP уходит в картинку => весь блок под di (иначе ISR положит свои регистры в буфер).
+; Окна выше 32 строк (меню, крупные объекты) — прежним байтовым циклом, без di.
 vidbuf_fill_window:
 				inc		b
 				dec		b
@@ -1299,20 +1304,76 @@ vidbuf_fill_window:
 				dec		c
 				ret		z
 				ld		d, a
-vfw_col:		push	hl
+				ld		e, a						; значение в обоих байтах пары
+				ld		a, b
+				cp		33
+				jp		nc, vfw_slow
+				ld		a, l
+				ld		(vfw_lo+1), a				; нижняя строка окна (для нечётной высоты)
+				add		a, b
+				ld		(vfw_end+1), a				; конец окна = SP на входе в столбец
+				ld		a, h
+				ld		(vfw_pg+1), a				; страница первого столбца
+				ld		a, b
+				or		a
+				rra									; A = число push, CY = нечётная высота
+				ld		b, a
+				ld		hl, vfw_next
+				jp		nc, vfw_ev
+				ld		hl, vfw_lo
+vfw_ev:			ld		(vfw_odd+1), hl				; хвост столбца: нижний байт или пропуск
+				ld		hl, vfw_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(vfw_ent+1), hl				; вход в цепочку = конец минус число push
+				ld		hl, 0
+				add		hl, sp
+				ld		(vfw_sp), hl				; стек игры
+				di
+vfw_pg:			ld		b, 0						; патч: страница столбца
+vfw_col:		ld		h, b
+vfw_end:		ld		l, 0						; патч: конец окна
+				ld		sp, hl						; push пойдёт вниз по столбцу
+vfw_ent:		ld		hl, vfw_pend				; патч: вход в цепочку
+				jp		(hl)
+__VFW_CHAIN__
+vfw_pend:
+vfw_odd:		jp		vfw_next					; патч: vfw_next или vfw_lo
+vfw_lo:			ld		l, 0						; патч: нижняя строка окна
+				ld		h, b
+				ld		(hl), d
+vfw_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32			; за столбцом 31 — стоп
+				jp		z, vfw_done
+				dec		c
+				jp		nz, vfw_col
+vfw_done:		ld		hl, (vfw_sp)
+				ld		sp, hl
+				ei
+				ret
+
+vfw_sp:			DS		2							; стек игры на время захвата SP
+; окно выше 32 строк (меню, крупные объекты): прежний байтовый цикл, SP не трогаем
+vfw_slow:
+vfw_scol:		push	hl
 				push	bc
-vfw_row:		ld		(hl), d
+vfw_srow:		ld		(hl), d
 				inc		l
 				dec		b
-				jp		nz, vfw_row
+				jp		nz, vfw_srow
 				pop		bc
 				pop		hl
 				inc		h
 				ld		a, h
-				cp		high vidbuf + 32			; за столбцом 31 — стоп
+				cp		high vidbuf + 32
 				ret		z
 				dec		c
-				jp		nz, vfw_col
+				jp		nz, vfw_scol
 				ret
 
 ; HL = буфер, B = высота, E = ширина (байт) -> нули
@@ -1476,7 +1537,10 @@ def kl_vec_glue(src, translate_later):
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
     hdr = VEC_HEADER
-    tail = VEC_TAIL + VEC_SCREEN + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
+    # цепочки развёрнутых стековых операций: вход в них считается по высоте окна (см. VEC_SCREEN)
+    screen = VEC_SCREEN.replace("__VFW_CHAIN__\n",
+        "vfw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 1)
+    tail = VEC_TAIL + screen + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
     # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
     kbzx = [0xFF]*64
     zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', tail)
