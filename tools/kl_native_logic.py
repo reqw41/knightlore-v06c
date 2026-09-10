@@ -971,6 +971,199 @@ loc_CA5E:		push	hl
 # У dY правимое смещение живёт в E (DE у вызывателя мертво), потому что L занят указателем.
 # 1017 -> ~250 тактов на вызов.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# upd_player_bottom / upd_player_top — точки диспетчера для двух половин игрока.
+# 76-80 % тактов этих процедур уходило в хелперы il_ix_* (5 и 8 обращений (ix/iy+n)).
+# Здесь указатель объекта берётся в HL по месту; в upd_player_top после ldir DE уже
+# указывает на top+8, поэтому +6/+7/+13 обходятся ex de,hl и inc/dec hl.
+# ВАЖНО: смещения 39 и 45 (поля второй половины игрока) считаются 16-битно — младший
+# байт объекта доходит до 232, и +39 переносит; ASSERT для l+7 здесь не применим.
+# ---------------------------------------------------------------------------
+N_UPD_PLAYER_BOTTOM = """upd_player_bottom:                                              ; dead?
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 13
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+13
+				ld		a, (hl)
+				and		0x40								; bit 6 — убит?
+				jp		z, loc_C83E							; no, skip
+				ld      a, (all_objs_in_cauldron)
+				and     a
+				jp		nz, loc_C83E
+				ld		a, l
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+45
+				ld		a, (hl)
+				or		0x40								; set dead top half
+				ld		(hl), a
+				jp      init_death_sparkles
+
+loc_C83E:                                                       ; returns to caller if transforming
+				call    chk_and_init_transform
+				call    check_user_input
+				call    handle_pickup_drop
+				call    handle_left_right
+				call    handle_jump
+				call    handle_forward
+				call    chk_plyr_OOB
+				jp		nc, plyr_OOB
+
+loc_C855:		ld		hl, (z80_ix)						; fudge near arch
+				ld		a, l
+				add		a, 39
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+0x27
+				ld		a, (hl)
+				or		2									; set 1 — fudge
+				ld		(hl), a
+				call    move_player                             ; does the moving
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 39
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+0x27
+				ld		a, (hl)
+				and		0xFD								; res 1 — reset fudge
+				ld		(hl), a
+				ld		a, l
+				sub		27
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a								; ix+12
+				ld		a, (hl)								; flags12
+				sub     0x10								; entering room?
+				jp		c, loc_C86A							; no, skip
+				ld		(hl), a								; dec entering room counter
+
+loc_C86A:		jp      set_wipe_and_draw_flags
+; ---------------------------------------------------------------------------
+; when walking through arches
+
+plyr_OOB:		ld		hl, (z80_ix)						; dZ
+				ld		a, l
+				add		a, 11
+				ld		l, a								; ix+11 (+11 не переносит: младший байт <= 232 -> 243)
+				ld		a, (hl)
+				and     a                                       ; <0?
+				jp      m, loc_C855                             ; yes, go
+				xor		a
+				ld		(hl), a								; dZ=0
+				jp		loc_C855
+"""
+
+N_UPD_PLAYER_TOP = """upd_player_top:
+				ld      a, (all_objs_in_cauldron)
+				and     a
+				jp		nz, loc_CDEF
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 13
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+13
+				ld		a, (hl)
+				and		0x40								; bit 6 — убит?
+				jp		nz, init_death_sparkles
+
+loc_CDEF:		ld		hl, (z80_ix)						; DE = top
+				ld		d, h
+				ld		e, l
+				ld		a, l
+				sub		32
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a								; HL = bottom = top-32
+				ld		(z80_iy), hl						; iy = player bottom half
+				inc		de									; DE = top+1
+				inc		hl									; HL = bottom+1
+				ld      bc, 7
+				ldir                                            ; copy x,y,z,w,d,h,flags
+				ex		de, hl								; HL = top+8
+				dec		hl
+				dec		hl									; top+6
+				ld		(hl), 0								; height (top)
+				inc		hl									; top+7
+				ld		a, (hl)
+				or		2									; ignore in 3D calcs
+				ld		(hl), a
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl									; top+13
+				ld		a, (hl)								; flags13
+				and     0xF                                    ; look around counter
+				jp		z, loc_CE14                             ; maybe look around again?
+				dec		(hl)								; dec look around counter
+				jp		loc_CE27
+; ---------------------------------------------------------------------------
+
+loc_CE14:                                                       ; look in a random direction
+				ld      a, (seed_3)
+				cp      2                                      ; one way?
+				jp		c, loc_CE33                            ; yes, go
+				cp      0xFE                                   ; other way?
+				jp		nc, loc_CE40                           ; yes, go
+				ld		hl, (z80_iy)
+				ld		a, (hl)								; straight ahead (iy+0)
+
+set_top_sprite:	add     a, 16
+				ld		hl, (z80_ix)
+				ld		(hl), a								; graphic_no (top half)
+
+loc_CE27:		ld		hl, (z80_iy)						; Z (bottom half)
+				inc		hl
+				inc		hl
+				inc		hl									; iy+3
+				ld		a, (hl)
+				add     a, 12                                  ; directly above
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl
+				inc		hl									; ix+3
+				ld		(hl), a								; store in top half
+				jp		set_draw_objs_overlapped
+; ---------------------------------------------------------------------------
+
+loc_CE33:		ld		hl, (z80_iy)						; graphic_no (bottom half)
+				ld		a, (hl)
+				and     0xF8
+				or      6                                      ; look one way
+
+loc_CE3A:		push	af									; look for 8 iterations
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 13
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+13
+				ld		(hl), 8
+				pop		af
+				jp		set_top_sprite
+; ---------------------------------------------------------------------------
+
+loc_CE40:		ld		hl, (z80_iy)
+				ld		a, (hl)
+				and     0xF8
+				or      7                                      ; look the other way
+				jp		loc_CE3A
+"""
+
 N_ADJ_DX_OOB = """adj_dX_for_out_of_bounds:	; C = dX; прижать dX к границам комнаты по X
 				push	hl									; dY/dZ вызывателя
 				ld		hl, (z80_ix)
@@ -1923,6 +2116,8 @@ def apply(src):
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
+    src = _sub(src, r'(?m)^upd_player_bottom:[^\n]*\n.*?(?=^; returns NC if out-of-bounds)', N_UPD_PLAYER_BOTTOM, 'upd_player_bottom')
+    src = _sub(src, r'(?m)^upd_player_top:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_PLAYER_TOP, 'upd_player_top')
     src = _sub(src, r'(?m)^calc_2d_info:[^\n]*\n.*?; End of function calc_2d_info\r?\n', N_CALC_2D, 'calc_2d_info')
     src = _sub(src, r'(?m)^set_wipe_and_draw_flags:[^\n]*\n.*?; End of function set_wipe_and_draw_flags\r?\n',
                N_SET_WD, 'set_wipe_and_draw_flags')
