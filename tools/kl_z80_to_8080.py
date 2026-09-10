@@ -996,29 +996,74 @@ def _stub_after_label(src, label, note):
 
 
 def kl_cut_controls(src):
-    """Борис 2026-09-10: выбор управления (1..5: клавиатура/Kempston/курсор/Interface II/directional) и
-    его обработка вырезаны — на Векторе только клавиатура (user_input_method = 0 всегда). Логика для
-    режима 0 не меняется, локстеп остаётся судьёй."""
+    """Борис 2026-09-10: варианты ввода ZX (Kempston/курсор/Interface II) вырезаны — на Векторе только клавиатура.
+    Оставлены ДВА режима управления (Борис: «одно классическое, другое прямое»): бит 3 user_input_method =
+    directional; в оригинале он работал только с джойстиком (проверка `and 6`), здесь — с клавиатурой.
+    Меню: «1 CLASSIC» / «1 DIRECT» (клавиша 1 переключает, строка показывает текущий режим), «0 START GAME»."""
     def cut(pat, name, repl='', flags=re.S, count=1):
         nonlocal src
         src, n = re.subn(pat, repl, src, count=count, flags=flags)
         assert n == count, "kl_cut_controls: " + name
-    # меню: 3 строки вместо 8 (заголовок, 0 START GAME, (c) 1984)
-    cut(r'menu_colours:   DB 0x43, 0xC4, 0x44, 0x44, 0x44, 0x45, 0x47, 0x47', 'menu_colours', 'menu_colours:   DB 0x43, 0x47, 0x47')
-    cut(r'menu_xy:        DB 88, 159, 48, 143, 48, 127, 48, 111, 48, 95, 48, 79\r?\n\t+DB 48, 63, 80, 39', 'menu_xy', 'menu_xy:        DB 88, 159, 48, 63, 80, 39')
-    cut(r'; "1 KEYBOARD"\r?\n.*?(?=; "0 START GAME")', 'menu_text 1..5')
-    cut(r'(display_menu:\r?\n(?:[^\n]*\n){4}\t+ld      b, )8(\s+; 8 lines to display)', 'display_menu b', r'\g<1>3\g<2>')
-    cut(r'(\t+ld      hl, menu_colours\r?\n\t+ld      b, )8(\s+; # menu entries)', 'do_menu_selection b', r'\g<1>3\g<2>')
-    # цикл меню: от чтения ряда 1..5 до чтения ряда с «0» — долой (вместе с check_for_*, debounce, звуком смены настройки)
-    cut(r"\t+ld      a, 0xF7 ; '[^\n]*; 1,2,3,4,5\r?\n.*?(?=\t+ld      a, 0xEF ; '[^\n]*; 0,9,8,7,6\r?\n\t+call    read_port\r?\n\t+bit     0, a\s+; '0' \(Start Game\)\?)", 'menu 1..5')
+    # меню: 4 строки (заголовок, режим управления, 0 START GAME, (c) 1984)
+    cut(r'menu_colours:   DB 0x43, 0xC4, 0x44, 0x44, 0x44, 0x45, 0x47, 0x47', 'menu_colours', 'menu_colours:   DB 0x43, 0x44, 0x47, 0x47')
+    cut(r'menu_xy:        DB 88, 159, 48, 143, 48, 127, 48, 111, 48, 95, 48, 79\r?\n\t+DB 48, 63, 80, 39', 'menu_xy', 'menu_xy:        DB 88, 159, 72, 103, 48, 63, 80, 39')
+    # строка режима: слот 9 байт (заполняется из kl_ctl_classic / kl_ctl_direct), токены: цифра = значение, A=0xA.., пробел 0x26, бит 7 = конец
+    cut(r'; "1 KEYBOARD"\r?\n.*?(?=; "0 START GAME")', 'menu_text 1..5',
+        '; режим управления (слот, копируется из kl_ctl_*)\nkl_ctl_slot:\t\tDB 1, 0x26, 0xC, 0x15, 0xA, 0x1C, 0x1C, 0x12, 0x8C\n')
+    # исходные строки — ВНЕ списка меню (display_text_list печатает список подряд)
+    cut(r'(complete_colours:)', 'ctl strings', '; "1 CLASSIC" / "1 DIRECT "\nkl_ctl_classic:\t\tDB 1, 0x26, 0xC, 0x15, 0xA, 0x1C, 0x1C, 0x12, 0x8C\nkl_ctl_direct:\t\tDB 1, 0x26, 0xD, 0x12, 0x1B, 0xE, 0xC, 0x1D, 0xA6\n\\g<1>')
+    cut(r'(display_menu:\r?\n(?:[^\n]*\n){4}\t+ld      b, )8(\s+; 8 lines to display)', 'display_menu b', r'\g<1>4\g<2>')
+    cut(r'(\t+ld      hl, menu_colours\r?\n\t+ld      b, )8(\s+; # menu entries)', 'do_menu_selection b', r'\g<1>4\g<2>')
+    # цикл меню: вместо выбора 1..5 — переключатель режима клавишей 1 (с антидребезгом), затем проверка «0»
+    cut(r"\t+ld      a, 0xF7 ; '[^\n]*; 1,2,3,4,5\r?\n.*?(?=\t+ld      a, 0xEF ; '[^\n]*; 0,9,8,7,6\r?\n\t+call    read_port\r?\n\t+bit     0, a\s+; '0' \(Start Game\)\?)", 'menu 1..5',
+        "\t\t\t\tld      a, 0xF7                                 ; ряд 1..5\n"
+        "\t\t\t\tcall    read_port\n"
+        "\t\t\t\tand     1                                      ; '1' — переключить режим управления\n"
+        "\t\t\t\tld      hl, debounce_5\n"
+        "\t\t\t\tjp      z, kl_ctl_rel\n"
+        "\t\t\t\tld      a, (hl)\n"
+        "\t\t\t\tor      a\n"
+        "\t\t\t\tjp      nz, kl_ctl_done                         ; ещё не отпущена\n"
+        "\t\t\t\tld      (hl), 1\n"
+        "\t\t\t\tld      a, (user_input_method)\n"
+        "\t\t\t\txor     8\n"
+        "\t\t\t\tld      (user_input_method), a\n"
+        "\t\t\t\tcall    kl_ctl_show\n"
+        "\t\t\t\tcall    display_menu                            ; перерисовать текст в буфер\n"
+        "\t\t\t\tld      hl, vidbuf + 9*256 + 32 + 96            ; окно строки режима: столбцы 9..17, строки 96..111\n"
+        "\t\t\t\tld      de, 0x8000 + 9*256 + 32 + 96\n"
+        "\t\t\t\tld      bc, 0x1009                              ; 16 строк, 9 байт\n"
+        "\t\t\t\tcall    blit_to_screen\n"
+        "\t\t\t\tjp      kl_ctl_done\n"
+        "kl_ctl_rel:\t\tld      (hl), 0\n"
+        "kl_ctl_done:\n")
     cut(r'\t+call    flash_menu\r?\n', 'call flash_menu', count=2)
     cut(r'\t+jp      menu_loop\r?\n; -+\r?\n(?:\r?\n)*clr_debounce:\r?\n\t+res     0, \(hl\)\r?\n\t+jr      check_for_start_game[^\n]*\r?\n', 'clr_debounce', '\t\t\t\tjp      menu_loop\n')
-    cut(r'flash_menu:\r?\n.*?; End of function flash_menu\r?\n', 'flash_menu')
+    cut(r'flash_menu:\r?\n.*?; End of function flash_menu\r?\n', 'flash_menu',
+        "kl_ctl_show:\t\t; строка меню по режиму: (user_input_method & 8) ? DIRECT : CLASSIC -> kl_ctl_slot\n"
+        "\t\t\t\tld      hl, kl_ctl_classic\n"
+        "\t\t\t\tld      a, (user_input_method)\n"
+        "\t\t\t\tand     8\n"
+        "\t\t\t\tjp      z, kl_cs_1\n"
+        "\t\t\t\tld      hl, kl_ctl_direct\n"
+        "kl_cs_1:\t\tld      de, kl_ctl_slot\n"
+        "\t\t\t\tld      b, 9\n"
+        "kl_cs_2:\t\tld      a, (hl)\n"
+        "\t\t\t\tld      (de), a\n"
+        "\t\t\t\tinc     hl\n"
+        "\t\t\t\tinc     de\n"
+        "\t\t\t\tdec     b\n"
+        "\t\t\t\tjp      nz, kl_cs_2\n"
+        "\t\t\t\tret\n")
     cut(r'toggle_selected:\r?\n.*?; End of function toggle_selected\r?\n', 'toggle_selected')
-    # ввод: только клавиатура
+    # при входе в меню — показать текущий режим
+    cut(r'(do_menu_selection:\r?\n)', 'do_menu_selection entry', r'\g<1>\t\t\t\tcall    kl_ctl_show\n')
+    # ввод: только клавиатура; directional — по биту 3 без проверки джойстика
     cut(r'\t+ld      a, \(user_input_method\)\r?\n\t+rrca\r?\n\t+and     3[^\n]*\r?\n\t+jp      Z, keyboard\r?\n.*?(?=keyboard:)', 'input dispatch')
-    cut(r'(chk_pickup_drop:\r?\n)\t+ld      hl, user_input_method\r?\n\t+ld      a, \(hl\)\r?\n\t+and     6[^\n]*\r?\n\t+ld      a, \(user_input\)[^\n]*\r?\n\t+jr      Z, loc_C00B[^\n]*\r?\n\t+bit     3, \(hl\)[^\n]*\r?\n\t+jr      Z, loc_C00B\r?\n\t+rrca\r?\n', 'chk_pickup_drop', r'\g<1>\t\t\t\tld      a, (user_input)\n')
-    cut(r'(handle_left_right:\r?\n)\t+ld      hl, user_input_method\r?\n.*?(?=left_right_rotational:)', 'handle_left_right directional', r'\g<1>')
+    cut(r'(chk_pickup_drop:\r?\n)\t+ld      hl, user_input_method\r?\n\t+ld      a, \(hl\)\r?\n\t+and     6[^\n]*\r?\n\t+ld      a, \(user_input\)[^\n]*\r?\n\t+jr      Z, loc_C00B[^\n]*\r?\n\t+bit     3, \(hl\)[^\n]*\r?\n\t+jr      Z, loc_C00B\r?\n', 'chk_pickup_drop',
+        r'\g<1>\t\t\t\tld      a, (user_input_method)\n\t\t\t\tand     8                                      ; directional?\n\t\t\t\tld      a, (user_input)\n\t\t\t\tjp      z, loc_C00B\n')
+    cut(r'(handle_left_right:\r?\n)\t+ld      hl, user_input_method\r?\n\t+ld      a, \(hl\)\r?\n\t+and     6[^\n]*\r?\n\t+jr      Z, left_right_rotational[^\n]*\r?\n\t+bit     3, \(hl\)[^\n]*\r?\n\t+jr      Z, left_right_rotational\r?\n', 'handle_left_right head',
+        r'\g<1>\t\t\t\tld      a, (user_input_method)\n\t\t\t\tand     8                                      ; directional?\n\t\t\t\tjp      z, left_right_rotational\n')
     return src
 
 def kl_glue(src, target):
