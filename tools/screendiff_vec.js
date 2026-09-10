@@ -68,9 +68,10 @@ memory.write=function(a,w,s){a&=0xffff;
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
-const startIter=iter; let steps=0,frc=0;
+const startIter=iter; let steps=0,frc=0,tacc=0;   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
+
 while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
-  const c=cpu.instruction();steps++;frc+=c;if(cpu.last_opcode===0xd3)io.commit();}
+  const c=cpu.instruction();steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
 fs.writeFileSync(`build/scr_${TAG}.txt`,lines.join("\n")+"\n");
 const dump=Buffer.alloc(END-SCR0);for(let a=SCR0;a<END;a++)dump[a-SCR0]=rd(a);
 fs.writeFileSync(`build/scr_${TAG}.bin`,dump);

@@ -126,6 +126,7 @@ ps_ent:			add		a, low (loc_D7AC+3)				; i8080: jp — младший байт а
 ps_pos:			ld		a, (hl)
 				ld		(kl_lines), a					; счётчик строк пиксельного цикла
 				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере
+				call	vec_ps_budget					; хватит ли кадра на пиксельный цикл под di
 				di										; SP уходит в данные спрайта
 				ld      (tmp_SP), sp
 				ex      de, hl
