@@ -35,6 +35,11 @@ function runRoom(room){
   memory.init_from_array(IMG,0);
 if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==="vi"?2:1,false); // экран выбора звука: сразу AY
   cpu.pc=0;cpu.sp=0xC000;cpu.iff=false; for(let r=0;r<8;r++)keyboard.matrix[r]=0;
+  // seed_3 += mem[seed_2]: без гашения две сборки играют РАЗНЫЕ сценарии (см. render_gate.sh)
+  if(process.env.KLSEED!=="live"){const s3=L.seed_3&0xff,s3h=(L.seed_3>>8)&0xff;
+    const pat=[0x3A,s3,s3h,0x86,0x85,0x84,0x32,s3,s3h];let at=-1;
+    for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rd(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
+    if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");memory.write(at+3,0x00,false);}
   const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
   let phase="menu",iter=0,roomSet=(room===null);
   memory.write=function(a,w,s){a&=0xffff;
@@ -49,7 +54,7 @@ if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==
   // ---- сбор ----
   const st={calls:0,al:0,sh:0,byAl:new Float64Array(8),cycAl:0,cycSh:0,bytesAl:0,bytesSh:0,
             cycByS:new Float64Array(8),bytesByS:new Float64Array(8),wh:{},total:0,iters:0,halt:0};
-  const start=iter; let frc=0,steps=0;
+  const start=iter; let frc=0,steps=0,tacc=0;
   let inCall=false, retA=-1, cyc0=0, curS=0, halt0=0, loop0=0, loopH0=0; st.halt=0;
   st.loopAl=0; st.loopSh=0; st.loopByS=new Float64Array(8);
   while(iter-start<N&&steps<5e7){
@@ -70,6 +75,9 @@ if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==
         const dl=(st.total-loop0)-(st.halt-loopH0);
         if(curS===0)st.loopAl+=dl;else st.loopSh+=dl;st.loopByS[curS]+=dl;}}
     const c=(cpu.instruction(),cpu.vcycles);steps++;st.total+=c;frc+=c;if(cpu.last_opcode===0x76)st.halt+=c;
+    tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}   // ВИ53 1.5 МГц: БЕЗ этого секундомер
+    // бюджета стоит, vec_di_budget всегда уходит в ei/halt, и ISR, исполнившийся ВНУТРИ вызова print_sprite,
+    // попадает в его такты (halt вычитается, а ISR — нет). Именно так родились «151/204 такта на байт» в §14.
     if(cpu.last_opcode===0xd3)io.commit();
   }
   st.iters=iter-start;

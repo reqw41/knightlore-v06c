@@ -31,6 +31,8 @@ const IMG=new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000);
 const rd=a=>memory.read(a&0xffff,false);
 const OBJ=L.graphic_objs_tbl, VIDBUF=0xA000;
 const stat=new Map();   // адрес di -> {n, max, sum}
+const VDB=L.vec_di_budget, FRAME=29952;  // тиков ВИ53 в кадре
+const est=new Map();    // адрес di -> {n, sum, sum2, halt}  оценка блока (DE на входе vec_di_budget)
 
 function runRoom(room){
   memory.init_from_array(IMG,0);
@@ -51,11 +53,14 @@ function runRoom(room){
   for(let f=0;f<60;f++)v06c.oneInterrupt(true); keyboard.matrix[2]|=1;
   let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
   if(phase!=="game")return null;
-  const start=iter; let frc=0,steps=0,tacc=0,tot=0,diAt=-1,diT=0,frames=0,lost=0,lostAt=new Map();
+  const start=iter; let frc=0,steps=0,tacc=0,tot=0,diAt=-1,diT=0,frames=0,lost=0,lostAt=new Map(),pendEst=0,pendHalt=0;
   while(iter-start<N&&steps<8e7){
     if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(diAt>=0)lostAt.set(diAt,(lostAt.get(diAt)||0)+1);}v06c.irq=true;v06c.checkInterrupt();}
     const pc=cpu.pc, op=rd(pc);
-    if(op===0xF3&&cpu.iff){diAt=pc;diT=tot;}                 // di
+    if(pc===VDB){pendEst=(cpu.regs[2]<<8)|cpu.regs[3];}                  // оценка блока в тиках ВИ53
+    if(op===0xF3&&cpu.iff){diAt=pc;diT=tot;
+      const e=est.get(pc)||{n:0,sum:0,sum2:0,halt:0};e.n++;e.sum+=pendEst;e.sum2+=pendEst*pendEst;e.halt+=pendHalt;est.set(pc,e);pendHalt=0;}
+    if(cpu.last_opcode===0x76)pendHalt+=cpu.vcycles;          // halt перед di = ожидание кадра
     const c=(cpu.instruction(),cpu.vcycles);steps++;tot+=c;frc+=c;
     tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
     if(cpu.last_opcode===0xFB&&diAt>=0){                     // ei — блок закрыт
@@ -71,6 +76,11 @@ for(const r of rooms){const s=runRoom(r);if(!s){console.log("не дошли:",r
   tf+=s.frames;tl+=s.lost;for(const [k,v] of s.lostAt)allLost.set(k,(allLost.get(k)||0)+v);}
 console.log(`кадров ${tf}, обратный ход пришёлся на di: ${tl}`);
 for(const [k,v] of [...allLost].sort((a,b)=>b[1]-a[1]))console.log(`  потери в блоке ${k.toString(16)} (${nameOf(k)}): ${v}`);
+console.log("\nоценка блока и halt (модель: если фаза кадра равномерна, E[halt] = оценка^2/(2*кадр) тактов)");
+console.log("блок                вызовов  средн.оценка  halt/вызов(такт)  модель E[halt]  выигрыш от дробления на 2/3/4 (тактов/вызов, цена дробления 344)");
+for(const [a,e] of est){const mean=e.sum/e.n, mod=e.sum2/e.n/(2*FRAME)*2;  // *2: тик -> такт
+  const g=n=>((mod*(1-1/n))-(n-1)*344).toFixed(0);
+  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(20)} ${String(e.n).padStart(7)} ${mean.toFixed(0).padStart(13)} ${(e.halt/e.n).toFixed(0).padStart(17)} ${mod.toFixed(0).padStart(15)}   ${g(2)} / ${g(3)} / ${g(4)}`);}
 console.log("\nблок (адрес di)        вызовов   макс.тактов  макс.тиков ВИ53   средн.тактов");
 for(const [a,s] of [...stat].sort((x,y)=>y[1].max-x[1].max))
   console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(28)} ${String(s.n).padStart(8)} ${String(s.max).padStart(12)} ${String(Math.ceil(s.max/2)).padStart(14)} ${(s.sum/s.n).toFixed(0).padStart(14)}`);
