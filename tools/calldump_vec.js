@@ -68,6 +68,8 @@ const RULES={
   upd_2_4:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["o1",r.ix,32]]},
   update_sprite_loop:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
   wipe_next_object:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32]]},
+  // снимок ПЕРЕД стиранием/рисованием: таблица объектов (флаги +7, прямоугольники +24..+31) и список DRAW
+  render_dynamic_objects:{point:true,regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["list",L.objects_to_draw,41]]},
   chk_plyr_OOB:{regions:r=>[["o1",r.ix,32]]},
   clear_dX_dY:{regions:r=>[["o1",r.ix,32]]},
   adj_dZ_for_out_of_bounds:{regions:r=>[["o1",r.ix,32],["objtbl",L.graphic_objs_tbl,40*32]]},
