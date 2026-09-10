@@ -1136,6 +1136,7 @@ vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
 vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
 vec_pal:		DS		16			; палитра (индекс = p0<<3|p1<<2|p2<<1|p3), строит vec_set_pal
+VEC_HUD_WHITE	equ		0			; 1 = белый HUD через плоскость 2 (нужна плоскость 2 без кода: верхний регион с 0xE000)
 				ASSERT $ <= 0x00A0
 				ORG		0x0060
 vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы), B выход (бордюр/режим)
@@ -1242,7 +1243,7 @@ vsp_l:			ld		a, e
 				and		8
 				jp		z, vsp_blk			; без точки экрана — чёрный
 				ld		a, e
-				and		2
+				and		2 * VEC_HUD_WHITE			; p2 = маска HUD (только когда плоскость 2 свободна от кода!)
 				ld		a, c
 				jp		z, vsp_w
 				ld		a, 0xFF				; HUD: белый
@@ -1262,6 +1263,9 @@ vec_zxcol:		DB		0xFF, 0xC0, 0x07, 0xC7, 0x38, 0xF8, 0x3F, 0xFF	; ZX 0..7: (чё�
 ; vec_hud_mask: плоскость 2, строки HUD (0..31 = байты 32..63 столбца): 0xFF в столбцах, где HUD белый
 ; (жизни 5..8, DAY и счётчик 15..18, рамка солнца/луны 23..28); остальное (колонны, свиток) — цветом комнаты.
 vec_hud_mask:	ld		hl, vec_hudcols
+				IF VEC_HUD_WHITE == 0
+				ret
+				ENDIF
 vhm_c:			ld		a, (hl)
 				or		a
 				ret		z
