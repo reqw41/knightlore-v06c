@@ -1175,6 +1175,29 @@ loc_CE40:		ld		hl, (z80_iy)
 # к полю. Указатель объекта берётся в HL по месту; после get_delta_from_tbl (портит
 # HL и BC) значение прячется в C — BC у вызывателя всё равно уже мертво.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Голова flip_sprite: одно обращение (ix+0) стоило ~200 тактов хелпера при 17 вызовах
+# за итерацию. Хвост (flip_sprite_data) — в kl_native, не трогаем.
+# ---------------------------------------------------------------------------
+N_FLIP_HEAD = """flip_sprite:
+				ld		hl, (z80_ix)
+				ld		a, (hl)								; sprite index
+				ld		l, a
+				ld		h, 0
+				add     hl, hl                                  ; word offset
+				ld      bc, sprite_tbl
+				add     hl, bc                                  ; sprite table entry
+				ld      e, (hl)
+				inc     hl
+				ld      d, (hl)                                 ; DE = sprite address
+				ld      a, (de)                                 ; width
+				and     a                                       ; null sprite?
+				jp      NZ, flip_sprite_data                    ; no, skip
+				inc     sp
+				inc     sp                                      ; exit from caller
+				ret
+"""
+
 N_UPD_80_83 = """upd_80_to_83:
 				call    adj_m6_m12
 				call    dec_dZ_and_update_XYZ
@@ -2244,6 +2267,7 @@ def apply(src):
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
+    src = _sub(src, r'(?m)^flip_sprite:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_FLIP_HEAD, 'flip_sprite (голова)')
     src = _sub(src, r'(?m)^upd_80_to_83:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_80_83, 'upd_80_to_83')
     src = _sub(src, r'(?m)^upd_player_bottom:[^\n]*\n.*?(?=^; returns NC if out-of-bounds)', N_UPD_PLAYER_BOTTOM, 'upd_player_bottom')
     src = _sub(src, r'(?m)^upd_player_top:[^\n]*\n.*?(?=^; =============== S U B R O U T I N E)', N_UPD_PLAYER_TOP, 'upd_player_top')
