@@ -655,7 +655,8 @@ def _ixiy(mn, ops, idxinfo):
 _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
 # ---- раскладка нижнего региона (цель vec) ----
 VEC_VARS = 0x7A80          # переменные clear_start..clear_end (0x568)
-VEC_CODE_TOP = 0x7980      # потолок кода: ниже 256 байт стека под переменными
+VEC_CODE_TOP = 0x7A00      # потолок кода: ниже 128 байт стека под переменными (замер: главный стек 38 Б,
+                           # временный `ld sp,seed_1` 72 Б, ISR добавляет 10 -> максимум 82)
 VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xD400'), 16)   # начало верхнего региона (плоскость 3)
 
 _ix_used = set()
@@ -2146,7 +2147,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (256 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (128 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
