@@ -24,12 +24,15 @@ const cpu=new ctx.I8080(memory,io),tape={advance:()=>{},sample:0,reset:()=>{}},v
 v06c.bmp=new Uint32Array(576*288);v06c.displayFrame=()=>{};v06c.check_breakpoint=()=>false;v06c.dbg=null;
 memory.init_from_array(new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000),0);memory.detach_boot&&memory.detach_boot();
 cpu.pc=0;cpu.sp=0xC000;cpu.iff=false;
-for(let r=0;r<8;r++)memory.write(L.vkbd+r,0xFF,false);
+if(VKBD!==undefined)for(let r=0;r<8;r++)memory.write(VKBD+r,0xFF,false);
 const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const rd16=a=>rd(a)|rd(a+1)<<8;
 const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
-function key(k,down){const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
+const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
+function key(k,down){
+  if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
+  const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 let phase="menu",iter=0;
 memory.write=function(a,w,s){a&=0xffff;
@@ -41,6 +44,7 @@ const regs=()=>({a:cpu.a(),b:cpu.b(),c:cpu.c(),d:cpu.d(),e:cpu.e(),h:cpu.h(),l:c
 const hex=(a,n)=>{let s="";for(let i=0;i<n;i++)s+=rd(a+i).toString(16).padStart(2,"0");return s;};
 // ПРАВИЛА: какие регионы писать (вычисляются по регистрам/памяти на входе; на выходе — те же адреса)
 const RULES={
+  print_sprite:{regions:r=>[["obj",r.ix,32],["buf",0xA000,0x2000]]},
   save_2d_info:{regions:r=>[["obj",r.ix,32]]},
   calc_pixel_XY:{regions:r=>[["obj",r.ix,32]]},
   list_objects_to_draw:{regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["list",L.objects_to_draw,41]]},
@@ -69,6 +73,7 @@ const RULES={
   loc_D62C:{point:true,regions:r=>[["o1",r.ix,32]]},
   set_pixel_adj:{regions:r=>[["o1",r.ix,32]]},
   is_object_not_ignored:{regions:r=>[["o2",r.iy,32]]},
+  loc_B000:{point:true,regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["vars",L.clear_start,0x68]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");
@@ -78,7 +83,7 @@ const pending=[]; // {label, ret, sp, entry}
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
-const startIter=iter; let steps=0; const counts={};
+const startIter=iter; let steps=0,frc=0; const counts={};
 while(iter-startIter<N&&steps<3e8){
   const pc=cpu.pc;
   // выходы: PC == адрес возврата и SP == sp_входа+2
@@ -87,7 +92,7 @@ while(iter-startIter<N&&steps<3e8){
   if(lab){const rule=RULES[lab]||{regions:()=>[]};const r=regs();const regions=rule.regions(r);const entry={regs:r,memAddrs:regions.map(([n,a,len])=>[n,a,len]),mem:regions.map(([n,a,len])=>[n,a,hex(a,len)])};
     if(rule.point){out[lab].write(JSON.stringify({label:lab,iter,entry})+"\n");counts[lab]=(counts[lab]||0)+1;}
     else pending.push({label:lab,ret:rd16(cpu.sp),sp:cpu.sp,entry});}
-  cpu.instruction();steps++;
+  if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();} const c=cpu.instruction();steps++;frc+=c;if(cpu.last_opcode===0xd3)io.commit();
 }
 for(const n of want)out[n].end();
 console.log("итераций",iter-startIter,"вызовов:",JSON.stringify(counts));

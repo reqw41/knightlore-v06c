@@ -9,6 +9,7 @@
 const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
 const [ROM,SLD,NS,INPUTS,TAGA]=process.argv.slice(2); const N=+NS||300;
+const WATCH=process.env.KLWATCH?process.env.KLWATCH.split("-").map(x=>parseInt(x,16)):null; let wn=0;
 const TAG=TAGA||(ROM.replace(/.*\//,"").replace(/\.r0m$/,"")+(INPUTS?"_alive":"_rest"));
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}
@@ -60,6 +61,7 @@ function h32(a0,a1){let h=0x811c9dc5>>>0;for(let a=a0;a<a1;a++){h=(h^rd(a))>>>0;
 const SCR0=0x8000,SCR1=0xA000,END=0xC000;
 let phase="menu",iter=0; const lines=[];
 memory.write=function(a,w,s){a&=0xffff;
+  if(WATCH&&a>=WATCH[0]&&a<=WATCH[1]&&wn++<30)console.log(`WATCH iter ${iter} pc=${cpu.pc.toString(16)} ${a.toString(16)} <- ${w.toString(16)} (was ${memory.read(a,false).toString(16)})`);
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);
@@ -75,5 +77,6 @@ while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.
 fs.writeFileSync(`build/scr_${TAG}.txt`,lines.join("\n")+"\n");
 const dump=Buffer.alloc(END-SCR0);for(let a=SCR0;a<END;a++)dump[a-SCR0]=rd(a);
 fs.writeFileSync(`build/scr_${TAG}.bin`,dump);
+if(process.env.KLFULL){const full=new Uint8Array(0x10000);for(let a=0;a<0x10000;a++)full[a]=memory.read(a,false);fs.writeFileSync(`build/mem_${TAG}.bin`,full);}
 console.log(`итераций ${iter-startIter}, снимков ${lines.length} -> build/scr_${TAG}.txt, дамп 0x8000..0xBFFF -> build/scr_${TAG}.bin`);
 console.log(`итог: буфер ${h32(SCR1,END).toString(16).padStart(8,"0")} экран ${h32(SCR0,SCR1).toString(16).padStart(8,"0")}`);

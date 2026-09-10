@@ -1366,6 +1366,8 @@ blit_to_screen:
 				inc		c
 				dec		c
 				ret		z
+				call	vec_clip_cols
+				ret		z
 				ld		a, b
 				cp		33
 				jp		nc, bts_slow
@@ -1456,12 +1458,39 @@ bts_srow:		ld		a, (hl)
 ; известно на входе — цепочка из 16 push разворачивает цикл целиком, вход считается один раз.
 ; SP уходит в картинку => весь блок под di (иначе ISR положит свои регистры в буфер).
 ; Окна выше 32 строк (меню, крупные объекты) — прежним байтовым циклом, без di.
+; vec_clip_cols: HL = адрес в буфере, C = столбцов -> C обрезан по краю буфера (страница 0xC0); Z = окно целиком
+; вне буфера (например, адреса атрибутов ZX 0xCFxx: colour_panel/colour_sun_moon/атрибуты объектов зовут заливку
+; с ними — в ч/б это должно быть пустой операцией, а не записью столбцами в 0xCF00.. и дальше по данным спрайтов).
+; A и DE сохраняются.
+vec_clip_cols:	push	af
+				ld		a, h
+				cp		high vidbuf
+				jp		c, vcc_none
+				cp		high vidbuf + 32
+				jp		nc, vcc_none
+				ld		a, high vidbuf + 32
+				sub		h							; столбцов до края (1..32)
+				cp		c
+				jp		nc, vcc_ok
+				ld		c, a
+vcc_ok:			pop		af
+				inc		c
+				dec		c							; NZ: есть что делать
+				ret
+vcc_none:		pop		af
+				ld		c, 0
+				inc		c
+				dec		c							; Z
+				ret
+
 vidbuf_fill_window:
 				inc		b
 				dec		b
 				ret		z
 				inc		c
 				dec		c
+				ret		z
+				call	vec_clip_cols				; окна вне буфера (атрибуты ZX) и вылет за столбец 31
 				ret		z
 				ld		d, a
 				ld		e, a						; значение в обоих байтах пары
