@@ -1538,6 +1538,23 @@ def _iy_loop_tail(tail, loop, uniq):
             "%s:\t\t\tdec\t\tb\n"
             "\t\t\t\tjp\t\tnz, %s\n") % (tail, uniq, uniq, loop)
 
+def _ioni_inline(loop, tail, uniq):
+    """is_object_not_ignored по месту: убирает call+ret (27 тактов) на каждом из
+    304 проходов за итерацию в тяжёлой комнате. HL живёт через цикл — push/pop, как в самой процедуре."""
+    return ("%s:\t\t\tpush\thl\n"
+            "\t\t\t\tld\t\thl, (z80_iy)\n"
+            "\t\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; graphic no\n"
+            "\t\t\t\tand\t\ta\t\t\t\t\t\t\t\t\t; пусто?\n"
+            "\t\t\t\tjp\t\tz, %s\n"
+            "\t\t\t\tld\t\ta, l\n"
+            "\t\t\t\tadd\t\ta, 7\n"
+            "\t\t\t\tld\t\tl, a\n"
+            "\t\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; флаги\n"
+            "\t\t\t\tcpl\n"
+            "\t\t\t\tand\t\t2\t\t\t\t\t\t\t\t\t; бит 1 (ignore)\n"
+            "%s:\t\t\tpop\t\thl\n"
+            "\t\t\t\tjp\t\tz, %s\t\t\t\t\t\t\t; игнорируется — следующий объект\n") % (loop, uniq, uniq, tail)
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1583,6 +1600,11 @@ def apply(src):
                                    ('adj_dX_for_obj_intersect', 'loc_CBA0', 'loc_CBE1', 'adx_1'),
                                    ('adj_dY_for_obj_intersect', 'loc_CBEF', 'loc_CC30', 'ady_1'),
                                    ('adj_dZ_for_obj_intersect', 'loc_CC3E', 'loc_CC95', 'adz_1')):
+        if proc in ('adj_dX_for_obj_intersect', 'adj_dY_for_obj_intersect'):
+            # на эти два цикла приходятся 308 из 310 вызовов is_object_not_ignored за итерацию
+            # (adj_dZ и do_any_objs_intersect холодные) — их и разворачиваем по месту
+            src = _sub(src, r'(?m)^' + loop + r':[^\n]*\n\t+call    is_object_not_ignored\n\t+jr      Z, ' + tail + r'[^\n]*\n',
+                       _ioni_inline(loop, tail, uniq + 'i'), 'is_object_not_ignored по месту в ' + proc)
         src, n = re.subn(r'(?ms)(^' + proc + r':\n(?:[^\n]*\n)*?)\t+ld      iy, graphic_objs_tbl\n',
                          lambda mm: mm.group(1) + N_IY_LOOP_INIT, src, count=1)
         assert n == 1, 'kl_native_logic: не найдено: ld iy в ' + proc
