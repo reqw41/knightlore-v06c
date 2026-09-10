@@ -653,6 +653,10 @@ def _ixiy(mn, ops, idxinfo):
 # KL_IX_INLINE=1 -> старое встроенное разворачивание.
 # ---------------------------------------------------------------------------
 _IX_COMPACT = not __import__('os').environ.get('KL_IX_INLINE')
+# ---- раскладка нижнего региона (цель vec) ----
+VEC_VARS = 0x7A80          # переменные clear_start..clear_end (0x568)
+VEC_CODE_TOP = 0x7980      # потолок кода: ниже 256 байт стека под переменными
+
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
 _IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
@@ -1018,7 +1022,7 @@ VEC_HEADER = """
 ; ---- Вектор-06Ц: загрузчик (.r0m с 0x0000, PC=0). Всё в подмножестве i8080. ----
 				ORG		0x0000
 				di
-				ld		sp, 0x8000
+				ld		sp, clear_start
 				jp		vec_boot
 				ORG		0x0038
 				jp		vec_isr			; RST 38h: кадровое прерывание (палитра в VBlank, скан клавиатуры)
@@ -1741,19 +1745,22 @@ def kl_vec_glue(src, translate_later):
     # РАСКЛАДКА: код 0x0100.., стек <0x8000, ПЛОСКОСТЬ 0x8000-0x9FFF, переменные 0xA000, vidbuf 0xA600,
     # таблицы 0xBE00/0xBF00, "экран ZX" 0xCD00 (только атрибуты как мусорное ОЗУ)
     src = kl_cut_zx_attributes(src)
-    src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
     # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
     # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
     # Переменные с 0xC800.
     # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
     # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
-    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG 0xC800\nclear_start:', src, count=1, flags=re.M)
+    # ПЕРЕМЕННЫЕ — в нижний регион (0xC000-0xDFFF = плоскость 2 остаётся под полосу HUD).
+    # 0x7A80 кратно 32 (ASSERT'ы на младшие 5 бит graphic_objs_tbl не меняются), под ними
+    # 256 байт стека: и главный стек (SP=clear_start), и временный `ld sp,seed_1` растут вниз
+    # от clear_start. Замерено: главный стек 38 байт, временный 72 байта.
+    src = re.sub(r'^\t+ORG 0x5BA0\nclear_start:', '\t\t\t\tORG %s\nclear_start:' % VEC_VARS, src, count=1, flags=re.M)
     src = src.replace("\nclear_end:\n", "\nclear_end:\n\t\t\t\tORG 0x0100\t; код и данные игры\n", 1)
     # vidbuf — отдельный сегмент; START и build_lookup_tbls (в оригинале лежат ВНУТРИ буфера и
     # затираются им) выносим на 0x7A00 (код кончается ~0x78B1, стек растёт вниз от 0x8000)
     src = re.sub(r'^\t+ORG\s+0xD900\nvidbuf:', '\t\t\t\tORG 0xA000\nvidbuf:\t\t\tDS 0x2000\n\t\t\t\tORG 0x7A00\t; START/build_lookup_tbls вне буфера', src, count=1, flags=re.M)
     # таблицы сдвига ОСТАЮТСЯ на 0xF100/0xF200: print_sprite адресует страницу таблицы константой (or 0xF0)
-    src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>0x8000', src, count=1, flags=re.M)
+    src = re.sub(r'^(START:\s+ld\s+sp,\s*)0x5B9[Ff]', r'\g<1>clear_start', src, count=1, flags=re.M)
     # font как ограничитель таблицы объектов -> clear_end
     assert src.count("ld      bc, font") == 2
     src = src.replace("ld      bc, font", "ld      bc, clear_end")
@@ -1812,6 +1819,10 @@ def kl_vec_glue(src, translate_later):
     # бордюр ZX (ULA) — убрать
     src = src.replace("\t\t\t\txor     a                                       ; border colour BLACK, activate MIC\n\t\t\t\tout     (0xFE), a                               ; ULA\n",
                       "\t\t\t\txor     a\n", 1)
+    # zx_vram: битмап ZX на Векторе не пишется; читатели заменены выше (clr_bitmap_memory,
+    # update_screen, солнце/луна), attrib_calc_addr_de вырезан вместе с атрибутами — сегмент долой
+    src, _n = re.subn(r'\t+ORG 0x4000\r?\nzx_vram:\s+DS 0x1800\r?\n', '', src, count=1)
+    assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
     src = kl_cut_controls(src)
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
@@ -1906,7 +1917,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG 0xD400\t+; верхний регион)', lambda m: helpers + "\t\t\t\tASSERT $ <= 0x7E00\t\t; нижний регион: до стека (SP=0x8000)\n" + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG 0xD400\t+; верхний регион)', lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (256 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
