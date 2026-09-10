@@ -1591,26 +1591,100 @@ vsr_r:			ld		a, (de)
 vec_suntmp:		equ		0xC700			; защитная зона за буфером: 93 байта временно
 
 update_screen:	; весь буфер (строки 32..223 всех 32 столбцов) -> плоскость 0, буфер обнуляется (как оригинал 0xD57D)
-				ld		hl, vidbuf+0x20
-				ld		de, 0x8020
-				ld		c, 32
-us_col:			push	hl
-				push	de
-				ld		b, 192
-us_row:			ld		a, (hl)
-				ld		(de), a
-				ld		(hl), 0
+				; СТЕКОВАЯ ВЕРСИЯ, столбец за столбцом:
+				;   1) SP = начало окна в столбце буфера, pop забирает 2 байта за 10 тактов,
+				;      приёмник — через HL: 24 такта на 2 байта против 98 у байтового цикла;
+				;   2) после прохода SP стоит на конце окна, и 96 push HL (=0) обнуляют ровно
+				;      прочитанное окно, идя вниз: 11 тактов на 2 байта.
+				; 49 -> 20.6 такта на байт: 301К -> 127К на вызов (смена комнаты).
+				; SP уходит в картинку => столбец идёт под di (~3.9К тактов, 1/15 кадра),
+				; стек игры — в us_sp, бюджет кадра — как у blit_to_screen.
+				ld		hl, 0
+				add		hl, sp
+				ld		(us_sp), hl					; стек игры на время захвата SP
+				ld		c, high vidbuf				; C = страница столбца буфера
+us_col:			ld		a, c
+				ld		(us_src+1), a
+				sub		high vidbuf - 0x80
+				ld		(us_dst+1), a				; страница плоскости 0
+				ld		de, 2100					; бюджет столбца в тиках ВИ53
+				call	vec_di_budget
+				di
+us_src:			ld		h, 0						; патч: страница буфера
+				ld		l, 32
+				ld		sp, hl						; SP = источник, pop идёт вверх по окну
+us_dst:			ld		h, 0						; патч: страница экрана
+				ld		l, 32						; HL = приёмник
+				ld		b, 12						; 12 * 8 * 2 = 192 строки
+us_row:
+				pop		de
+				ld		(hl), e
 				inc		l
-				inc		e
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
+				pop		de
+				ld		(hl), e
+				inc		l
+				ld		(hl), d
+				inc		l
 				dec		b
 				jp		nz, us_row
-				pop		de
-				pop		hl
-				inc		h
-				inc		d
-				dec		c
+				ld		hl, 0						; обнуление окна: push идёт вниз от конца
+				ld		b, 8						; 8 * 12 * 2 = 192
+us_zero:
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				push	hl
+				dec		b
+				jp		nz, us_zero
+				ld		hl, (us_sp)
+				ld		sp, hl
+				ei
+				inc		c
+				ld		a, c
+				cp		high vidbuf + 32			; за столбцом 31 — стоп
 				jp		nz, us_col
 				ret
+us_sp:			DS		2							; стек игры на время захвата SP
 """
 
 def _replace_func(src, label, end_marker, new, note=""):
