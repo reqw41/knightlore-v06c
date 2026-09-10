@@ -541,6 +541,7 @@ def simulate(p0, p1, p2, pal16, rows, junk2=None, junk3=None, aspect=True, zoom=
 # ----------------------------------------------------------------------------
 
 def main():
+    global ALLOW_SETS
     ap = argparse.ArgumentParser()
     ap.add_argument('src')
     ap.add_argument('--out', default='.')
@@ -572,8 +573,17 @@ def main():
     ap.add_argument('--native', action='store_true',
                     help='снять родную сетку C64 (160x200) и пересчитать пиксель-арт-аккуратно, '
                          'без размытия: только так штрихи готики остаются чёткими')
-    ap.add_argument('--resample', choices=['nearest', 'majority', 'letterbox'], default='nearest',
-                    help='--native: как класть сетку на 256x256')
+    ap.add_argument('--resample', choices=['nearest', 'majority', 'letterbox', 'smooth'],
+                    default='nearest', help='--native: как класть сетку на 256x256. smooth — '
+                    'гладко увеличить уже ЧИСТУЮ сетку и заново привязать к тем же 15 цветам: '
+                    'при 160->256 (x1.6) ячейка ложится то в одну, то в две точки, и ровные '
+                    'штрихи готики идут «чёрточками» — сглаживание это разбивает')
+    ap.add_argument('--smooth-filter', dest='sfilter', choices=['bilinear', 'lanczos', 'box2x'],
+                    default='bilinear', help='--resample smooth: чем увеличивать')
+    ap.add_argument('--blur', type=float, default=0.0,
+                    help='--resample smooth: доп. размытие в точках экрана перед привязкой')
+    ap.add_argument('--base', default='title16',
+                    help='основа имён выходных файлов для c16')
     ap.add_argument('--palette-name', dest='palname', choices=sorted(NAMED_PALETTES) + ['c64'],
                     default='c64', help='--native: именованная палитра Вектора вместо привязки '
                                         'цветов исходника к ближайшим')
@@ -596,7 +606,28 @@ def main():
         if args.mode != 'c16':
             ap.error('--native сделан для --mode c16 (16 цветов = ровно набор исходника)')
         nat = native_grid(args.src)
-        if args.resample == 'majority':
+        if args.resample == 'smooth':
+            # Увеличиваем ЧИСТУЮ сетку (не исходник!), потом заново привязываем
+            # к той же таблице из 15 цветов — тогда любая именованная палитра
+            # подходит без переделки, меняются только планы.
+            rgb = Image.fromarray(NATIVE_RGB[nat].astype(np.uint8))
+            if args.sfilter == 'box2x':
+                rgb = rgb.resize((320, 400), Image.NEAREST).resize((256, args.rows), Image.BOX)
+            else:
+                rgb = rgb.resize((256, args.rows),
+                                 Image.LANCZOS if args.sfilter == 'lanczos' else Image.BILINEAR)
+            if args.blur > 0:
+                rgb = rgb.filter(ImageFilter.GaussianBlur(args.blur))
+            sm = np.asarray(rgb, dtype=np.float64)
+            ALLOW_SETS = {0: [True] * len(NATIVE_COLORS)}
+            allowed = np.zeros((args.rows, 256), dtype=np.int8)
+            npal = to_lin(NATIVE_RGB)
+            if args.strength > 0:
+                ci = quant_fs(to_lin(sm), npal, allowed, args.strength)
+            else:
+                ci = quant_none(to_lin(sm), npal, allowed)
+            ci = ci.astype(np.int16)
+        elif args.resample == 'majority':
             # ближайший-по-центру и мажоритарный расходятся не на ничьих, а там,
             # где две-три соседние ячейки одного цвета складываются и перевешивают
             # ту, что накрыла центр: ~1.5 % точек
@@ -631,7 +662,6 @@ def main():
     right[:, args.split:] = True
 
     # --- палитра ------------------------------------------------------------
-    global ALLOW_SETS
     pins = tuple(int(v, 0) for v in args.pins.split(',')) if args.pins else ()
     fixed = np.array([int(v, 0) for v in args.palette.split(',')]) if args.palette else None
     if args.mode == 'a4':
@@ -729,7 +759,7 @@ def emit(args, tag, ci, pal_bytes, p2len_out=None):
     p2_len = 8192 if args.mode in ('c8', 'c16') else 0
 
     if args.mode == 'c16':
-        base = os.path.join(args.out, 'title16' + (f'_{args.tag}' if args.tag else ''))
+        base = os.path.join(args.out, args.base + (f'_{args.tag}' if args.tag else ''))
     else:
         base = os.path.join(args.out, f'title_{tag}')
     open(base + '_p0.bin', 'wb').write(p0.tobytes())

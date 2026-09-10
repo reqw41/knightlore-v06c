@@ -49,6 +49,8 @@ const regs=()=>({a:cpu.a(),b:cpu.b(),c:cpu.c(),d:cpu.d(),e:cpu.e(),h:cpu.h(),l:c
 const hex=(a,n)=>{let s="";for(let i=0;i<n;i++)s+=rd(a+i).toString(16).padStart(2,"0");return s;};
 // ПРАВИЛА: какие регионы писать (вычисляются по регистрам/памяти на входе; на выходе — те же адреса)
 const RULES={
+  blit_to_screen:{regions:r=>[]},
+  vidbuf_fill_window:{regions:r=>[]},
   print_sprite:{regions:r=>[["obj",r.ix,32],["buf",0xA000,0x2000]]},
   save_2d_info:{regions:r=>[["obj",r.ix,32]]},
   calc_pixel_XY:{regions:r=>[["obj",r.ix,32]]},
