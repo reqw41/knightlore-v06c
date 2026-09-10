@@ -1179,28 +1179,41 @@ vec_isr:		push	af				; RST 38h каждый кадр (VBlank): палитра п
 vi_nostop:		push	bc
 				push	de
 				push	hl
-				ld		a, (vec_palreq)
-				or		a
-				jp		z, vi_kbd
+				; палитра: записи 15..8 (точка экрана есть) — КАЖДЫЙ кадр, 4 OUT на запись (~900 тактов): запись
+				; защёлкивается цветом под лучом, и одиночная загрузка «по запросу» может частично промахнуться мимо
+				; обратного хода (поздний вход в ISR) — тогда часть индексов остаётся старой («картинка не полностью
+				; закрашивается»). Записи 7..0 (без точки) — чёрные, грузятся по запросу vec_palreq.
 				ld		hl, vec_pal + 15
 				ld		e, 0x0F
 vb_pal:			ld		a, e
 				out		(0x02), a			; индекс = цвет бордюра (луч в обратном ходе)
 				ld		a, (hl)
 				dec		hl
-vb_w:			out		(0x0C), a
-				out		(0x0C), a
-				out		(0x0C), a
-				out		(0x0C), a
 				out		(0x0C), a
 				out		(0x0C), a
 				out		(0x0C), a
 				out		(0x0C), a
 				dec		e
-				jp		p, vb_pal
+				ld		a, e
+				cp		8
+				jp		nc, vb_pal
+				ld		a, (vec_palreq)
+				or		a
+				jp		z, vb_pal_done
+vb_pal2:		ld		a, e
+				out		(0x02), a
+				ld		a, (hl)
+				dec		hl
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				out		(0x0C), a
+				dec		e
+				jp		p, vb_pal2
 				xor		a
-				out		(0x02), a			; бордюр чёрный
 				ld		(vec_palreq), a
+vb_pal_done:	xor		a
+				out		(0x02), a			; бордюр чёрный
 vi_kbd:			call	vec_scan
 				call	vec_zxbuild
 				call	msx_mtick				; мелодия: один тик = один кадр
