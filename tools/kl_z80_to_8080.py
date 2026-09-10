@@ -2092,10 +2092,19 @@ def kl_vec_glue(src, translate_later):
         src = src.replace(old_a, "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт входа (+1: перед loc_D7AC убран ex af,af')\n\t\t\t\tjr      loc_D73C\n", 1)
         i = src.index("\t\t\t\tjr      loc_D73C\n", src.index("print_sprite:")) + len("\t\t\t\tjr      loc_D73C\n")
         j = src.index("\t\t\t\tpop     de\n", i)
-        src = src[:j] + "\t\t\t\tALIGN 256\t\t\t\t\t; все точки входа развёрнутого цикла в одной странице\n" + src[j:]
-        # ---- разрез памяти: хвост спрайтов (spr_064..) + хелперы + START в верхний регион 0xD400 ----
+        # развёрнутые цепочки пиксельного цикла: все точки входа обязаны лежать в одной странице
+        # (патчится только младший байт `jp` в loc_D7AC). ALIGN 256 на месте съедал 244 байта
+        # выравнивания — вместо него цепочки уезжают в НАЧАЛО верхнего региона (0xE000/0xD400 —
+        # граница страницы по построению). Вход в блок только через `jp loc_D7AA`, провала нет.
+        k = src.index("\t\t\t\tld      sp, (tmp_SP)\n", j)
+        k = src.index("\t\t\t\tret\n", k) + len("\t\t\t\tret\n")
+        ps_chain = ("; ---- развёрнутые цепочки print_sprite: начало верхнего региона = граница страницы ----\n"
+                    + src[j:k])
+        src = src[:j] + src[k:]
+        # ---- разрез памяти: цепочки print_sprite + хвост спрайтов (spr_064..) + хелперы + START в верхний регион ----
         assert "\nspr_064:" in src
-        src = src.replace("\nspr_064:", "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: хвост спрайтов, START\nspr_064:" % VEC_UPPER, 1)
+        src = src.replace("\nspr_064:", "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: цепочки print_sprite, хвост спрайтов, START\n" % VEC_UPPER
+                          + ps_chain + "spr_064:", 1)
         # блок Вектора (без ORG 0x7B00) — в нижний регион перед разрезом; START — за vidbuf, но в верхнем регионе
         tail = tail.replace("\t\t\t\tORG\t\t0x7B00\t\t\t; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)\n", "")
         tail = tail + _LDIR_HELPERS
