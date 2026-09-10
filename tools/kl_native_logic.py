@@ -486,115 +486,380 @@ loc_C7D6:		ld		a, e								; следующий объект (указатель
 
 
 # ---------------------------------------------------------------------------
-# do_objs_intersect_on_x/y/z: |коорд1 + d - коорд2| - (размер1 + размер2); CY = пересечение.
-# Оригинал портит только A, D и флаги (B, C, E, H, L целы) — потому промежуточные значения
-# идут через push af, а не через регистр. По четыре обращения (ix/iy+n) на процедуру
-# (~214 тактов каждое через хелпер) сведены к двум загрузкам указателя.
+# КЛАСС ПЕРЕСЕЧЕНИЙ (do_objs_intersect_on_x/y/z + их четыре цикла).
+#
+# Оригинал считает |коорд1 + d - коорд2| - (размер1 + размер2), где «1» — движущийся
+# объект (IX), «2» — очередной объект таблицы (IY), d — правимое смещение (C/L/H).
+# Шесть полей объекта 1 (X1,Y1,Z1,W1,D1,H1) и три смещения внутри одного прохода цикла
+# НЕ МЕНЯЮТСЯ: ветка попадания правит только (ix+12), (ix+13), (iy+9/10/13) и, редко,
+# одно из d. Поэтому объект 1 целиком уходит в иммедиаты (как прямоугольник в ov_prep):
+#
+#   КОНТРАКТ (5 сайтов вызова: do_any_objs_intersect, is_on_or_near_obj,
+#             adj_d{X,Y,Z}_for_obj_intersect):
+#     * перед серией вызовов — call doi_prep (C = dX, L = dY, H = dZ, объект 1 в z80_ix);
+#       он кладёт в иммедиаты doix_s+1 = X1+dX, doiy_s+1 = Y1+dY, doiz_s+1 = Z1+dZ,
+#       doix_w+1 = W1, doiy_d+1 = D1, doiz_h+1 = H1. HL и BC целы, DE портит;
+#     * do_objs_intersect_on_{x,y,z} принимают БАЗУ ОБЪЕКТА 2 В HL (а не в z80_iy) и
+#       возвращают HL целым; портят только A и флаги (CY = пересечение). BC, DE целы —
+#       поэтому в циклах DE держит шаг 32 (add hl,de), а D больше не нужен под сумму
+#       размеров: она уходит в иммедиат doi{x,y}_e+1;
+#     * если цикл поменял своё d (ветка попадания, ~раз на итерацию), он правит
+#       соответствующий иммедиат НА ДЕЛЬТУ (adj_d_for_out_of_bounds меняет d на +-1),
+#       а не пересчитывает prep;
+#     * z80_iy больше не ведётся по объектам: его значение восстанавливается на выходе
+#       из цикла (конец таблицы) и в ветке попадания (для хелперов il_iy_*) — ровно
+#       те два значения, которые видел бы вызыватель у оригинала.
+#
+# Цена: 196 -> 105/114 (x), 110/119 (y), 86/92 (z) тактов на вызов; сам проход цикла
+# 149 -> 46 (пустой объект) / 79 (проверяемый). doi_prep — 196 тактов, ~8 раз за итерацию.
 # ---------------------------------------------------------------------------
-N_DOI_X = """do_objs_intersect_on_x:	; C = new dX; CY = пересечение по X. Портит A, D.
-				push	hl
+N_DOI_X = """doi_prep:		; иммедиаты класса пересечений по (z80_ix) и C/L/H (dX/dY/dZ). HL, BC целы; DE портит.
+				ex		de, hl								; DE = dY(E)/dZ(D)
 				ld		hl, (z80_ix)
 				inc		hl									; ix+1
-				ld		a, (hl)								; objX
-				add		a, c								; + new dX
-				push	af
-				ld		a, l
-				add		a, 3
-				ld		l, a								; ix+4
-				ld		d, (hl)								; objW
-				ld		hl, (z80_iy)
+				ld		a, (hl)
+				add		a, c
+				ld		(doix_s+1), a						; X1 + dX
+				inc		hl									; ix+2
+				ld		a, (hl)
+				add		a, e
+				ld		(doiy_s+1), a						; Y1 + dY
+				inc		hl									; ix+3
+				ld		a, (hl)
+				add		a, d
+				ld		(doiz_s+1), a						; Z1 + dZ
+				inc		hl									; ix+4
+				ld		a, (hl)
+				ld		(doix_w+1), a						; W1
+				inc		hl									; ix+5
+				ld		a, (hl)
+				ld		(doiy_d+1), a						; D1
+				inc		hl									; ix+6
+				ld		a, (hl)
+				ld		(doiz_h+1), a						; H1
+				ex		de, hl								; HL = dY/dZ обратно
+				ret
+; End of function doi_prep
+
+do_objs_intersect_on_x:	; HL = база объекта 2 (цела); CY = пересечение по X. Портит A.
 				ld		a, l
 				add		a, 4
-				ld		l, a								; iy+4
-				ld		a, d
-				add		a, (hl)								; objW + thisW
-				ld		d, a
-				ld		a, l
-				sub		3
-				ld		l, a								; iy+1
-				pop		af
-				sub		(hl)								; objX + newdX - thisX
+				ld		l, a								; obj2+4 (thisW), переноса нет — ASSERT в set_draw_objs_overlapped
+doix_w:			ld		a, 0								; W1
+				add		a, (hl)								; W1 + thisW
+				ld		(doix_e+1), a
+				dec		hl
+				dec		hl
+				dec		hl									; obj2+1 (thisX)
+doix_s:			ld		a, 0								; X1 + dX
+				sub		(hl)
 				jp		p, doix_1
 				cpl
 				inc		a									; abs()
-doix_1:			sub		d
-				pop		hl
+doix_1:			dec		hl									; -> база (dec hl флаги не портит)
+doix_e:			sub		0									; - (W1 + thisW)
 				ret
 ; End of function do_objs_intersect_on_x
 """
 
-N_DOI_Y = """do_objs_intersect_on_y:	; L = new dY; CY = пересечение по Y. Портит A, D.
-				push	hl
-				ld		d, l								; new dY
-				ld		hl, (z80_ix)
-				ld		a, l
-				add		a, 2
-				ld		l, a								; ix+2
-				ld		a, (hl)								; objY
-				add		a, d								; + new dY
-				push	af
-				ld		a, l
-				add		a, 3
-				ld		l, a								; ix+5
-				ld		d, (hl)								; objD
-				ld		hl, (z80_iy)
+N_DOI_Y = """do_objs_intersect_on_y:	; HL = база объекта 2 (цела); CY = пересечение по Y. Портит A.
 				ld		a, l
 				add		a, 5
-				ld		l, a								; iy+5
-				ld		a, d
-				add		a, (hl)								; objD + thisD
-				ld		d, a
-				ld		a, l
-				sub		3
-				ld		l, a								; iy+2
-				pop		af
-				sub		(hl)								; objY + newdY - thisY
+				ld		l, a								; obj2+5 (thisD)
+doiy_d:			ld		a, 0								; D1
+				add		a, (hl)								; D1 + thisD
+				ld		(doiy_e+1), a
+				dec		hl
+				dec		hl
+				dec		hl									; obj2+2 (thisY)
+doiy_s:			ld		a, 0								; Y1 + dY
+				sub		(hl)
 				jp		p, doiy_1
 				cpl
 				inc		a
-doiy_1:			sub		d
-				pop		hl
+doiy_1:			dec		hl
+				dec		hl									; -> база
+doiy_e:			sub		0
 				ret
 ; End of function do_objs_intersect_on_y
 """
 
-N_DOI_Z = """do_objs_intersect_on_z:	; H = new dZ; CY = пересечение по Z. Портит A, D.
+N_DOI_Z = """do_objs_intersect_on_z:	; HL = база объекта 2 (цела); CY = пересечение по Z. Портит A.
 				push	hl
-				ld		d, h								; new dZ
-				ld		hl, (z80_ix)
 				inc		hl
 				inc		hl
-				inc		hl									; ix+3
-				ld		a, (hl)								; objZ
-				add		a, d								; + new dZ
-				push	af
-				ld		hl, (z80_iy)
-				inc		hl
-				inc		hl
-				inc		hl									; iy+3
-				pop		af
-				sub		(hl)								; objZ + newdZ - thisZ
+				inc		hl									; obj2+3 (thisZ)
+doiz_s:			ld		a, 0								; Z1 + dZ
+				sub		(hl)
 				jp		p, doiz_pos
 				cpl
 				inc		a									; abs()
-				push	af
-				ld		hl, (z80_ix)
-				ld		a, l
-				add		a, 6
-				ld		l, a								; ix+6
-				ld		d, (hl)								; objH
-				pop		af
-				jp		doiz_end
-doiz_pos:		push	af
-				ld		a, l
-				add		a, 3
-				ld		l, a								; iy+6
-				ld		d, (hl)								; thisH
-				pop		af
-doiz_end:		sub		d
+doiz_h:			sub		0									; - H1 (высота объекта 1)
+				pop		hl
+				ret
+doiz_pos:		inc		hl
+				inc		hl
+				inc		hl									; obj2+6 (thisH)
+				sub		(hl)								; - thisH
 				pop		hl
 				ret
 ; End of function do_objs_intersect_on_z
+"""
+
+# ---------------------------------------------------------------------------
+# Циклы класса пересечений. Общая голова прохода (граф. номер != 0 и не «ignore»)
+# развёрнута по месту: указатель живёт в HL, шаг 32 — в DE, счётчик — в B,
+# а dY/dZ (у adj_dX) или пара невыделенных d — на стеке (ex (sp),hl в ветке попадания).
+# Ветка попадания оставлена транслированной (хелперы il_ix_*/il_iy_* сами берегут HL/BC/DE),
+# ей достаточно один раз положить указатель в z80_iy.
+# ---------------------------------------------------------------------------
+def _loop_head(pre, nx, nx7):
+    return ("%s_lp:\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; graphic no\n"
+            "\t\t\t\tand\t\ta\n"
+            "\t\t\t\tjp\t\tz, %s\n"
+            "\t\t\t\tld\t\ta, l\n"
+            "\t\t\t\tadd\t\ta, 7\n"
+            "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; obj2+7 (флаги)\n"
+            "\t\t\t\tld\t\ta, (hl)\n"
+            "\t\t\t\tand\t\t2\t\t\t\t\t\t\t\t\t; ignore?\n"
+            "\t\t\t\tjp\t\tnz, %s\n"
+            "\t\t\t\tld\t\ta, l\n"
+            "\t\t\t\tsub\t\t7\n"
+            "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; -> база объекта 2\n") % (pre, nx, nx7)
+
+
+def _loop_tail(pre, nx, nx7, done):
+    return ("%s:\t\t\tld\t\ta, l\n"
+            "\t\t\t\tsub\t\t7\n"
+            "\t\t\t\tld\t\tl, a\n"
+            "%s:\t\t\tadd\t\thl, de\t\t\t\t\t\t\t\t; следующий объект\n"
+            "\t\t\t\tdec\t\tb\n"
+            "\t\t\t\tjp\t\tnz, %s_lp\n"
+            "\t\t\t\tld\t\thl, graphic_objs_tbl+1280\n"
+            "\t\t\t\tld\t\t(z80_iy), hl\t\t\t\t\t\t; IY после цикла — как у оригинала\n"
+            "%s:\t\t\tpop\t\thl\t\t\t\t\t\t\t\t\t; dY/dZ\n"
+            "\t\t\t\tret\n") % (nx7, nx, pre, done)
+
+
+N_ADJ_DX_LOOP = """adj_dX_for_obj_intersect:	; C = dX (правится), HL = dY/dZ; прижать dX к другим объектам
+				call	doi_prep
+				push	hl									; dY/dZ — на стек, HL под указатель
+				ld		hl, graphic_objs_tbl
+				ld		de, 32
+				ld		b, 40								; max objects
+""" + _loop_head('adx', 'adx_nx', 'adx_nx7') + """				call    do_objs_intersect_on_y
+				jp		nc, adx_nx
+				call    do_objs_intersect_on_z
+				jp		nc, adx_nx
+
+adx_rt:			call    do_objs_intersect_on_x
+				jp		nc, adx_nx
+				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
+				set     0, (ix+12)                               ; set X OOB
+				ld      a, (ix+13)
+				rrca
+				and     0x40 ; '@'                             ; bit 7->6
+				or      (iy+13)                                  ; obj2 destroyed?
+				ld      (iy+13), a
+				rlca
+				and     0x40 ; '@'                             ; bit 5->6
+				or      (ix+13)                                  ; obj1 destroyed?
+				ld      (ix+13), a
+				bit     2, (iy+7)                                ; moveable?
+				jr      Z, loc_CBD9                             ; no, skip
+				ld      a, (ix+9)
+				ld      (iy+9), a                                ; copy dX
+
+loc_CBD9:		ld		a, c
+				call    adj_d_for_out_of_bounds
+				ld		d, a								; новый dX
+				sub		c									; дельта (+-1)
+				ld		c, d
+				ld		e, a
+				ld		a, (doix_s+1)
+				add		a, e
+				ld		(doix_s+1), a						; X1+dX — на дельту
+				ld		a, d
+				and		a									; dX стал нулём?
+				ld		de, 32								; вернуть шаг (флаги целы)
+				jp		z, adx_done
+				jp		adx_rt
+""" + _loop_tail('adx', 'adx_nx', 'adx_nx7', 'adx_done') + """; End of function adj_dX_for_obj_intersect
+"""
+
+N_ADJ_DY_LOOP = """adj_dY_for_obj_intersect:	; L = dY (правится), C = dX, H = dZ; прижать dY к другим объектам
+				call	doi_prep
+				push	hl									; dY/dZ — на стек, HL под указатель
+				ld		hl, graphic_objs_tbl
+				ld		de, 32
+				ld		b, 40								; max objects
+""" + _loop_head('ady', 'ady_nx', 'ady_nx7') + """				call    do_objs_intersect_on_x
+				jp		nc, ady_nx
+				call    do_objs_intersect_on_z
+				jp		nc, ady_nx
+
+ady_rt:			call    do_objs_intersect_on_y
+				jp		nc, ady_nx
+				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
+				set     1, (ix+12)                               ; set Y OOB
+				ld      a, (ix+13)
+				rrca
+				and     0x40 ; '@'                             ; bit 7->6
+				or      (iy+13)                                  ; obj2 destroyed?
+				ld      (iy+13), a
+				rlca
+				and     0x40 ; '@'                             ; bit 5->6
+				or      (ix+13)                                  ; obj1 destroyed?
+				ld      (ix+13), a
+				bit     2, (iy+7)                                ; moveable?
+				jr      Z, loc_CC28                             ; no, skip
+				ld      a, (ix+10)
+				ld      (iy+10), a                               ; copy dY
+
+loc_CC28:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
+				ld		a, l
+				call    adj_d_for_out_of_bounds
+				ld		d, a								; новый dY
+				sub		l									; дельта (+-1)
+				ld		l, d
+				ld		e, a
+				ld		a, (doiy_s+1)
+				add		a, e
+				ld		(doiy_s+1), a						; Y1+dY — на дельту
+				ld		a, d
+				and		a									; dY стал нулём?
+				ex		(sp), hl							; HL = указатель обратно (флаги целы)
+				ld		de, 32
+				jp		z, ady_done
+				jp		ady_rt
+""" + _loop_tail('ady', 'ady_nx', 'ady_nx7', 'ady_done') + """; End of function adj_dY_for_obj_intersect
+"""
+
+N_ADJ_DZ_LOOP = """adj_dZ_for_obj_intersect:	; H = dZ (правится), C = dX, L = dY; прижать dZ к другим объектам
+				call	doi_prep
+				push	hl									; dY/dZ — на стек, HL под указатель
+				ld		hl, graphic_objs_tbl
+				ld		de, 32
+				ld		b, 40								; max objects
+""" + _loop_head('adz', 'adz_nx', 'adz_nx7') + """				call    do_objs_intersect_on_x
+				jp		nc, adz_nx
+				call    do_objs_intersect_on_y
+				jp		nc, adz_nx
+
+adz_rt:			call    do_objs_intersect_on_z
+				jp		nc, adz_nx
+				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
+				set     2, (ix+12)                               ; set Z OOB
+				ld      a, (ix+13)
+				rrca
+				and     0x40 ; '@'                             ; bit 7->6
+				or      (iy+13)                                  ; obj2 destroyed?
+				ld      (iy+13), a
+				rlca
+				and     0x40 ; '@'                             ; bit 5->6
+				or      (ix+13)                                  ; obj1 destroyed?
+				ld      (ix+13), a
+				set     3, (iy+13)                               ; triggered (falling, collapsing blocks)
+				bit     2, (ix+7)                                ; moveable?
+				jr      Z, loc_CC8D                             ; no, skip
+				ld      a, (ix+9)                                ; dX
+				and     a                                       ; zero?
+				jr      NZ, loc_CC81                            ; no, skip
+				ld      a, (iy+9)
+				ld      (ix+9), a                                ; copy dX
+
+loc_CC81:                                                       ; objdY
+				ld      a, (ix+10)
+				and     a                                       ; moving along Y?
+				jr      NZ, loc_CC8D                            ; yes, skip
+				ld      a, (iy+10)
+				ld      (ix+10), a                               ; copy dY
+
+loc_CC8D:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
+				ld		a, h
+				call    adj_d_for_out_of_bounds
+				ld		d, a								; новый dZ
+				sub		h									; дельта (+-1)
+				ld		h, d
+				ld		e, a
+				ld		a, (doiz_s+1)
+				add		a, e
+				ld		(doiz_s+1), a						; Z1+dZ — на дельту
+				ld		a, d
+				and		a									; dZ стал нулём?
+				ex		(sp), hl							; HL = указатель обратно (флаги целы)
+				ld		de, 32
+				jp		z, adz_done
+				jp		adz_rt
+""" + _loop_tail('adz', 'adz_nx', 'adz_nx7', 'adz_done') + """; End of function adj_dZ_for_obj_intersect
+"""
+
+# do_any_objs_intersect: тот же цикл, но HL уже сохранён прологом (push hl), а IY —
+# push/pop iy, поэтому z80_iy на выходе восстанавливать не нужно.
+N_DO_ANY = """do_any_objs_intersect:
+				push    bc
+				push    de
+				push    hl
+				push    iy
+				set     1, (ix+7)                                ; ignore this object
+				ld      c, 0                                   ; dX=0
+				ld      l, c                                    ; dY=0
+				ld      h, c                                    ; dZ=0
+				call	doi_prep
+				ld		hl, graphic_objs_tbl
+				ld		de, 32
+				ld      b, 40                                  ; max objects
+""" + _loop_head('dai', 'dai_nx', 'dai_nx7') + """				call    do_objs_intersect_on_x
+				jp		nc, dai_nx
+				call    do_objs_intersect_on_y
+				jp		nc, dai_nx
+				call    do_objs_intersect_on_z
+				jp		nc, dai_nx
+
+loc_B524:
+				pop     iy
+				pop     hl
+				pop     de
+				pop     bc
+				res     1, (ix+7)                                ; reset ignore flag
+				ret                                             ; C flag set indicates intersection
+; ---------------------------------------------------------------------------
+
+dai_nx7:		ld		a, l
+				sub		7
+				ld		l, a
+dai_nx:			add		hl, de
+				dec		b
+				jp		nz, dai_lp
+				and		a
+				jp		loc_B524
+; End of function do_any_objs_intersect
+"""
+
+# is_on_or_near_obj: dX=dY=dZ=0, объект 2 — в z80_iy (его задаёт вызыватель).
+# Оригинал ради проверки по Z временно занижал (ix+3) на 4 — теперь достаточно
+# занизить иммедиат doiz_s+1 (при dZ=0 он и есть Z1), память объекта не трогается.
+# HL у оригинала на выходе = 0 — восстанавливаем (lxi флаги не портит).
+N_ON_OR_NEAR = """is_on_or_near_obj:
+				push    bc
+				ld      bc, 0
+				ld      l, c
+				ld      h, c
+				call	doi_prep
+				ld		hl, (z80_iy)						; база объекта 2
+				call    do_objs_intersect_on_x
+				jp		nc, loc_C19F
+				call    do_objs_intersect_on_y
+				jp		nc, loc_C19F
+				ld		a, (doiz_s+1)
+				sub		4									; Z-4
+				ld		(doiz_s+1), a
+				call    do_objs_intersect_on_z
+
+loc_C19F:		ld		hl, 0								; HL после оригинала = 0
+				pop     bc
+				ret
+; End of function can_pickup_spec_obj
 """
 
 # ---------------------------------------------------------------------------
@@ -1508,53 +1773,6 @@ N_BOTH_DEADLY = """set_both_deadly_flags:
 ; End of function set_both_deadly_flags
 """
 
-# ---------------------------------------------------------------------------
-# Циклы по таблице объектов с IY (do_any_objs_intersect, adj_d{X,Y,Z}_for_obj_intersect):
-# 40 объектов * 4 цикла — в комнате 39 это 304 прохода за итерацию.
-# Оригинал: ld iy,graphic_objs_tbl; ... ld de,32 / add iy,de / djnz.
-# В трансляции add iy,de стоит 85 тактов: HL живёт через весь цикл (C = dX, L = dY,
-# H = dZ, их читает adj_for_out_of_bounds после возврата), поэтому транслятор
-# сохраняет и восстанавливает HL через il_tmp вокруг ld hl,(z80_iy)/add hl,de.
-# Здесь указатель двигается байтовым инкрементом через A (LDA/STA), HL не трогается:
-# 100 -> 58 тактов на объект. DE больше не задаётся: ни один вызываемый его не читает
-# (do_objs_intersect_* портят D, adj_d_for_out_of_bounds работает только с A), а
-# adj_for_out_of_bounds сразу после возврата делает ex de,hl.
-# A на выходе цикла мёртв: вызыватель перезадаёт его первым же ld a,l.
-# ---------------------------------------------------------------------------
-N_IY_LOOP_INIT = """				ld		a, low graphic_objs_tbl				; iy = graphic_objs_tbl, не трогая HL
-				ld		(z80_iy), a
-				ld		a, high graphic_objs_tbl
-				ld		(z80_iy+1), a
-"""
-
-def _iy_loop_tail(tail, loop, uniq):
-    return ("%s:			ld		a, (z80_iy)							; следующий объект: +32 по младшему байту\n"
-            "\t\t\t\tadd\t\ta, 32\n"
-            "\t\t\t\tld\t\t(z80_iy), a\n"
-            "\t\t\t\tjp\t\tnc, %s\n"
-            "\t\t\t\tld\t\ta, (z80_iy+1)\n"
-            "\t\t\t\tinc\t\ta\n"
-            "\t\t\t\tld\t\t(z80_iy+1), a\n"
-            "%s:\t\t\tdec\t\tb\n"
-            "\t\t\t\tjp\t\tnz, %s\n") % (tail, uniq, uniq, loop)
-
-def _ioni_inline(loop, tail, uniq):
-    """is_object_not_ignored по месту: убирает call+ret (27 тактов) на каждом из
-    304 проходов за итерацию в тяжёлой комнате. HL живёт через цикл — push/pop, как в самой процедуре."""
-    return ("%s:\t\t\tpush\thl\n"
-            "\t\t\t\tld\t\thl, (z80_iy)\n"
-            "\t\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; graphic no\n"
-            "\t\t\t\tand\t\ta\t\t\t\t\t\t\t\t\t; пусто?\n"
-            "\t\t\t\tjp\t\tz, %s\n"
-            "\t\t\t\tld\t\ta, l\n"
-            "\t\t\t\tadd\t\ta, 7\n"
-            "\t\t\t\tld\t\tl, a\n"
-            "\t\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; флаги\n"
-            "\t\t\t\tcpl\n"
-            "\t\t\t\tand\t\t2\t\t\t\t\t\t\t\t\t; бит 1 (ignore)\n"
-            "%s:\t\t\tpop\t\thl\n"
-            "\t\t\t\tjp\t\tz, %s\t\t\t\t\t\t\t; игнорируется — следующий объект\n") % (loop, uniq, uniq, tail)
-
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1587,7 +1805,6 @@ def apply(src):
                N_LIST_OBJS, 'list_objects_to_draw')
     src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
     src = _sub(src, r'(?m)^set_pixel_adj:[^\n]*\n.*?; End of function set_pixel_adj\r?\n', N_SET_PIXEL_ADJ, 'set_pixel_adj')
-    src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', N_IS_NOT_IGNORED, 'is_object_not_ignored')
     src = _sub(src, r'(?m)^calc_pixel_XY_and_render:\n.*?; End of function calc_pixel_XY_and_render\r?\n',
                N_CALC_PXY_RENDER, 'calc_pixel_XY_and_render')
     src = _sub(src, r'(?m)^set_both_deadly_flags:\n.*?; End of function set_both_deadly_flags\r?\n',
@@ -1595,21 +1812,15 @@ def apply(src):
     src = _sub(src, r'(?m)^get_ptr_object:\n.*?; End of function get_ptr_object\r?\n', N_GET_PTR_OBJ, 'get_ptr_object')
     src = _sub(src, r'(?m)^calc_display_order_and_render:\n.*?; End of function calc_display_order_and_render\r?\n',
                N_DISPLAY_ORDER, 'calc_display_order_and_render')
-    # циклы по таблице объектов с IY: инициализация и продвижение указателя
-    for proc, loop, tail, uniq in (('do_any_objs_intersect', 'loc_B510', 'loc_B52E', 'dai_1'),
-                                   ('adj_dX_for_obj_intersect', 'loc_CBA0', 'loc_CBE1', 'adx_1'),
-                                   ('adj_dY_for_obj_intersect', 'loc_CBEF', 'loc_CC30', 'ady_1'),
-                                   ('adj_dZ_for_obj_intersect', 'loc_CC3E', 'loc_CC95', 'adz_1')):
-        if proc in ('adj_dX_for_obj_intersect', 'adj_dY_for_obj_intersect'):
-            # на эти два цикла приходятся 308 из 310 вызовов is_object_not_ignored за итерацию
-            # (adj_dZ и do_any_objs_intersect холодные) — их и разворачиваем по месту
-            src = _sub(src, r'(?m)^' + loop + r':[^\n]*\n\t+call    is_object_not_ignored\n\t+jr      Z, ' + tail + r'[^\n]*\n',
-                       _ioni_inline(loop, tail, uniq + 'i'), 'is_object_not_ignored по месту в ' + proc)
-        src, n = re.subn(r'(?ms)(^' + proc + r':\n(?:[^\n]*\n)*?)\t+ld      iy, graphic_objs_tbl\n',
-                         lambda mm: mm.group(1) + N_IY_LOOP_INIT, src, count=1)
-        assert n == 1, 'kl_native_logic: не найдено: ld iy в ' + proc
-        src = _sub(src, r'(?m)^' + tail + r':[^\n]*\n\t+ld      de, 32\n\t+add     iy, de[^\n]*\n\t+djnz    ' + loop + r'[^\n]*\n',
-                   _iy_loop_tail(tail, loop, uniq), 'хвост цикла ' + proc)
+    # циклы класса пересечений: указатель объекта 2 в HL, шаг 32 в DE, is_object_not_ignored по месту
+    for lbl, txt, end in (('adj_dX_for_obj_intersect', N_ADJ_DX_LOOP, 'adj_dX_for_obj_intersect'),
+                          ('adj_dY_for_obj_intersect', N_ADJ_DY_LOOP, 'adj_dY_for_obj_intersect'),
+                          ('adj_dZ_for_obj_intersect', N_ADJ_DZ_LOOP, 'adj_dZ_for_obj_intersect'),
+                          ('do_any_objs_intersect', N_DO_ANY, 'do_any_objs_intersect'),
+                          ('is_on_or_near_obj', N_ON_OR_NEAR, 'can_pickup_spec_obj')):
+        src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
+    # is_object_not_ignored больше никто не вызывает — процедуру убираем
+    src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', '', 'снятие is_object_not_ignored')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
