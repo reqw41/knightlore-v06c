@@ -2041,6 +2041,53 @@ def kl_vec_glue(src, translate_later):
     assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
     src = kl_cut_controls(src)
+    # прямое управление (Борис): стрелки = направления, пробел = прыжок, ВК = взять/положить. Читается из матрицы
+    # Вектора поверх ZX-раскладки, только когда включён бит directional (в классике стрелки сведены к Z/X/A/Q в vec_scan).
+    src, n_di = re.subn(r'(loc_D125:[^\n]*\r?\n)(\t+ld      a, c\r?\n\t+ld      \(user_input\), a)', r'\g<1>\t\t\t\tcall    kl_direct_in\n\g<2>', src, count=1)
+    assert n_di == 1, "direct input hook"
+    src = src.replace("; End of function check_user_input", """; End of function check_user_input
+kl_direct_in:	; directional: C = стрелки (0 влево, 1 вправо, 2 вверх, 4 вниз), пробел -> 3 (прыжок), ВК -> 5 (взять)
+				ld      a, (user_input_method)
+				and     8
+				ret     z
+				ld      c, 0
+				ld      a, (vec_kbmat+0)                        ; ряд 0: LT 0x10, RT 0x40, UP 0x20, DN 0x80, ВК 0x04
+				ld      b, a
+				and     0x10
+				jp      z, kdi_1
+				ld      c, 1
+kdi_1:			ld      a, b
+				and     0x40
+				jp      z, kdi_2
+				ld      a, c
+				or      2
+				ld      c, a
+kdi_2:			ld      a, b
+				and     0x20
+				jp      z, kdi_3
+				ld      a, c
+				or      4
+				ld      c, a
+kdi_3:			ld      a, b
+				and     0x80
+				jp      z, kdi_4
+				ld      a, c
+				or      0x10
+				ld      c, a
+kdi_4:			ld      a, b
+				and     0x04
+				jp      z, kdi_5
+				ld      a, c
+				or      0x20
+				ld      c, a
+kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
+				and     0x80
+				ret     z
+				ld      a, c
+				or      8
+				ld      c, a
+				ret
+""", 1)
     # цвет комнаты как на ZX: после flag_room_visited (конец build_screen_objects) — палитра по атрибуту; меню — белое
     src, n_rp = re.subn(r'(\t+call    flag_room_visited\r?\n\t+ret\r?\n)', r'\t\t\t\tcall    flag_room_visited\n\t\t\t\tld      a, (curr_room_attrib)\n\t\t\t\tjp      vec_set_pal\n', src, count=1)
     assert n_rp == 1, "room palette hook"
