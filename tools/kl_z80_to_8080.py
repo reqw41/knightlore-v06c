@@ -1006,6 +1006,8 @@ vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы),
 				out		(0x02), a			; бордюр чёрный, режим 256
 				ld		a, 0xFF
 				out		(0x03), a			; скролл
+				ld		a, 0x30				; ВИ53 счётчик 0: режим 0, оба байта, выход низкий (динамик молчит)
+				out		(0x08), a			; секундомер кадра для vec_di_budget; звук ушёл на AY, счётчик свободен
 				call	msx_snd_init			; AY молчит, слоты эффектов пусты
 				ld		a, 1
 				ld		(vec_palreq), a
@@ -1028,6 +1030,9 @@ VEC_TAIL = """
 
 ; ---- палитра: idx 8..15 (бит плоскости 0x8000) = белый, остальные чёрный. Только в VBlank. ----
 vec_isr:		push	af				; RST 38h каждый кадр (VBlank): палитра по запросу, скан клавиатуры
+				ld		a, 0xFF				; секундомер кадра (ВИ53 счётчик 0) <- 0xFFFF, считает вниз 1.5 МГц
+				out		(0x0B), a
+				out		(0x0B), a
 				push	bc
 				push	de
 				push	hl
@@ -1218,6 +1223,65 @@ rp_next:		inc		hl
 """
 
 VEC_SCREEN = """
+; ---- БЮДЖЕТ di-БЛОКА -------------------------------------------------------------------------
+; Кадровое прерывание Вектора НЕ защёлкивается: если обратный ход пришёлся на di, кадр теряется
+; (так в RTL MiSTer и в Emu80; vector06js держит запрос до ei и дефекта не показывает — проверять
+; частоту ISR надо на них). Секундомер — счётчик 0 ВИ53 (звук ушёл на AY, счётчик свободен):
+; boot ставит режим 0, ISR перезаряжает 0xFFFF на границе кадра. Здесь читаем остаток и, если
+; блок до конца кадра не помещается, ждём прерывания (ei/halt) — тогда блок начнётся сразу после
+; обратного хода и заведомо уложится. Кадр = 29952 тика (1.5 МГц), порог 0x8D00 = запас 513 тиков.
+; Вход: DE = оценка длительности блока в тиках (1 тик = 2 такта CPU). Портит A, HL, флаги; BC/DE целы.
+; Вызывать ТОЛЬКО при разрешённых прерываниях (иначе halt навсегда).
+vec_di_budget:	xor		a
+				out		(0x08), a			; команда защёлки счётчика 0
+				in		a, (0x0B)
+				ld		l, a
+				in		a, (0x0B)
+				ld		h, a				; HL = остаток кадра в тиках
+				ld		a, l
+				sub		e
+				ld		a, h
+				sbc		a, d				; остаток минус стоимость блока
+				jp		c, vdb_wait			; ушли в минус — точно не успеваем
+				cp		0x8D				; 0xFFFF-0x8D00 = 29439: столько тиков кадра (из 29952) уже занято
+				jp		nc, vdb_ok
+vdb_wait:		ei
+				halt						; ждём кадрового прерывания
+vdb_ok:			ret
+
+; Оценка пиксельного цикла print_sprite: 48 тиков ВИ53 на байт-столбец плюс 512 на обвязку.
+; Замер (tools: длительность di-блока / (w*h)): 47.4 тика, разброса почти нет — цикл развёрнут.
+; Первая версия с коэффициентом 40 недобирала: 22 кадра из 749 всё равно попадали внутрь di.
+; Ширину берём из уже записанного патча отката строки (loc_D800+1 = w-1), высоту из kl_lines.
+; Занятыми на входе остаются BC (адрес в буфере) и DE (данные спрайта) — DE сохраняем.
+vec_ps_budget:	push	de
+				ld		a, (kl_lines)
+				ld		h, 0
+				ld		l, a
+				add		hl, hl
+				add		hl, hl
+				add		hl, hl
+				add		hl, hl				; 16h
+				ld		d, h
+				ld		e, l
+				add		hl, hl				; 32h
+				add		hl, de				; 48h = тиков на один байт-столбец
+				ld		d, h
+				ld		e, l				; шаг
+				ld		a, (loc_D800+1)		; w-1
+vpb_m:			or		a
+				jp		z, vpb_done
+				dec		a
+				add		hl, de
+				jp		vpb_m
+vpb_done:		ld		a, h				; DE = 48*w*h + 512 (обвязка входа/выхода)
+				add		a, 2
+				ld		d, a
+				ld		e, l
+				call	vec_di_budget
+				pop		de
+				ret
+
 ; ---- НАТИВНЫЙ РЕНДЕР: буфер = плоскость 1 (0xA000-0xBFFF, невидима) в раскладке экрана Вектора:
 ; ---- адрес = база + (X/8)*256 + (32+Y), Y растёт вверх (0 = низ поля). Экран = буфер - 0x2000. ----
 screen_calc_addr_de:	; BC = Y,X (пиксели) -> DE = адрес в плоскости 0. Портит только A/флаги.
@@ -1262,6 +1326,11 @@ vidbuf_calc_addr_in_hl:	; BC = Y,X -> HL = адрес в буфере (BC сох
 
 ; DE = экран, HL = буфер, B = высота (строк), C = ширина (байт). Столбцы сплошные. Нулевой размер — выход
 ; (иначе 256 столбцов затирают всю память: объекты у края комнаты дают ширину 0).
+; СТЕКОВЫЙ БЛИТ: SP ставится на начало окна в столбце буфера, pop забирает 2 байта за 10 тактов,
+; приёмник адресуется через HL — 17 тактов на байт против 39 у байтового цикла. Число pop'ов на
+; столбец известно на входе, поэтому цепочка из 16 блоков развёрнута целиком и вход считается один
+; раз на вызов. SP уходит в картинку => блок под di, стек игры в bts_sp.
+; Окна выше 32 строк — прежним байтовым циклом, без di.
 blit_to_screen:
 				inc		b
 				dec		b
@@ -1269,15 +1338,78 @@ blit_to_screen:
 				inc		c
 				dec		c
 				ret		z
-bts_col:		push	bc
+				ld		a, b
+				cp		33
+				jp		nc, bts_slow
+				ld		a, l
+				ld		(bts_off+1), a				; смещение окна в столбце (одно на буфер и экран)
+				ld		a, h
+				ld		(bts_pg+1), a				; страница буфера
+				sub		d
+				ld		(bts_dif+1), a				; страница экрана = страница буфера минус это
+				ld		a, b
+				or		a
+				rra									; A = число pop, CY = нечётная высота
+				ld		b, a
+				ld		hl, bts_next
+				jp		nc, bts_ev
+				ld		hl, bts_lo
+bts_ev:			ld		(bts_odd+1), hl				; хвост столбца: последний байт или пропуск
+				ld		a, b						; блок цепочки — 5 байт, считаем 5*pop
+				add		a, a
+				add		a, a
+				add		a, b
+				ld		b, a
+				ld		hl, bts_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(bts_go+1), hl				; вход в цепочку = конец минус число pop
+				ld		hl, 0
+				add		hl, sp
+				ld		(bts_sp), hl				; стек игры
+				ld		de, 1800					; бюджет кадра: блит 31x6 ~ 1580 тиков
+				call	vec_di_budget
+				di
+bts_pg:			ld		b, 0						; патч: страница буфера
+bts_col:		ld		h, b
+bts_off:		ld		l, 0						; патч: смещение окна
+				ld		sp, hl						; SP = источник, pop идёт вверх по столбцу
+				ld		a, b
+bts_dif:		sub		0x20						; патч: буфер -> экран
+				ld		h, a						; HL = приёмник, L то же смещение
+bts_go:			jp		bts_pend					; патч: вход в цепочку
+__BTS_CHAIN__
+bts_pend:
+bts_odd:		jp		bts_next					; патч: bts_next или bts_lo
+bts_lo:			pop		de							; нечётная высота: последний байт (D не нужен)
+				ld		(hl), e
+bts_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32			; за столбцом 31 — стоп (иначе пишем в буфер)
+				jp		z, bts_done
+				dec		c
+				jp		nz, bts_col
+bts_done:		ld		hl, (bts_sp)
+				ld		sp, hl
+				ei
+				ret
+bts_sp:			DS		2							; стек игры на время захвата SP
+
+; окно выше 32 строк: прежний байтовый цикл, SP не трогаем
+bts_slow:
+bts_scol:		push	bc
 				push	hl
 				push	de
-bts_row:		ld		a, (hl)
+bts_srow:		ld		a, (hl)
 				ld		(de), a
 				inc		l
 				inc		e
 				dec		b
-				jp		nz, bts_row
+				jp		nz, bts_srow
 				pop		de
 				pop		hl
 				pop		bc
@@ -1287,10 +1419,15 @@ bts_row:		ld		a, (hl)
 				cp		0xA0				; за столбцом 31 — стоп (иначе пишем в буфер)
 				ret		z
 				dec		c
-				jp		nz, bts_col
+				jp		nz, bts_scol
 				ret
 
 ; HL = буфер, B = высота, C = ширина (байт), A = значение. Нулевой размер — выход (A сохраняется).
+; СТЕКОВАЯ ЗАЛИВКА: столбец буфера сплошной, поэтому SP ставится на конец окна и push кладёт
+; 2 байта за 11 тактов (5.5 такта/байт против 27 у байтового цикла). Число push'ей на столбец
+; известно на входе — цепочка из 16 push разворачивает цикл целиком, вход считается один раз.
+; SP уходит в картинку => весь блок под di (иначе ISR положит свои регистры в буфер).
+; Окна выше 32 строк (меню, крупные объекты) — прежним байтовым циклом, без di.
 vidbuf_fill_window:
 				inc		b
 				dec		b
@@ -1299,20 +1436,80 @@ vidbuf_fill_window:
 				dec		c
 				ret		z
 				ld		d, a
-vfw_col:		push	hl
+				ld		e, a						; значение в обоих байтах пары
+				ld		a, b
+				cp		33
+				jp		nc, vfw_slow
+				ld		a, l
+				ld		(vfw_lo+1), a				; нижняя строка окна (для нечётной высоты)
+				add		a, b
+				ld		(vfw_end+1), a				; конец окна = SP на входе в столбец
+				ld		a, h
+				ld		(vfw_pg+1), a				; страница первого столбца
+				ld		a, b
+				or		a
+				rra									; A = число push, CY = нечётная высота
+				ld		b, a
+				ld		hl, vfw_next
+				jp		nc, vfw_ev
+				ld		hl, vfw_lo
+vfw_ev:			ld		(vfw_odd+1), hl				; хвост столбца: нижний байт или пропуск
+				ld		hl, vfw_pend
+				ld		a, l
+				sub		b
+				ld		l, a
+				ld		a, h
+				sbc		a, 0
+				ld		h, a
+				ld		(vfw_ent+1), hl				; вход в цепочку = конец минус число push
+				ld		hl, 0
+				add		hl, sp
+				ld		(vfw_sp), hl				; стек игры
+				push	de							; бюджет кадра: заливка 31x6 ~ 750 тиков
+				ld		de, 900
+				call	vec_di_budget
+				pop		de
+				di
+vfw_pg:			ld		b, 0						; патч: страница столбца
+vfw_col:		ld		h, b
+vfw_end:		ld		l, 0						; патч: конец окна
+				ld		sp, hl						; push пойдёт вниз по столбцу
+vfw_ent:		ld		hl, vfw_pend				; патч: вход в цепочку
+				jp		(hl)
+__VFW_CHAIN__
+vfw_pend:
+vfw_odd:		jp		vfw_next					; патч: vfw_next или vfw_lo
+vfw_lo:			ld		l, 0						; патч: нижняя строка окна
+				ld		h, b
+				ld		(hl), d
+vfw_next:		inc		b
+				ld		a, b
+				cp		high vidbuf + 32			; за столбцом 31 — стоп
+				jp		z, vfw_done
+				dec		c
+				jp		nz, vfw_col
+vfw_done:		ld		hl, (vfw_sp)
+				ld		sp, hl
+				ei
+				ret
+
+vfw_sp:			DS		2							; стек игры на время захвата SP
+; окно выше 32 строк (меню, крупные объекты): прежний байтовый цикл, SP не трогаем
+vfw_slow:
+vfw_scol:		push	hl
 				push	bc
-vfw_row:		ld		(hl), d
+vfw_srow:		ld		(hl), d
 				inc		l
 				dec		b
-				jp		nz, vfw_row
+				jp		nz, vfw_srow
 				pop		bc
 				pop		hl
 				inc		h
 				ld		a, h
-				cp		high vidbuf + 32			; за столбцом 31 — стоп
+				cp		high vidbuf + 32
 				ret		z
 				dec		c
-				jp		nz, vfw_col
+				jp		nz, vfw_scol
 				ret
 
 ; HL = буфер, B = высота, E = ширина (байт) -> нули
@@ -1476,7 +1673,13 @@ def kl_vec_glue(src, translate_later):
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)
     hdr = VEC_HEADER
-    tail = VEC_TAIL + VEC_SCREEN + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
+    # цепочки развёрнутых стековых операций: вход в них считается по высоте окна (см. VEC_SCREEN)
+    screen = VEC_SCREEN.replace("__VFW_CHAIN__\n",
+        "vfw_ch:\n" + "\t\t\t\tpush\tde\n" * 16, 1)
+    screen = screen.replace("__BTS_CHAIN__\n",
+        "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
+        "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 1)
+    tail = VEC_TAIL + screen + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
     # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
     kbzx = [0xFF]*64
     zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', tail)
