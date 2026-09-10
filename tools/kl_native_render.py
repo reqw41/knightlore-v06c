@@ -93,7 +93,9 @@ N_PRINT_SPRITE_HDR = """print_sprite:
 				neg
 				add		a, 0x50
 				jp		ps_ent
-ps_al:			ld		a, (de)
+ps_al:			ld		(ps_shpg+1), a					; сюда пришли по jp z: A = 0. Выровненная цепочка H не читает,
+												;   а vec_ps_budget по нулю узнаёт выровненный путь
+				ld		a, (de)
 				inc		de
 				and		0xF
 				ld		b, a							; ширина

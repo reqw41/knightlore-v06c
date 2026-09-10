@@ -45,6 +45,14 @@ function runRoom(room){
   memory.init_from_array(IMG,0);
   if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==="vi"?2:1,false);
   cpu.pc=0;cpu.sp=0xC000;cpu.iff=false; for(let r=0;r<8;r++)keyboard.matrix[r]=0;
+  // seed_3 += mem[seed_2]: игра подмешивает байт памяти по адресу-счётчику, поэтому ЛЮБОЙ сдвиг кода
+  // меняет сценарий комнаты и «тактов/итерацию» двух сборок становятся несравнимы. Гасим этот байт
+  // (86 add a,(hl) -> 00 nop) — как в screendiff_vec.js/render_gate.sh. KLSEED=live отключает.
+  if(process.env.KLSEED!=="live"){const s3=L.seed_3&0xff,s3h=(L.seed_3>>8)&0xff;
+    const pat=[0x3A,s3,s3h,0x86,0x85,0x84,0x32,s3,s3h];let at=-1;
+    for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rd(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
+    if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
+    memory.write(at+3,0x00,false);}
   const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
   let phase="menu",iter=0,roomSet=(room===null);
   memory.write=function(a,w,s){a&=0xffff;
@@ -67,7 +75,7 @@ function runRoom(room){
   const addP=(p,c)=>{st.ph[p]+=c; if(curS<0)pend.push([p,c]); else if(curS===0)st.phAl[p]+=c; else st.phSh[p]+=c;};
   const flush=()=>{for(const [p,c] of pend){if(curS===0)st.phAl[p]+=c;else st.phSh[p]+=c;} pend.length=0;};
   while(iter-start<N&&steps<5e7){
-    if(frc>=59904){frc-=59904;frames++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();}
+    if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(process.env.KLLOST)console.log('ПОТЕРЯ на PC',cpu.pc.toString(16),'фаза',cur,'inCall',inCall,'w',curW,'h',curH,'s',curS);}v06c.irq=true;v06c.checkInterrupt();}
     const pc=cpu.pc;
     if(!inCall){
       if(pc===PS){inCall=true;retA=rd(cpu.sp)|(rd(cpu.sp+1)<<8);cur="flip";curS=-1;pend.length=0;
