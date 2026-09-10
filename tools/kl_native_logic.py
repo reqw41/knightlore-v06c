@@ -1429,6 +1429,55 @@ render_done:	pop		hl									; восстановить IY, IX вызывате�
 ; End of function calc_display_order_and_render
 """
 
+# ---------------------------------------------------------------------------
+# calc_pixel_XY_and_render: graphic_no == 1 -> обнулить и выйти; иначе снять флаг DRAW,
+# посчитать экранные X/Y и (при CY) провалиться в print_sprite.
+# Оригинал в трансляции — три обращения (ix+n) через хелперы: 566 тактов на вызов.
+# Здесь указатель объекта в HL; A и BC/DE после calc_pixel_XY те же, что были
+# (calc_pixel_XY их портит одинаково в обоих вариантах), поэтому print_sprite
+# получает тот же вход.
+# ---------------------------------------------------------------------------
+N_CALC_PXY_RENDER = """calc_pixel_XY_and_render:
+				ASSERT (graphic_objs_tbl & 31) <= 24		; иначе l+7 переносит
+				ld		hl, (z80_ix)
+				ld		a, (hl)								; graphic no
+				cp		1									; помечен «убрать»?
+				jp		nz, loc_D710
+				ld		(hl), 0								; да: обнулить и выйти
+				ret
+; ---------------------------------------------------------------------------
+
+loc_D710:		ld		a, l
+				add		a, 7
+				ld		l, a
+				ld		a, (hl)
+				and		0xEF								; снять флаг DRAW
+				ld		(hl), a
+				call	calc_pixel_XY
+				ret		nc									; ушёл за низ экрана — не рисовать
+; End of function calc_pixel_XY_and_render
+"""
+
+
+# ---------------------------------------------------------------------------
+# set_both_deadly_flags: (ix+13) |= 0xA0. Оригинал портит только A и флаги.
+# Трансляция звала два IX-хелпера (485 тактов); здесь указатель в HL. 85 тактов.
+# ---------------------------------------------------------------------------
+N_BOTH_DEADLY = """set_both_deadly_flags:
+				ASSERT (graphic_objs_tbl & 31) <= 18		; иначе l+13 переносит
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 13
+				ld		l, a
+				ld		a, (hl)
+				or		0xA0								; и сам смертелен, и его нельзя касаться
+				ld		(hl), a
+				pop		hl
+				ret
+; End of function set_both_deadly_flags
+"""
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1462,6 +1511,10 @@ def apply(src):
     src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
     src = _sub(src, r'(?m)^set_pixel_adj:[^\n]*\n.*?; End of function set_pixel_adj\r?\n', N_SET_PIXEL_ADJ, 'set_pixel_adj')
     src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', N_IS_NOT_IGNORED, 'is_object_not_ignored')
+    src = _sub(src, r'(?m)^calc_pixel_XY_and_render:\n.*?; End of function calc_pixel_XY_and_render\r?\n',
+               N_CALC_PXY_RENDER, 'calc_pixel_XY_and_render')
+    src = _sub(src, r'(?m)^set_both_deadly_flags:\n.*?; End of function set_both_deadly_flags\r?\n',
+               N_BOTH_DEADLY, 'set_both_deadly_flags')
     src = _sub(src, r'(?m)^get_ptr_object:\n.*?; End of function get_ptr_object\r?\n', N_GET_PTR_OBJ, 'get_ptr_object')
     src = _sub(src, r'(?m)^process_remaining_objs:\n.*?; End of function calc_display_order_and_render\r?\n',
                N_DISPLAY_ORDER, 'calc_display_order_and_render')
