@@ -1508,6 +1508,36 @@ N_BOTH_DEADLY = """set_both_deadly_flags:
 ; End of function set_both_deadly_flags
 """
 
+# ---------------------------------------------------------------------------
+# Циклы по таблице объектов с IY (do_any_objs_intersect, adj_d{X,Y,Z}_for_obj_intersect):
+# 40 объектов * 4 цикла — в комнате 39 это 304 прохода за итерацию.
+# Оригинал: ld iy,graphic_objs_tbl; ... ld de,32 / add iy,de / djnz.
+# В трансляции add iy,de стоит 85 тактов: HL живёт через весь цикл (C = dX, L = dY,
+# H = dZ, их читает adj_for_out_of_bounds после возврата), поэтому транслятор
+# сохраняет и восстанавливает HL через il_tmp вокруг ld hl,(z80_iy)/add hl,de.
+# Здесь указатель двигается байтовым инкрементом через A (LDA/STA), HL не трогается:
+# 100 -> 58 тактов на объект. DE больше не задаётся: ни один вызываемый его не читает
+# (do_objs_intersect_* портят D, adj_d_for_out_of_bounds работает только с A), а
+# adj_for_out_of_bounds сразу после возврата делает ex de,hl.
+# A на выходе цикла мёртв: вызыватель перезадаёт его первым же ld a,l.
+# ---------------------------------------------------------------------------
+N_IY_LOOP_INIT = """				ld		a, low graphic_objs_tbl				; iy = graphic_objs_tbl, не трогая HL
+				ld		(z80_iy), a
+				ld		a, high graphic_objs_tbl
+				ld		(z80_iy+1), a
+"""
+
+def _iy_loop_tail(tail, loop, uniq):
+    return ("%s:			ld		a, (z80_iy)							; следующий объект: +32 по младшему байту\n"
+            "\t\t\t\tadd\t\ta, 32\n"
+            "\t\t\t\tld\t\t(z80_iy), a\n"
+            "\t\t\t\tjp\t\tnc, %s\n"
+            "\t\t\t\tld\t\ta, (z80_iy+1)\n"
+            "\t\t\t\tinc\t\ta\n"
+            "\t\t\t\tld\t\t(z80_iy+1), a\n"
+            "%s:\t\t\tdec\t\tb\n"
+            "\t\t\t\tjp\t\tnz, %s\n") % (tail, uniq, uniq, loop)
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -1548,6 +1578,16 @@ def apply(src):
     src = _sub(src, r'(?m)^get_ptr_object:\n.*?; End of function get_ptr_object\r?\n', N_GET_PTR_OBJ, 'get_ptr_object')
     src = _sub(src, r'(?m)^calc_display_order_and_render:\n.*?; End of function calc_display_order_and_render\r?\n',
                N_DISPLAY_ORDER, 'calc_display_order_and_render')
+    # циклы по таблице объектов с IY: инициализация и продвижение указателя
+    for proc, loop, tail, uniq in (('do_any_objs_intersect', 'loc_B510', 'loc_B52E', 'dai_1'),
+                                   ('adj_dX_for_obj_intersect', 'loc_CBA0', 'loc_CBE1', 'adx_1'),
+                                   ('adj_dY_for_obj_intersect', 'loc_CBEF', 'loc_CC30', 'ady_1'),
+                                   ('adj_dZ_for_obj_intersect', 'loc_CC3E', 'loc_CC95', 'adz_1')):
+        src, n = re.subn(r'(?ms)(^' + proc + r':\n(?:[^\n]*\n)*?)\t+ld      iy, graphic_objs_tbl\n',
+                         lambda mm: mm.group(1) + N_IY_LOOP_INIT, src, count=1)
+        assert n == 1, 'kl_native_logic: не найдено: ld iy в ' + proc
+        src = _sub(src, r'(?m)^' + tail + r':[^\n]*\n\t+ld      de, 32\n\t+add     iy, de[^\n]*\n\t+djnz    ' + loop + r'[^\n]*\n',
+                   _iy_loop_tail(tail, loop, uniq), 'хвост цикла ' + proc)
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту
     src = _sub(src, r'(?m)^ret_from_tbl_jp:.*?(?=^loc_B000:)', N_RET_FROM_TBL, 'ret_from_tbl_jp')
     return src
