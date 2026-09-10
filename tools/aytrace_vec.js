@@ -83,7 +83,8 @@ const step = () => {
 let iters = 0;
 if (!INPUTS) {
   // ---- режим мелодий: N кадров, клавиши через матрицу Вектора ----
-  const VKEYS = { z: [7, 0x04], x: [7, 0x01], a: [4, 0x02], q: [6, 0x02], "0": [2, 0x01], space: [7, 0x80] };
+  const VKEYS = { z: [7, 0x04], x: [7, 0x01], a: [4, 0x02], q: [6, 0x02], "0": [2, 0x01], space: [7, 0x80],
+                  t: [6, 0x10] };   // T — ответ «таймер ВИ53» на вопрос об источнике звука
   const key = (k, down) => { const [r, b] = VKEYS[k]; if (down) keyboard.matrix[r] |= b; else keyboard.matrix[r] &= ~b; };
   const sched = {};
   for (const t of (opt("keys") || "").split(",")) {
