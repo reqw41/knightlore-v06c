@@ -32,6 +32,16 @@ cpu.pc=0;cpu.sp=0xC000;cpu.iff=false;
 if(VKBD!==undefined)for(let r=0;r<8;r++)memory.write(VKBD+r,0xFF,false);
 const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
+// seed_3 += mem[seed_2] + L + H: игра подмешивает в случайное число байт памяти по адресу-счётчику
+// (на ZX это экран, на Векторе — собственный код). Любой сдвиг кода меняет всю случайную
+// последовательность, и сравнивать картинку двух сборок становится нельзя. Гасим этот байт
+// (86 add a,(hl) -> 00 nop) ОДИНАКОВО в обеих сборках: остальная логика и весь вывод не трогаются.
+{ const s3=L.seed_3&0xff, s3h=(L.seed_3>>8)&0xff;
+  const pat=[0x3A,s3,s3h,0x86,0x85,0x84,0x32,s3,s3h]; let at=-1;
+  for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rd(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
+  if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
+  memory.write(at+3,0x00,false);
+  if(process.env.KLDBG)console.log("seed_3-подмешивание погашено на",at.toString(16)); }
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
 const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
 // Ввод должен быть НЕЗАВИСИМ от тактов: иначе две сборки с разной скоростью читают клавиши в разные кадры

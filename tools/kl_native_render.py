@@ -50,6 +50,92 @@ jump_to_upd_object:                                             ; sprite graphic
 """
 
 
+# ---------------------------------------------------------------------------
+# Заголовок print_sprite (диспетчер входа) на HL-указателе.
+# Транслятор разворачивает КАЖДЫЙ (ix+n) в ~13 инструкций (~30 байт, ~90 тактов): сохранение
+# HL/A, ld hl,(z80_ix), 16-битное сложение со смещением, обратная раскладка. В заголовке таких
+# обращений девять (24, 25 x4, 26 x2, 27 x2) — это ~350 байт и ~1200 тактов на вызов.
+# Здесь HL один раз наводится на obj+26 и ходит по полям inc/dec hl, а страница таблицы сдвига
+# (единственное, что раньше занимало H с самого начала) кладётся в H последней инструкцией
+# перед пиксельным циклом — через самомодифицируемый иммедиат ps_shpg.
+# Порядок обращений к полям и все флаги сохранены: выровненный путь H не читает (цепочка
+# loc_D790 работает через BC), поэтому отложенная запись H ничего не меняет.
+# ---------------------------------------------------------------------------
+N_PRINT_SPRITE_HDR = """print_sprite:
+				call    flip_sprite
+				ld		hl, (z80_ix)
+				ld		bc, 26
+				add		hl, bc							; HL -> obj+26 (pixel X)
+				ld		c, (hl)							; C = pixel X (для адреса в буфере)
+				ld		a, c
+				and		7								; сдвиг внутри байта?
+				jp		z, ps_al
+				rlca
+				and		0xE
+				or		0xF0
+				ld		(ps_shpg+1), a					; страница таблицы сдвига -> H перед циклом
+				ld		a, (de)
+				inc		de
+				and		7
+				inc		a								; ширина в байтах
+				ld		b, a
+				dec		hl
+				dec		hl								; -> obj+24
+				ld		(hl), a							; width_bytes
+				dec		a
+				and		7
+				add		a, a
+				add		a, a
+				add		a, a
+				add		a, a
+				neg
+				add		a, 0x50
+				jp		ps_ent
+ps_al:			ld		a, (de)
+				inc		de
+				and		0xF
+				ld		b, a							; ширина
+				dec		hl
+				dec		hl								; -> obj+24
+				ld		(hl), a							; width_bytes
+				add		a, a
+				add		a, a
+				add		a, a
+				neg
+				sub		6
+ps_ent:			add		a, low (loc_D7AC+3)				; i8080: jp — младший байт адреса входа
+				ld		(loc_D7AC+1), a
+				ld		a, b
+				dec		a								; столбцовый буфер: откат B на w-1
+				ld		(loc_D800+1), a
+				inc		hl								; -> obj+25
+				ld		a, (de)
+				inc		de
+				ld		(hl), a							; height_lines
+				inc		hl
+				inc		hl								; -> obj+27
+				add		a, (hl)							; + pixel Y
+				ld		b, (hl)							; B = pixel Y (для адреса в буфере)
+				dec		hl
+				dec		hl								; -> obj+25
+				sub		192								; уходит за низ экрана?
+				jp		c, ps_pos
+				neg
+				add		a, (hl)							; + height_lines
+				ld		(hl), a							; обрезанная высота
+ps_pos:			ld		a, (hl)
+				ld		(kl_lines), a					; счётчик строк пиксельного цикла
+				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере
+				di										; SP уходит в данные спрайта
+				ld      (tmp_SP), sp
+				ex      de, hl
+				ld      sp, hl
+				ex      de, hl
+ps_shpg:		ld		h, 0							; патч: страница таблицы сдвига
+				jp      loc_D7AA
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_render: не найдено: " + name
@@ -68,4 +154,8 @@ def apply(src):
                'перенос jump_to_upd_object')
     # 2. тело save_2d_info больше никому не нужно
     src = _sub(src, r'(?m)^save_2d_info:.*?; End of function save_2d_info\r?\n', '', 'снять save_2d_info')
+    # 3. заголовок print_sprite (от print_sprite: до конца блока loc_D76F) — на HL-указателе.
+    # Только цель vec: у lockstep пиксельный цикл заглушен, kl_lines не существует.
+    if "ld      (kl_lines), a" in src:
+        src = _sub(src, r'(?m)^print_sprite:.*?jr      loc_D73C\r?\n', N_PRINT_SPRITE_HDR, 'заголовок print_sprite')
     return src
