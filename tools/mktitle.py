@@ -99,6 +99,147 @@ def build_frame(src_path, scale, filt, rows, ox=None, oy=None):
     return np.asarray(canvas, dtype=np.float64), (x0, y0, w, h)
 
 
+
+# ----------------------------------------------------------------------------
+# восстановление родной сетки C64 и пиксель-арт-пересчёт
+# ----------------------------------------------------------------------------
+# Исходник — апскейл C64-картинки с интерполяцией. Сетка найдена по краевой
+# энергии и уточнена по прямому критерию «снять сетку -> развернуть обратно
+# ближайшим -> сравнить с исходником»: 160 x 200 ячеек (multicolour: по
+# горизонтали 5 исходных точек на ячейку), шаг 4.98 / 2.49, смещение 3.25 / 2.00.
+# Контраст «энергия на границе / энергия в середине ячейки» по горизонтали 8.1 —
+# сетка стоит твёрдо; по вертикали 1.4, потому что ячейка всего 2.5 точки и
+# интерполяция её замывает, поэтому вертикаль и подбиралась по остатку.
+GRID = dict(nx=160, ny=200, sx=4.98, ox=3.25, sy=2.49, oy=2.00)
+
+# 15 цветов исходника (k-means по снятой сетке; «почти белый» слит с белым —
+# 77 % его ячеек стоят вплотную к чистому белому, то есть это шов интерполяции).
+# Порядок фиксирован: по нему адресуются альтернативные палитры.
+NATIVE_COLORS = [
+    ('чёрный',         (2, 2, 2)),        # 43.6 % — фон, силуэт оборотня
+    ('белый',          (254, 254, 254)),  # 19.7 % — обводка логотипа, диск луны, ULTIMATE
+    ('светло-серый',   (193, 193, 193)),  #  8.3 % — светлая шерсть, свет луны
+    ('синий',          (64, 54, 218)),    #  4.8 % — мантия волшебника
+    ('серый',          (141, 143, 141)),  #  4.5 % — средняя шерсть, тень луны
+    ('оранжевый',      (214, 125, 39)),   #  4.1 % — тело букв логотипа
+    ('пурпурный',      (213, 86, 206)),   #  3.2 % — блики мантии
+    ('жёлтый',         (247, 238, 77)),   #  2.5 % — блик логотипа, звёзды
+    ('красный',        (206, 47, 47)),    #  1.8 % — тёмное в логотипе
+    ('коричневый',     (150, 93, 43)),    #  1.7 % — посох, тень логотипа
+    ('розовый',        (252, 154, 150)),  #  1.5 % — лицо и кисти рук
+    ('тёмно-серый',    (81, 81, 80)),     #  1.4 % — глубокая тень
+    ('голубой',        (121, 195, 237)),  #  1.3 % — буквы ULTIMATE
+    ('светло-зелёный', (152, 249, 150)),  #  0.8 % — PLAY THE GAME, светлое
+    ('зелёный',        (86, 211, 52)),    #  0.7 % — PLAY THE GAME
+]
+NATIVE_RGB = np.array([c for _, c in NATIVE_COLORS], dtype=np.float64)
+
+
+def vb(r, g, b):
+    """Байт Вектора из компонент: r,g в 0..7, b в 0..3."""
+    return (b << 6) | (g << 3) | r
+
+
+# Альтернативные палитры: байт Вектора для каждого цвета исходника, в порядке
+# NATIVE_COLORS. Планы от палитры не зависят — меняются ровно 16 байт.
+NAMED_PALETTES = {
+    # насыщенные чистые тона: золото в логотипе, сочная сине-фиолетовая мантия,
+    # холодная серо-голубая луна, белые звёзды
+    'gold': [vb(0,0,0), vb(7,7,3), vb(5,6,3), vb(1,1,3), vb(3,4,2), vb(7,4,0),
+             vb(5,2,3), vb(7,7,0), vb(6,1,0), vb(4,2,0), vb(7,5,2), vb(2,2,1),
+             vb(2,6,3), vb(4,7,1), vb(1,6,0)],
+    # тёплая «пергаментная» с холодной луной: тепло уходит в фон, логотип и мантию,
+    # а полутона луны и шерсти (светло-серый/серый — они почти только там и встречаются)
+    # остаются холодными синими. Пробовал наоборот, сделать пергаментным сам белый —
+    # луна выходит кремовой, и холодного пятна в кадре не остаётся.
+    'parchment': [vb(1,1,0), vb(7,7,3), vb(4,5,3), vb(5,3,1), vb(2,3,2), vb(7,4,0),
+                  vb(6,3,1), vb(7,7,1), vb(6,2,0), vb(4,3,0), vb(7,5,2), vb(2,1,0),
+                  vb(3,5,3), vb(6,6,2), vb(4,4,1)],
+    # ZX-подобная: только базовые яркие и «неяркие» тона спектрумовской восьмёрки
+    'zx': [0x00, 0xFF, 0xAD, 0xC0, 0xA8, 0x07,
+           0x85, 0x3F, 0x05, 0x2D, 0xC7, 0x80,
+           0xF8, 0x38, 0x28],
+}
+
+
+def native_grid(src_path, tab=None):
+    """Снять родную сетку C64 мажоритарно: каждый исходный пиксель относим к
+    ближайшему цвету исходника, затем по середине ячейки берём большинство.
+
+    Мажоритарно, а не медианой RGB: медиана по паре размытых точек даёт
+    промежуточный цвет, которого в оригинале не было, и штрих «плывёт».
+    """
+    tab = NATIVE_RGB if tab is None else tab
+    a = np.asarray(Image.open(src_path).convert('RGB'), dtype=np.float64)
+    H, W = a.shape[:2]
+    idx = np.argmin(((a.reshape(-1, 1, 3) - tab[None]) ** 2).sum(-1), axis=1)             .reshape(H, W).astype(np.int16)
+    g = GRID
+    out = np.zeros((g['ny'], g['nx']), dtype=np.uint8)
+    m = 0.20                                   # поля ячейки, где сидит шов интерполяции
+    for j in range(g['ny']):
+        y0 = g['oy'] + j * g['sy']
+        ya = min(max(int(np.floor(y0 + m * g['sy'] + 0.5)), 0), H - 1)
+        yb = min(max(int(np.ceil(y0 + (1 - m) * g['sy'] - 0.5)) + 1, ya + 1), H)
+        for i in range(g['nx']):
+            x0 = g['ox'] + i * g['sx']
+            xa = min(max(int(np.floor(x0 + m * g['sx'] + 0.5)), 0), W - 1)
+            xb = min(max(int(np.ceil(x0 + (1 - m) * g['sx'] - 0.5)) + 1, xa + 1), W)
+            out[j, i] = np.bincount(idx[ya:yb, xa:xb].ravel(),
+                                    minlength=len(tab)).argmax()
+    return out
+
+
+def native_to_frame(nat, how, rows=256):
+    """Родная сетка 160x200 -> поле 256 x rows индексов цвета исходника.
+
+    Обе оси — увеличение (160->256 это x1.6, 200->256 это x1.28), поэтому
+    содержимое не теряется вовсе: каждая точка экрана берёт ровно одну ячейку.
+
+    Брать надо по ЦЕНТРУ точки, а не по её левому краю: точка покрывает 0.625
+    ячейки, то есть меньше одной, и ячейка, накрывающая центр, — это ровно та,
+    которой досталось больше половины площади. Поэтому «ближайший по центру» и
+    «мажоритарный по площади» здесь тождественны (majority_resample это
+    пересчитывает честно, а --resample majority сверяет одно с другим).
+    """
+    ny, nx = nat.shape
+    out = np.zeros((rows, 256), dtype=np.uint8)
+    xi = np.minimum(((np.arange(256) + 0.5) * nx / 256).astype(int), nx - 1)
+    if how == 'letterbox':
+        # 200 строк один к одному, чёрные поля 28+28; по горизонтали 160->256
+        y0 = (rows - ny) // 2
+        out[y0:y0 + ny] = nat[:, xi]
+    else:
+        yi = np.minimum(((np.arange(rows) + 0.5) * ny / rows).astype(int), ny - 1)
+        out[:] = nat[yi][:, xi]
+    return out
+
+
+def majority_resample(nat, rows=256, ncol=16):
+    """Честный мажоритарный пересчёт по площади: для каждой точки экрана
+    считается, какая ячейка накрыла её большей частью. Служит проверкой того,
+    что пересчёт по центру ей равен."""
+    ny, nx = nat.shape
+    def weights(n_src, n_dst):
+        w = np.zeros((n_dst, n_src))
+        for d in range(n_dst):
+            a, b = d * n_src / n_dst, (d + 1) * n_src / n_dst
+            for c in range(int(a), min(int(np.ceil(b)), n_src)):
+                w[d, c] = max(0.0, min(b, c + 1) - max(a, c))
+        return w
+    wx, wy = weights(nx, 256), weights(ny, rows)
+    out = np.zeros((rows, 256), dtype=np.uint8)
+    for c in range(ncol):
+        m = (nat == c).astype(float)
+        acc = wy @ m @ wx.T
+        if c == 0:
+            best, arg = acc, np.zeros_like(out)
+        else:
+            upd = acc > best
+            best = np.where(upd, acc, best)
+            arg[upd] = c
+    return arg
+
+
 # ----------------------------------------------------------------------------
 # подбор палитры: k-means с привязкой к сетке Вектора и региональными ограничениями
 # ----------------------------------------------------------------------------
@@ -428,6 +569,14 @@ def main():
                     help='сила Флойда–Стайнберга, 0..1 (0 = как none)')
     ap.add_argument('--palette', default=None,
                     help='явная палитра: байты Вектора через запятую вместо подбора')
+    ap.add_argument('--native', action='store_true',
+                    help='снять родную сетку C64 (160x200) и пересчитать пиксель-арт-аккуратно, '
+                         'без размытия: только так штрихи готики остаются чёткими')
+    ap.add_argument('--resample', choices=['nearest', 'majority', 'letterbox'], default='nearest',
+                    help='--native: как класть сетку на 256x256')
+    ap.add_argument('--palette-name', dest='palname', choices=sorted(NAMED_PALETTES) + ['c64'],
+                    default='c64', help='--native: именованная палитра Вектора вместо привязки '
+                                        'цветов исходника к ближайшим')
     ap.add_argument('--tries', type=int, default=8,
                     help='c8/c16: сколько запусков k-means с разными зёрнами; берётся лучший')
     ap.add_argument('--search', action='store_true',
@@ -442,6 +591,41 @@ def main():
 
     frame, geom = build_frame(args.src, args.scale, args.filter, args.rows, args.ox, args.oy)
     img_lin = to_lin(frame)
+
+    if args.native:
+        if args.mode != 'c16':
+            ap.error('--native сделан для --mode c16 (16 цветов = ровно набор исходника)')
+        nat = native_grid(args.src)
+        if args.resample == 'majority':
+            # ближайший-по-центру и мажоритарный расходятся не на ничьих, а там,
+            # где две-три соседние ячейки одного цвета складываются и перевешивают
+            # ту, что накрыла центр: ~1.5 % точек
+            ci = majority_resample(nat, args.rows, len(NATIVE_COLORS)).astype(np.int16)
+        else:
+            ci = native_to_frame(nat, args.resample, args.rows).astype(np.int16)
+        if args.palname == 'c64':
+            pal_b = np.array(snap_g(NATIVE_RGB / 255.0))      # цвета исходника как есть
+        else:
+            pal_b = np.array(NAMED_PALETTES[args.palname], dtype=int)
+        pal_b = np.concatenate([pal_b, np.zeros(16 - len(pal_b), dtype=int)])
+        pal = VEC_LIN[pal_b]
+        # эталон «сетка в собственных цветах» — им меряется только потеря на палитре
+        ref = NATIVE_RGB[np.clip(ci, 0, len(NATIVE_RGB) - 1)]
+        out_srgb = to_srgb(pal[ci])
+        blur0 = lambda a: np.asarray(Image.fromarray(np.uint8(np.clip(a, 0, 255)))
+                                     .filter(ImageFilter.GaussianBlur(1.0)), dtype=np.float64)
+        print(f'[{tag}] родная сетка {nat.shape[1]}x{nat.shape[0]} -> {args.resample}, '
+              f'палитра {args.palname}: '
+              f'RMSE vs исходник {np.sqrt(np.mean((out_srgb - frame) ** 2)):.2f}, '
+              f'после размытия {np.sqrt(np.mean((blur0(out_srgb) - blur0(frame)) ** 2)):.2f}, '
+              f'RMSE vs сетка-в-своих-цветах {np.sqrt(np.mean((out_srgb - ref) ** 2)):.2f}')
+        pal_bytes = pal_b
+        used = sorted(set(int(v) for v in np.unique(ci)))
+        print('  палитра:', ', '.join(
+            f'{NATIVE_COLORS[c][0]}=0x{pal_bytes[c]:02X}{vec_byte_to_rgb(int(pal_bytes[c]))}'
+            for c in used))
+        emit(args, tag, ci, pal_bytes, p2len_out=[0])
+        return
 
     right = np.zeros((args.rows, 256), dtype=bool)
     right[:, args.split:] = True
@@ -535,6 +719,11 @@ def main():
         f'c{c}=0x{pal_bytes[c]:02X}{vec_byte_to_rgb(int(pal_bytes[c]))}' for c in used))
 
     # --- планарные файлы ----------------------------------------------------
+    emit(args, tag, ci, pal_bytes)
+
+
+def emit(args, tag, ci, pal_bytes, p2len_out=None):
+    """Записать планы, палитру и превью."""
     p0, p1, p2, p3 = encode_planes(ci, args.mode, args.rows)
     pal16 = build_palette(args.mode, pal_bytes)
     p2_len = 8192 if args.mode in ('c8', 'c16') else 0
@@ -562,7 +751,6 @@ def main():
     open(base + '.pal', 'wb').write(pal16.tobytes())
     print('  палитра 16 байт:', ' '.join(f'{b:02X}' for b in pal16))
 
-    # --- превью -------------------------------------------------------------
     if not args.no_preview:
         junk2 = junk3 = None
         if args.junk and os.path.exists(args.junk):
