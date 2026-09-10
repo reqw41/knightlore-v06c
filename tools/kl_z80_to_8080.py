@@ -2158,7 +2158,8 @@ kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
         src = src.replace(old_l, "loc_D7AA:\n", 1)
         old_e = "\t\t\t\tex      af, af'\n\t\t\t\tdec     a\n\t\t\t\tjp      NZ, loc_D7AA\n"
         assert old_e in src, "ps loop tail"
-        src = src.replace(old_e, "\t\t\t\tld      a, (kl_lines)\n\t\t\t\tdec     a\n\t\t\t\tld      (kl_lines), a\n\t\t\t\tjp      NZ, loc_D7AA\n", 1)
+        src = src.replace(old_e, "\t\t\t\tld      a, (kl_lines)\n\t\t\t\tdec     a\n\t\t\t\tld      (kl_lines), a\n"
+                          "ps_jrow:\t\tjp      NZ, loc_D7AA\t\t; младший байт патчит ps_cw: ps_fix, если печать обрезана по столбцу 31\n", 1)
         old_s = "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n"
         assert old_s in src, "ps shifted base"
         src = src.replace(old_s, "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт адреса входа\n", 1)
@@ -2174,7 +2175,11 @@ kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
         k = src.index("\t\t\t\tld      sp, (tmp_SP)\n", j)
         k = src.index("\t\t\t\tret\n", k) + len("\t\t\t\tret\n")
         ps_chain = ("; ---- развёрнутые цепочки print_sprite: начало верхнего региона = граница страницы ----\n"
-                    + src[j:k])
+                    + src[j:k]
+                    + "; печать обрезана по столбцу 31: цепочка не дочитала хвост строки спрайта — двигаем SP за него\n"
+                      "ps_fix:\t\t\tld      hl, 0\t\t\t\t; патч ps_cw: 2*(w - w')\n"
+                      "\t\t\t\tadd     hl, sp\n\t\t\t\tld      sp, hl\n\t\t\t\tjp      loc_D7AA\n"
+                      "\t\t\t\tASSERT high (ps_fix) == high (loc_D7AA)\t; ps_cw патчит только младший байт перехода\n")
         src = src[:j] + src[k:]
         # ---- разрез памяти: цепочки print_sprite + хвост спрайтов (spr_064..) + хелперы + START в верхний регион ----
         assert "\n%s:" % VEC_SPLIT in src
