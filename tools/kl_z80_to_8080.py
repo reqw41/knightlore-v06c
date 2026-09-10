@@ -660,7 +660,11 @@ VEC_CODE_TOP = 0x7A00      # потолок кода: ниже 128 байт ст
 VEC_HOLE_BYTES = int(__import__('os').environ.get('KL_HOLE_BYTES', '-1'))   # сколько байт увозить в дыры (-1 = сколько влезет)
 VEC_HOLE_SKIP = tuple(x for x in __import__('os').environ.get('KL_HOLE_SKIP', '').split(',') if x)
 VEC_HOLE_PLANES = [0xA000]   # плоскости, чьи строки вне картинки отданы под код (1 = буфер)
-VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xD400'), 16)   # начало верхнего региона (плоскость 3)
+VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xE000'), 16)   # начало верхнего региона (плоскость 3)
+# Разрез массива спрайтов: с этой метки хвост уезжает в верхний регион. Ниже сколько влезет —
+# граница подобрана замером (см. ASSERT нижнего региона: свободно должно оставаться ~0), сдвигать
+# при любом изменении размера кода. Спрайты адресуются через sprite_tbl, разрез произволен.
+VEC_SPLIT = __import__('os').environ.get('KL_VEC_SPLIT', 'spr_077')
 
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
@@ -2173,9 +2177,9 @@ kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
                     + src[j:k])
         src = src[:j] + src[k:]
         # ---- разрез памяти: цепочки print_sprite + хвост спрайтов (spr_064..) + хелперы + START в верхний регион ----
-        assert "\nspr_064:" in src
-        src = src.replace("\nspr_064:", "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: цепочки print_sprite, хвост спрайтов, START\n" % VEC_UPPER
-                          + ps_chain + "spr_064:", 1)
+        assert "\n%s:" % VEC_SPLIT in src
+        src = src.replace("\n%s:" % VEC_SPLIT, "\n\t\t\t\tORG %#06x\t\t\t; верхний регион: цепочки print_sprite, хвост спрайтов, START\n" % VEC_UPPER
+                          + ps_chain + "%s:" % VEC_SPLIT, 1)
         # блок Вектора (без ORG 0x7B00) — в нижний регион перед разрезом; START — за vidbuf, но в верхнем регионе
         tail = tail.replace("\t\t\t\tORG\t\t0x7B00\t\t\t; блок Вектора: клавиатура, ВИ53, экран (после START на 0x7A00, до стека)\n", "")
         tail = tail + _LDIR_HELPERS
