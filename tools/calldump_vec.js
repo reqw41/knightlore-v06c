@@ -41,6 +41,7 @@ const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync
 let phase="menu",iter=0;
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
+  if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}  // KLROOM: подмена комнаты при clear_scrn_buffer перед retrieve_screen (как в profile_vec.js)
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);}
   return ow(a,w,s);};
