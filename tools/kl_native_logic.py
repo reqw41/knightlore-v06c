@@ -961,6 +961,131 @@ loc_CA5E:		push	hl
 ; End of function adj_dZ_for_out_of_bounds
 """
 
+# ---------------------------------------------------------------------------
+# adj_d{X,Y}_for_out_of_bounds: прижать d так, чтобы |коорд+d-128| + габарит не вышел
+# за размер комнаты. Оригинал — 6 обращений (ix+n) на вызов (85 % тактов процедуры уходило
+# в хелперы il_ix_*). Здесь указатель объекта живёт в HL (dY/dZ вызывателя — на стеке),
+# поля +1/+4 (+2/+5) обходятся inc/dec hl, редкая ветка OOB — единственный переход к +12.
+# Проверки «входим в комнату» (+12) и «рядом с аркой» (+7) переставлены местами: обе —
+# чистые чтения с ret nz, порядок не наблюдаем, зато +7 и +12 идут по одному указателю.
+# У dY правимое смещение живёт в E (DE у вызывателя мертво), потому что L занят указателем.
+# 1017 -> ~250 тактов на вызов.
+# ---------------------------------------------------------------------------
+N_ADJ_DX_OOB = """adj_dX_for_out_of_bounds:	; C = dX; прижать dX к границам комнаты по X
+				push	hl									; dY/dZ вызывателя
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a								; ix+7
+				ld		a, (hl)
+				and		1									; near an arch?
+				jp		nz, adxo_out
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl									; ix+12
+				ld		a, (hl)
+				and		0xF0								; entering room?
+				jp		nz, adxo_out
+				ld		a, (room_size_X)
+				ld		b, a
+				ld		hl, (z80_ix)
+				inc		hl									; ix+1
+adxo_lp:		ld		a, (hl)								; X
+				add		a, c								; +dX
+				sub		128
+				jp		nc, adxo_1
+				cpl
+				inc		a									; neg
+adxo_1:			inc		hl
+				inc		hl
+				inc		hl									; ix+4
+				add		a, (hl)								; +width
+				dec		hl
+				dec		hl
+				dec		hl									; обратно ix+1 (dec hl флаги не портит)
+				cp		b									; < room width?
+				jp		c, adxo_out							; да, готово
+				push	hl
+				ld		a, l
+				add		a, 11
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+12
+				ld		a, (hl)
+				or		1									; set X OOB
+				ld		(hl), a
+				pop		hl
+				ld		a, c								; dX
+				call    adj_d_for_out_of_bounds
+				ld		c, a								; new dX
+				jp		nz, adxo_lp							; check again
+adxo_out:		pop		hl
+				ret
+; End of function adj_dX_for_out_of_bounds
+"""
+
+N_ADJ_DY_OOB = """adj_dY_for_out_of_bounds:	; L = dY; прижать dY к границам комнаты по Y
+				ld		e, l								; E = dY (DE у вызывателя мертво)
+				push	hl									; dY/dZ вызывателя
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 7
+				ld		l, a								; ix+7
+				ld		a, (hl)
+				and		1									; near an arch?
+				jp		nz, adyo_out
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl
+				inc		hl									; ix+12
+				ld		a, (hl)
+				and		0xF0								; entering room?
+				jp		nz, adyo_out
+				ld		a, (room_size_Y)
+				ld		b, a
+				ld		hl, (z80_ix)
+				inc		hl
+				inc		hl									; ix+2
+adyo_lp:		ld		a, (hl)								; Y
+				add		a, e								; +dY
+				sub		128
+				jp		nc, adyo_1
+				cpl
+				inc		a									; neg
+adyo_1:			inc		hl
+				inc		hl
+				inc		hl									; ix+5
+				add		a, (hl)								; +depth
+				dec		hl
+				dec		hl
+				dec		hl									; обратно ix+2
+				cp		b									; < room depth?
+				jp		c, adyo_out							; да, готово
+				push	hl
+				ld		a, l
+				add		a, 10
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; ix+12
+				ld		a, (hl)
+				or		2									; set Y OOB
+				ld		(hl), a
+				pop		hl
+				ld		a, e								; dY
+				call    adj_d_for_out_of_bounds
+				ld		e, a								; new dY
+				jp		nz, adyo_lp							; check again
+adyo_out:		pop		hl
+				ld		l, e								; новый dY — на место
+				ret
+; End of function adj_dY_for_out_of_bounds
+"""
+
 N_ADJ_OOB = """adj_for_out_of_bounds:	; прижать dX/dY/dZ (C/L/H) к границам комнаты и к другим объектам
 				ld		hl, (z80_ix)
 				ld		a, l
@@ -1793,6 +1918,8 @@ def apply(src):
                           ('chk_plyr_OOB', N_CHK_OOB, 'chk_plyr_OOB'),
                           ('clear_dX_dY', N_CLEAR_DXDY, 'move_player'),
                           ('adj_dZ_for_out_of_bounds', N_ADJ_DZ_OOB, 'adj_dZ_for_out_of_bounds'),
+                          ('adj_dX_for_out_of_bounds', N_ADJ_DX_OOB, 'adj_dX_for_out_of_bounds'),
+                          ('adj_dY_for_out_of_bounds', N_ADJ_DY_OOB, 'adj_dY_for_out_of_bounds'),
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
