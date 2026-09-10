@@ -2186,7 +2186,11 @@ kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
         src = src.replace(old_l, "loc_D7AA:\n", 1)
         old_e = "\t\t\t\tex      af, af'\n\t\t\t\tdec     a\n\t\t\t\tjp      NZ, loc_D7AA\n"
         assert old_e in src, "ps loop tail"
-        src = src.replace(old_e, "\t\t\t\tld      a, (kl_lines)\n\t\t\t\tdec     a\n\t\t\t\tld      (kl_lines), a\n"
+        # Конец строки: счётчик строк в ЯЧЕЙКЕ стоил 40 тактов (ld a,(nn) 16 + dec 8 + ld (nn),a 16).
+        # C — младший байт адреса в буфере, то есть номер строки (32+Y), и он и так растёт на строку.
+        # Сравнение с патч-иммедиатом «строка за последней» даёт то же за 16: 84 -> 60 тактов на строку.
+        src = src.replace(old_e, "\t\t\t\tld      a, c\n"
+                          "ps_end:\t\t\tcp      0\t\t\t\t\t; патч заголовка: строка за последней (32+Y+h)\n"
                           "ps_jrow:\t\tjp      NZ, loc_D7AA\t\t; младший байт патчит ps_cw: ps_fix, если печать обрезана по столбцу 31\n", 1)
         old_s = "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n"
         assert old_s in src, "ps shifted base"

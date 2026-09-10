@@ -128,8 +128,10 @@ ps_ent:			add		a, low (loc_D7AC+3)				; i8080: jp — младший байт а
 				add		a, (hl)							; + height_lines
 				ld		(hl), a							; обрезанная высота
 ps_pos:			ld		a, (hl)
-				ld		(kl_lines), a					; счётчик строк пиксельного цикла
-				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере
+				ld		(kl_lines), a					; высота окна (её читает vec_ps_budget)
+				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере; на выходе A = C
+				add		a, (hl)							; HL = obj+25 (высота) — процедура HL не трогает
+				ld		(ps_end+1), a					; строка за последней: конец пиксельного цикла
 				call	vec_ps_budget					; хватит ли кадра на пиксельный цикл под di
 				di										; SP уходит в данные спрайта
 				ld      (tmp_SP), sp

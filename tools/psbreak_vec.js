@@ -39,6 +39,7 @@ for(const [n,v] of [["print_sprite",PS],["flip_sprite",FLIP],["ps_cw",PSCW],["vi
                     ["vec_ps_budget",BUD],["loc_D7AA",D7AA],["ps_shpg",PSSH]])
   if(v===undefined)throw new Error("нет метки "+n);
 const PHASES=["flip","hdr","ps_cw","vidbuf","budget","diprol","loop"];
+const FLV=L.fl_vrow,FLH=L.fl_hrow;
 
 function runRoom(room){
   memory.init_from_array(IMG,0);
@@ -57,7 +58,7 @@ function runRoom(room){
   if(phase!=="game")return null;
 
   const st={calls:0,al:0,sh:0,nullexit:0,flipwork:0,total:0,halt:0,iters:0,bytesAl:0,bytesSh:0,
-            ph:{},phAl:{},phSh:{},phH:{},haltBud:0,wh:{}};
+            ph:{},phAl:{},phSh:{},phH:{},haltBud:0,wh:{},nV:0,nH:0,nVH:0,nNone:0,cycV:0,cycH:0,cycN:0,flip0:0};
   for(const p of PHASES){st.ph[p]=0;st.phAl[p]=0;st.phSh[p]=0;st.phH[p]=0;}
   const start=iter; let frc=0,steps=0,tacc=0,frames=0,lost=0;
   let inCall=false,retA=-1,cur=null,curS=-1,subRet=-1,t0=0,flipT0=0,curW=0,curH=0;
@@ -70,7 +71,7 @@ function runRoom(room){
     const pc=cpu.pc;
     if(!inCall){
       if(pc===PS){inCall=true;retA=rd(cpu.sp)|(rd(cpu.sp+1)<<8);cur="flip";curS=-1;pend.length=0;
-                  st.calls++;flipT0=steps;}
+                  st.calls++;st.fv=false;st.fh=false;}
     }else{
       if(pc===retA){ // конец вызова (обычный ret или nullexit из flip_sprite)
         if(curS<0){st.nullexit++;flush2(st,pend);}
@@ -78,7 +79,12 @@ function runRoom(room){
       }
       else if(pc===FLIP+3||(cur==="flip"&&pc===PS+3)) {}
       if(inCall){
-        if(cur==="flip"&&pc===PS+3){cur="hdr";}
+        if(pc===FLV&&cur==="flip")st.fv=true;
+        if(pc===FLH&&cur==="flip")st.fh=true;
+        if(cur==="flip"&&pc===PS+3){cur="hdr";
+          const d=st.ph.flip-st.flip0; st.flip0=st.ph.flip;
+          if(st.fv&&st.fh){st.nVH++;st.cycV+=d;}else if(st.fv){st.nV++;st.cycV+=d;}
+          else if(st.fh){st.nH++;st.cycH+=d;}else{st.nNone++;st.cycN+=d;}}
         else if(cur==="hdr"&&pc===PSCW){subRet=rd(cpu.sp)|(rd(cpu.sp+1)<<8);cur="ps_cw";}
         else if(cur==="ps_cw"&&pc===subRet){cur="hdr";}
         else if(cur==="hdr"&&pc===VIDB){subRet=rd(cpu.sp)|(rd(cpu.sp+1)<<8);cur="vidbuf";}
@@ -124,6 +130,7 @@ for(const r of rooms){
     const v=s.ph[p]-s.phH[p];
     console.log(`${p.padEnd(10)} ${String(v.toFixed(0)).padStart(9)} ${(100*v/sum).toFixed(1).padStart(7)}% ${(v/s.calls).toFixed(1).padStart(7)} ${(v/bytes).toFixed(2).padStart(7)} ${(s.phAl[p]/(s.bytesAl||1)).toFixed(2).padStart(11)} ${(s.phSh[p]/(s.bytesSh||1)).toFixed(2).padStart(13)} ${(v/s.iters).toFixed(0).padStart(7)}`);
   }
+  console.log(`flip: без работы ${s.nNone} (${(s.cycN/(s.nNone||1)).toFixed(0)}/вызов, ${(s.cycN/s.iters).toFixed(0)}/итер), только H ${s.nH} (${(s.cycH/(s.nH||1)).toFixed(0)}/вызов, ${(s.cycH/s.iters).toFixed(0)}/итер), с V ${s.nV+s.nVH} (${(s.cycV/((s.nV+s.nVH)||1)).toFixed(0)}/вызов, ${(s.cycV/s.iters).toFixed(0)}/итер)`);
   const top=Object.entries(s.wh).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([k,v])=>`${k}:${v}`).join(" ");
   console.log(`частые окна: ${top}`);
 }
