@@ -1693,13 +1693,55 @@ def _replace_func(src, label, end_marker, new, note=""):
     j = src.index(end_marker, i) + len(end_marker)
     return src[:i] + new + src[j:]
 
+def kl_cut_zx_attributes(src):
+    """Убрать атрибутную память ZX (vec/z80vec): на Векторе её нет, а адреса zx_aram
+    (0xE400-0xE7FF, считаются в attrib_calc_addr_de от high(zx_vram+0x1700)) попадают
+    В ВЕРХНИЙ РЕГИОН КОДА — clr_attribute_memory затирал спрайты spr_091..spr_095
+    (768 записей 0x46 на каждую очистку экрана). Вырезаем всех писателей и саму область."""
+    def cut(pat, name, repl='', count=1, flags=re.M | re.S):
+        nonlocal src
+        src, n = re.subn(pat, repl, src, count=count, flags=flags)
+        assert n == count, "kl_cut_zx_attributes: " + name + " (%d)" % n
+    RET = "\t\t\t\tret\t\t\t\t\t\t; Вектор: атрибутов ZX нет\n"
+    # 1. print_text: адрес атрибута и запись атрибута на символ
+    cut(r'\t+push    de\r?\n\t+call    attrib_calc_addr_de\r?\n\t+ld      l, e\r?\n'
+        r'\t+ld      h, d[^\n]*\r?\n\t+pop     de\r?\n', 'print_text addr')
+    cut(r'\t+ld      \(hl\), a\s+; store attribute\r?\n\t+inc     l[^\n]*\r?\n', 'print_text store')
+    cut(r'\t+ld      \(hl\), a\s+; store attribute\r?\n', 'print_text store last')
+    # 2. display_object: заливка атрибутов под объектом панели
+    cut(r'\t+ld      l, \(ix\+26\)\s+; pixel X\r?\n\t+ld      a, \(ix\+27\)[^\n]*\r?\n'
+        r'\t+add     a, 23\r?\n\t+ld      h, a\r?\n\t+call    attrib_calc_addr_de\r?\n'
+        r'\t+ex      de, hl\r?\n\t+ld      a, c[^\n]*\r?\n\t+ld      bc,0x0303[^\n]*\r?\n'
+        r'\t+call    vidbuf_fill_window\r?\n', 'display_object fill')
+    # 3. процедуры, целиком работающие с атрибутами
+    cut(r'(print_days:\r?\n(?:[^\n]*\r?\n){4})\t+ld      hl, zx_aram\+0x2EF[^\n]*\r?\n'
+        r'(?:\t+ld      \(hl\), 0x47[^\n]*\r?\n\t+inc     l\r?\n\t+ld      \(hl\), 0x47[^\n]*\r?\n)', 'print_days', r'\g<1>')
+    cut(r'\t+ld      a, 0x47[^\n]*\r?\n\t+ld      de, zx_aram\+0x242\r?\n\t+ld      b, 2\r?\n'
+        r'\t+call    fill_DE\r?\n\t+ld      de, zx_aram\+0x262\r?\n\t+ld      b, 4\r?\n\t+jp      fill_DE\r?\n',
+        'print_lives_gfx', RET)
+    cut(r'colour_panel:\r?\n.*?; End of function colour_panel\r?\n', 'colour_panel', 'colour_panel:\n' + RET)
+    cut(r'colour_sun_moon:\r?\n.*?; End of function colour_sun_moon\r?\n', 'colour_sun_moon', 'colour_sun_moon:\n' + RET)
+    cut(r'clr_attribute_memory:\r?\n.*?; End of function clr_attribute_memory\r?\n', 'clr_attribute_memory',
+        'clr_attribute_memory:\n' + RET)
+    cut(r'fill_attr:\r?\n.*?; End of function fill_attr\r?\n', 'fill_attr', 'fill_attr:\n' + RET)
+    # 4. cycle_colours_with_sound: пробег по атрибутам — долой, звук и задержка остаются
+    cut(r'(loc_C2A7:[^\n]*\r?\n)\t+ld      hl, 0x5800\r?\n\t+ld      bc, 0x300[^\n]*\r?\n'
+        r'\r?\ncycle_attribute_mem:\r?\n(?:[^\n]*\r?\n)*?\t+jr      NZ, cycle_attribute_mem\r?\n',
+        'cycle_attribute_mem', r'\g<1>')
+    # 5. сам расчёт адреса и область
+    cut(r'attrib_calc_addr_de:\r?\n.*?; End of function calc_attrib_addr\r?\n', 'attrib_calc_addr_de')
+    cut(r'\t+ORG 0x5800\r?\nzx_aram:\s+DS 0x300\r?\n', 'zx_aram segment')
+    assert 'zx_aram' not in src, "остались ссылки на zx_aram: " + str(re.findall(r'[^\n]*zx_aram[^\n]*', src))
+    return src
+
+
 def kl_vec_glue(src, translate_later):
     """Адаптация под Вектор-06Ц (общая для Z80- и i8080-целей): загрузчик, экран, клавиатура, ВИ53."""
     # заголовок после DEVICE
     # РАСКЛАДКА: код 0x0100.., стек <0x8000, ПЛОСКОСТЬ 0x8000-0x9FFF, переменные 0xA000, vidbuf 0xA600,
     # таблицы 0xBE00/0xBF00, "экран ZX" 0xCD00 (только атрибуты как мусорное ОЗУ)
+    src = kl_cut_zx_attributes(src)
     src = src.replace("\t\t\t\tORG 0x4000\nzx_vram:", "\t\t\t\tORG 0xCD00\nzx_vram:", 1)
-    src = src.replace("\t\t\t\tORG 0x5800\nzx_aram:", "\t\t\t\tORG 0xE500\nzx_aram:", 1)
     # 0xC000-0xC7FF — ЗАЩИТНАЯ ЗОНА: спрайты/стирания у правого края вылезают за столбец 31 (в линейном
     # буфере ZX это заворачивало строку), плюс временный стек `ld sp,seed_1` (у ZX — буфер принтера).
     # Переменные с 0xC800.
@@ -1766,8 +1808,7 @@ def kl_vec_glue(src, translate_later):
     old_sun = "\t\t\t\tcall    print_sprite                            ; display sun/moon\n"
     assert src.count(old_sun) == 1, "sun print"
     src = src.replace(old_sun, "\t\t\t\tcall    vec_sun_save\n" + old_sun + "\t\t\t\tcall    vec_sun_restore\n", 1)
-    assert "ld      hl, 0x5800\n" in src
-    src = src.replace("ld      hl, 0x5800\n", "ld      hl, zx_aram\n", 1)
+    assert "ld      hl, 0x5800\n" not in src, "0x5800 (атрибуты ZX) должен был уйти в kl_cut_zx_attributes"
     # бордюр ZX (ULA) — убрать
     src = src.replace("\t\t\t\txor     a                                       ; border colour BLACK, activate MIC\n\t\t\t\tout     (0xFE), a                               ; ULA\n",
                       "\t\t\t\txor     a\n", 1)
