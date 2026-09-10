@@ -1098,8 +1098,9 @@ vec_boot:		ld		a, 0x88				; 8255: A выход (скролл/ряд клавы),
 				ld		a, 0xFF
 				out		(0x03), a			; скролл
 				ld		a, 0x30				; ВИ53 счётчик 0: режим 0, оба байта, выход низкий (динамик молчит)
-				out		(0x08), a			; секундомер кадра для vec_di_budget; звук ушёл на AY, счётчик свободен
-				call	msx_snd_init			; AY молчит, слоты эффектов пусты
+				out		(0x08), a			; секундомер кадра для vec_di_budget (в режиме ВИ53 счётчик 0 забирает музыка)
+				call	msx_snd_init			; зеркало AY, слоты эффектов, заготовка OUT для ВИ53
+				call	msx_snd_probe			; есть AY -> спросим игрока в меню; нет -> молча ВИ53
 				ld		a, 1
 				ld		(vec_palreq), a
 				ei						; палитру защёлкивает цвет под лучом -> ISR грузит её в VBlank; прерывания остаются ВКЛ
@@ -1121,10 +1122,13 @@ VEC_TAIL = """
 
 ; ---- палитра: idx 8..15 (бит плоскости 0x8000) = белый, остальные чёрный. Только в VBlank. ----
 vec_isr:		push	af				; RST 38h каждый кадр (VBlank): палитра по запросу, скан клавиатуры
+				ld		a, (msx_vic0)		; 1 = счётчик 0 играет мелодию (режим ВИ53) — перезаряжать нельзя
+				or		a
+				jp		nz, vi_nostop
 				ld		a, 0xFF				; секундомер кадра (ВИ53 счётчик 0) <- 0xFFFF, считает вниз 1.5 МГц
 				out		(0x0B), a
 				out		(0x0B), a
-				push	bc
+vi_nostop:		push	bc
 				push	de
 				push	hl
 				ld		a, (vec_palreq)
@@ -1155,6 +1159,7 @@ vb_w:			out		(0x0C), a
 vi_kbd:			call	vec_scan
 				call	vec_zxbuild
 				call	msx_mtick				; мелодия: один тик = один кадр
+				call	msx_viflush				; зеркало регистров AY -> ВИ53 (в режиме AY сразу ret)
 				pop		hl
 				pop		de
 				pop		bc

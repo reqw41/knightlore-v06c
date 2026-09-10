@@ -11,7 +11,10 @@
     тот же, что на ZX; таблица периодов взята как есть (AY Вектора 1.775 МГц против
     1.789772 МГц MSX -> все ноты ниже ровно на 14.35 цента, строй сохраняется).
 
-Порты AY Вектора: out (0x15) — номер регистра, out (0x14) — данные.
+Звукового чипа AY на Векторе может не быть, поэтому регистры AY никуда не выводятся:
+`msx_wr` пишет в ЗЕРКАЛО из 16 байт (msx_ayregs), а раз в кадр из ISR процедура
+`msx_viflush` переносит зеркало в штатный таймер КР580ВИ53 (управление порт 0x08,
+счётчики 0/1/2 = порты 0x0B/0x0A/0x09). Раскладка счётчиков и потери — docs/PORT_RECIPE.md §16.
 Разбор оригинала: ~/projects/knightlore-research/msx/SOUND.md
 """
 import os
@@ -83,6 +86,23 @@ msx_play:		DS		1			; 1 = мелодия играет
 msx_end:		DS		1			; 1 = в потоке встретилась команда END
 msx_sfx:		DS		12			; 3 слота по 4 байта: id, тиков, параметр_hi, параметр_lo
 msx_ch:			DS		21			; 3 канала по 7: ptr(2), dur(2), режим громкости(1), начало потока(2)
+
+; ---- выбор источника звука и переменные ВИ53 ----
+vec_snd_txt:	DB		0x47			; атрибут (на Векторе ч/б), дальше «SOUND  A AY  T VI53», бит 7 = конец
+				DB		0x1C, 0x18, 0x1E, 0x17, 0x0D, 0x26, 0x26, 0x0A, 0x26, 0x0A, 0x22
+				DB		0x26, 0x26, 0x1D, 0x26, 0x1F, 0x12, 0x05, 0x83
+vec_snd_force:	DB		0			; стенд: 0 = проба+вопрос, 1 = только AY, 2 = только ВИ53 (поке до старта)
+vec_snd_mode:	DS		1			; 0 = писать в AY напрямую, 1 = зеркало + ВИ53 из ISR
+vec_snd_ask:	DS		1			; 1 = задать вопрос об источнике на стартовом экране
+msx_vact:		DS		3			; голос канала AY активен в этом кадре
+msx_vdiv:		DS		6			; делитель ВИ53 для канала AY (lo, hi)
+msx_viw:		DS		3			; кому какой счётчик в этом кадре (0xFF = молчит)
+msx_viown:		DS		3			; кто занимает счётчик сейчас (0xFF = счётчик остановлен)
+msx_vidiv:		DS		6			; кэш делителей счётчиков 0/1/2 — управляющее слово перезапускает счёт
+msx_vic0:		DS		1			; 1 = счётчик 0 отдан музыке (ISR не перезаряжает секундомер бюджета di)
+msx_vistub:		DS		3			; «out (порт), a : ret» в ОЗУ — у i8080 нет OUT по регистру
+				ALIGN	16
+msx_ayregs:		DS		16			; зеркало регистров AY: выровнено на 16, msx_wr складывает номер с младшим байтом
 """
     return txt
 
@@ -92,17 +112,32 @@ msx_ch:			DS		21			; 3 канала по 7: ptr(2), dur(2), режим гром�
 #  Пишется в подмножестве i8080: только jp/call/ret, без jr/djnz/ix/exx/bit/ldir.
 # ============================================================================
 DRIVER = """
-; ================= ЗВУК: драйвер MSX-версии на AY Вектора (0x15 адрес, 0x14 данные) =================
+; ================= ЗВУК: драйвер MSX-версии на зеркале AY + вывод в ВИ53 =================
 ; Мелодии: тик = кадр, за кадр отматывается 114 «проходов» главного цикла MSX (SOUND.md §2.4:
 ;   1024 прохода = 8.98 кадра 50 Гц). Остаток проходов копится в счётчике длительности, поэтому
 ;   суммарный темп совпадает с MSX без накопления ошибки.
 ; Эффекты: тик вызывается из объектного цикла по разу на объект — 40 раз за игровой кадр, как на MSX.
+; Весь драйвер MSX работает НЕ ТРОНУТЫМ и пишет в зеркало регистров AY; звучит только то,
+; что раз в кадр перенесла в ВИ53 процедура msx_viflush (см. блок «ВИ53» ниже).
 
 msx_wr:			; C = регистр AY, B = значение
-				ld		a, c
+				ld		a, (vec_snd_mode)
+				or		a
+				jp		nz, mwr_vi
+				ld		a, c				; режим 0: прямо в AY (0x15 — номер регистра, 0x14 — данные)
 				out		(0x15), a
 				ld		a, b
 				out		(0x14), a
+				ret
+mwr_vi:			; режим 1: только в зеркало; звучит ВИ53, куда зеркало сливает ISR (msx_viflush)
+				push	hl				; HL/DE портить нельзя — сайты вызова писались под OUT-версию
+				ld		a, c
+				and		0x0F
+				add		a, low msx_ayregs	; зеркало выровнено на 16 -> переноса в старший байт нет
+				ld		l, a
+				ld		h, high msx_ayregs
+				ld		(hl), b
+				pop		hl
 				ret
 
 msx_wlist:		; HL = список пар (регистр, значение), терминатор 0xFF
@@ -118,8 +153,332 @@ msx_wlist:		; HL = список пар (регистр, значение), те�
 				pop		hl
 				jp		msx_wlist
 
-msx_snd_init:	; из vec_boot: слоты пусты, мелодии нет, AY молчит
+; ================= ВИ53: перенос зеркала регистров AY в таймер (раз в кадр из ISR) =================
+; Порты Вектора ПЕРЕСТАВЛЕНЫ против даташита 8253: управление 0x08, счётчики 0/1/2 = 0x0B/0x0A/0x09.
+; Такт таймера 1497600 Гц, AY Вектора 1.775 МГц с делением на 16 -> делитель = период_AY * 13.5.
+; Раскладка счётчиков:
+;   мелодия (msx_play=1) — игровой цикл стоит, vec_di_budget не зовут: все три счётчика под музыку,
+;     канал AY A/B/C -> счётчик 0/1/2;
+;   игра (msx_play=0) — счётчик 0 держит секундомер бюджета di, эффектам остаются 1 и 2:
+;     канал B -> счётчик 1, канал C -> счётчик 2, канал A (слот 0 эффектов) подхватывает тот из
+;     них, что в этом кадре молчит; если заняты оба — третий голос отбрасывается.
+; Три приёма из King's Valley, без которых звук плохой: управляющее слово ПЕРЕЗАПУСКАЕТ счётчик,
+; поэтому шлём его только при смене владельца; тишина = управляющее слово БЕЗ делителя (счётчик
+; встаёт); при возврате счётчика кэш делителя бьём в 0xFFFF, иначе повтор той же ноты после паузы
+; не перезальётся и счётчик промолчит.
+; Что теряется против AY: громкость (порог 6 из 15, тише = молчание), огибающая (нота звучит
+; полной длины на максимуме), шум (заменён падающим тоном из периода шума R6).
+
+msx_viflush:	; из ISR раз в кадр, ПОСЛЕ msx_mtick
+				ld		a, (vec_snd_mode)
+				or		a
+				ret		z					; режим AY — таймер не наш
+				ld		a, (msx_play)
+				ld		hl, msx_vic0
+				cp		(hl)
+				jp		z, mvf_go
+				ld		(hl), a				; смена раскладки счётчиков
+				or		a
+				jp		nz, mvf_go			; в мелодию: счётчик 0 заберёт первая же нота
+				ld		a, 0x30				; обратно в игру: счётчик 0 снова секундомер бюджета di
+				out		(0x08), a
+				ld		a, 0xFF
+				out		(0x0B), a
+				out		(0x0B), a
+				ld		(msx_viown+0), a
+mvf_go:			ld		c, 0				; 1. три голоса из зеркала: активность + делитель
+mvf_v:			push	bc
+				call	msx_vcalc
+				pop		bc
+				inc		c
+				ld		a, c
+				cp		3
+				jp		c, mvf_v
+				call	msx_viwant			; 2. кому какой счётчик
+				ld		a, (msx_vic0)		; 3. выдать (в игре счётчик 0 не трогаем — он секундомер)
+				or		a
+				ld		c, 1
+				jp		z, mvf_e
+				ld		c, 0
+mvf_e:			push	bc
+				call	msx_viemit
+				pop		bc
+				inc		c
+				ld		a, c
+				cp		3
+				jp		c, mvf_e
+				ret
+
+msx_vcalc:		; C = канал AY 0..2 -> msx_vact[C] (активен?), msx_vdiv[2C] (делитель ВИ53)
+				ld		b, 0
+				ld		hl, msx_vdiv
+				add		hl, bc
+				add		hl, bc
+				push	hl					; -> ячейка делителя
+				ld		hl, msx_vact
+				add		hl, bc
+				push	hl					; -> флаг активности
+				ld		a, c
+				add		a, 8				; регистр громкости 8+C
+				ld		e, a
+				ld		d, 0
+				ld		hl, msx_ayregs
+				add		hl, de
+				ld		a, (hl)
+				and		0x10				; огибающая включена -> считаем громкость максимальной
+				jp		nz, mvc_lo1
+				ld		a, (hl)
+				and		0x0F
+				cp		6					; порог KV: у таймера громкости нет, тихие хвосты гудели бы наравне
+				jp		c, mvc_off
+mvc_lo1:		ld		hl, msx_kmask		; 0x09/0x12/0x24 = биты тона и шума канала в R7
+				add		hl, bc
+				ld		e, (hl)
+				ld		a, (msx_ayregs+7)
+				cpl							; в R7 ноль = включено; после cpl единица = включено
+				and		e
+				jp		z, mvc_off			; ни тона, ни шума
+				and		0x07
+				jp		nz, mvc_tone
+				ld		a, (msx_ayregs+6)	; только шум: у ВИ53 шума нет — падающий тон из его периода
+				and		0x1F
+				jp		nz, mvc_nz1
+				inc		a
+mvc_nz1:		ld		h, a				; делитель = R6*256: R6 = 1..31 -> 5850..188 Гц
+				ld		l, 0
+				jp		mvc_on
+mvc_tone:		ld		a, c
+				add		a, a
+				ld		e, a
+				ld		d, 0
+				ld		hl, msx_ayregs
+				add		hl, de
+				ld		a, (hl)
+				inc		hl
+				ld		h, (hl)
+				ld		l, a				; HL = период AY
+				call	msx_ay2vi			; HL = период * 13.5
+				ld		a, h
+				or		a
+				jp		nz, mvc_on
+				ld		a, l
+				cp		64					; делитель < 64 = выше 23 кГц: эффекты дают период 0..4, слышно всё равно нечего
+				jp		c, mvc_off
+mvc_on:			pop		de
+				ld		a, 1
+				ld		(de), a
+				pop		de
+				ld		a, l
+				ld		(de), a
+				inc		de
+				ld		a, h
+				ld		(de), a
+				ret
+mvc_off:		pop		hl
+				ld		(hl), 0
+				pop		hl
+				ret
+
+msx_ay2vi:		; HL = период AY (12 бит) -> HL = делитель ВИ53 (13P + P/2)
+				ld		a, h
+				and		0x0F
+				ld		h, a
+				ld		b, h
+				ld		c, l				; BC = P
+				add		hl, hl
+				ld		e, l
+				ld		d, h				; DE = 2P
+				add		hl, hl				; 4P
+				add		hl, de				; 6P
+				add		hl, hl				; 12P
+				add		hl, bc				; 13P
+				ld		a, b
+				or		a
+				rra
+				ld		b, a
+				ld		a, c
+				rra
+				ld		c, a				; BC = P/2
+				add		hl, bc				; 13.5P
+				ret
+
+msx_viwant:		; msx_viw[счётчик] = номер канала AY или 0xFF (счётчик молчит)
+				ld		c, 0				; по умолчанию канал n -> счётчик n
+mvw_l:			ld		b, 0
+				ld		hl, msx_vact
+				add		hl, bc
+				ld		a, (hl)
+				or		a
+				ld		a, c
+				jp		nz, mvw_s
+				ld		a, 0xFF
+mvw_s:			ld		hl, msx_viw
+				add		hl, bc
+				ld		(hl), a
+				inc		c
+				ld		a, c
+				cp		3
+				jp		c, mvw_l
+				ld		a, (msx_vic0)
+				or		a
+				ret		nz					; мелодия: три счётчика на три канала, перекладывать нечего
+				ld		a, 0xFF				; игра: счётчик 0 держит секундомер бюджета di
+				ld		(msx_viw+0), a
+				ld		a, (msx_vact+0)		; канал A (слот 0: чирп шара, приземление) ищет свободный счётчик
+				or		a
+				ret		z
+				ld		a, (msx_viw+2)		; сперва счётчик 2: шаги обычно там же, но если C молчит — он свободен
+				inc		a
+				jp		nz, mvw_g3
 				xor		a
+				ld		(msx_viw+2), a
+				ret
+mvw_g3:			ld		a, (msx_viw+1)
+				inc		a
+				ret		nz					; оба счётчика заняты — третий одновременный эффект отброшен
+				xor		a
+				ld		(msx_viw+1), a
+				ret
+
+msx_viemit:		; C = номер счётчика 0..2
+				ld		a, 0x0B
+				sub		c
+				ld		(msx_vistub+1), a	; порт счётчика: 0x0B / 0x0A / 0x09
+				ld		b, 0
+				ld		hl, msx_viw
+				add		hl, bc
+				ld		a, (hl)
+				ld		hl, msx_viown
+				add		hl, bc
+				inc		a
+				jp		z, mve_off			; 0xFF -> счётчику молчать
+				dec		a
+				cp		(hl)
+				jp		z, mve_div			; владелец тот же — управляющее слово не слать
+				ld		(hl), a
+				push	af
+				call	mve_ctrl			; смена владельца: перезапуск счётчика...
+				ld		hl, msx_vidiv
+				add		hl, bc
+				add		hl, bc
+				ld		(hl), 0xFF			; ...и бой кэша делителя (иначе та же нота после паузы промолчит)
+				inc		hl
+				ld		(hl), 0xFF
+				pop		af
+mve_div:		ld		l, a
+				ld		h, 0
+				add		hl, hl				; 2*владелец
+				ld		de, msx_vdiv
+				add		hl, de
+				ld		e, (hl)
+				inc		hl
+				ld		d, (hl)				; DE = делитель
+				ld		hl, msx_vidiv
+				add		hl, bc
+				add		hl, bc
+				ld		a, (hl)
+				cp		e
+				jp		nz, mve_w
+				inc		hl
+				ld		a, (hl)
+				cp		d
+				ret		z					; делитель тот же — не трогаем (запись перезапустила бы счётчик)
+				dec		hl
+mve_w:			ld		(hl), e
+				inc		hl
+				ld		(hl), d
+				ld		a, e
+				call	msx_vistub
+				ld		a, d
+				jp		msx_vistub
+mve_off:		ld		a, (hl)
+				inc		a
+				ret		z					; уже молчит
+				ld		(hl), 0xFF
+mve_ctrl:		ld		a, c				; управляющее слово «режим 3, LSB+MSB» счётчика C
+				rrca
+				rrca						; 0 -> 0x00, 1 -> 0x40, 2 -> 0x80
+				add		a, 0x36
+				out		(0x08), a
+				ret
+
+msx_snd_probe:	; выбор источника звука на старте. vec_snd_force: 0 = проба и вопрос,
+				; 1 = принудительно AY, 2 = принудительно ВИ53 (для стендов — поке до старта).
+				ld		a, (vec_snd_force)
+				or		a
+				jp		z, msp_probe
+				dec		a
+				ld		(vec_snd_mode), a
+				xor		a
+				ld		(vec_snd_ask), a
+				ret
+msp_probe:		; проба AY: пишем R1 (он 4-битный) и читаем назад с ОБОИХ портов — на MiSTer
+				; читается только 0x15, в vector06js только 0x14; два разных значения подряд
+				; отсекают «залипший» ответ шины.
+				ld		b, 0x0A
+				call	msp_try
+				jp		nz, msp_no
+				ld		b, 0x05
+				call	msp_try
+				jp		nz, msp_no
+				ld		a, 1				; AY отозвался — спросим игрока, стартуем с AY
+				ld		(vec_snd_ask), a
+				xor		a
+				ld		(vec_snd_mode), a
+				ret
+msp_no:			xor		a
+				ld		(vec_snd_ask), a
+				ld		a, 1				; AY нет — молча ВИ53
+				ld		(vec_snd_mode), a
+				ret
+msp_try:		ld		a, 1				; выбрать R1
+				out		(0x15), a
+				ld		a, b
+				out		(0x14), a
+				in		a, (0x15)
+				cp		b
+				ret		z
+				in		a, (0x14)
+				cp		b
+				ret
+
+vec_snd_menu:	; стартовый экран: «A — AY, T — таймер ВИ53». Только если AY отозвался.
+				ld		a, (vec_snd_ask)
+				or		a
+				ret		z
+				xor		a
+				ld		(vec_snd_ask), a	; спрашиваем один раз за загрузку
+				call	clear_scrn_buffer
+				ld		hl, 0x5F30			; Y = 95, X = 48
+				ld		de, vec_snd_txt
+				call	print_text_std_font
+				call	update_screen
+vsm_w:			ld		a, 0xFD				; ряд ZX 1: A S D F G
+				call	read_port
+				and		0x01
+				jp		nz, vsm_ay
+				ld		a, 0xFB				; ряд ZX 2: Q W E R T
+				call	read_port
+				and		0x10
+				jp		z, vsm_w
+				ld		a, 1				; T -> ВИ53
+				jp		vsm_set
+vsm_ay:			xor		a					; A -> AY
+vsm_set:		ld		(vec_snd_mode), a
+				call	msx_silence			; погасить оба источника перед меню
+				jp		clear_scrn_buffer
+
+msx_snd_init:	; из vec_boot: слоты пусты, мелодии нет, звук молчит
+				ld		a, 0xD3				; заготовка «out (порт), a : ret» — порт счётчика ВИ53 правится на лету
+				ld		(msx_vistub), a
+				ld		a, 0xC9
+				ld		(msx_vistub+2), a
+				ld		a, 0xFF				; ни один счётчик ВИ53 не занят голосом
+				ld		(msx_viown+0), a
+				ld		(msx_viown+1), a
+				ld		(msx_viown+2), a
+				xor		a
+				ld		(msx_vic0), a
 				ld		(msx_play), a
 				ld		(msx_end), a
 				ld		(msx_stepc), a
@@ -856,7 +1215,15 @@ def apply(src):
     assert old in src, 'kl_sound_ay: update_sprite_loop'
     src = src.replace(old, old + "\t\t\t\tcall    msx_sfx_tick                            ; тик эффектов: 1 на объект\n", 1)
 
-    # 7. конец игрового кадра — глушение AY (MSX 0x4136)
+    # 7. вопрос об источнике звука — перед меню (рисуется и стирается до display_menu)
+    old = "\t\t\t\tcall    clear_scrn                              ; colour is bright yellow on black\n\t\t\t\tcall    do_menu_selection\n"
+    assert src.count(old) == 1, 'kl_sound_ay: сайт вопроса об источнике звука'
+    src = src.replace(old, "\t\t\t\tcall    clear_scrn                              ; colour is bright yellow on black\n"
+                           "\t\t\t\tcall    vec_snd_menu                            ; AY или ВИ53 (только если AY отозвался)\n"
+                           "\t\t\t\tcall    do_menu_selection\n", 1)
+    rep['сайт: вопрос AY/ВИ53'] = 0
+
+    # 8. конец игрового кадра — глушение AY (MSX 0x4136)
     old = "loc_B000:\n\t\t\t\tld      hl, (seed_2)\n"
     assert old in src, 'kl_sound_ay: loc_B000'
     src = src.replace(old, "loc_B000:\n\t\t\t\tcall    msx_frame_off                           ; глушение AY в конце игрового кадра\n\t\t\t\tld      hl, (seed_2)\n", 1)
