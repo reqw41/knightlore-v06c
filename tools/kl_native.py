@@ -226,59 +226,48 @@ fl_h:			ld		hl, (z80_ix)
 				inc		de									; DE = начало строки
 				or		a
 				jp		z, fl_ret
+				ld		h, high reverse_bits_table			; H держим до конца флипа: L = индекс, (HL) = rev
 fl_hrow:		push	de									; начало строки
-				ld		h, d
-				ld		l, e
 				ld		a, (kl_w)
 				add		a, a
 				dec		a
 				dec		a
-				add		a, l
-				ld		l, a
-				ld		a, h
+				add		a, e
+				ld		c, a
+				ld		a, d
 				adc		a, 0
-				ld		h, a								; HL = последняя пара (R), DE = первая (L)
+				ld		b, a								; BC = последняя пара (R), DE = первая (L)
 				ld		a, (kl_w)
 				or		a
 				rra
 				ld		(kl_cnt), a							; обменов = w/2
 				jp		z, fl_hmid
-fl_hswap:		ld		a, (de)
-				push	hl
-				ld		h, high reverse_bits_table
+fl_hswap:		ld		a, (de)								; маска L
+				ld		l, a
+				ld		a, (hl)								; rev(маска L)
+				push	af
+				ld		a, (bc)								; маска R
 				ld		l, a
 				ld		a, (hl)
-				pop		hl
-				ld		b, a								; B = rev(mask L)
-				ld		a, (hl)
-				push	hl
-				ld		h, high reverse_bits_table
-				ld		l, a
-				ld		a, (hl)
-				pop		hl
 				ld		(de), a								; (L).mask = rev(mask R)
-				ld		(hl), b								; (R).mask = rev(mask L)
+				pop		af
+				ld		(bc), a								; (R).mask = rev(mask L)
 				inc		de
-				inc		hl
-				ld		a, (de)
-				push	hl
-				ld		h, high reverse_bits_table
+				inc		bc
+				ld		a, (de)								; данные L
 				ld		l, a
 				ld		a, (hl)
-				pop		hl
-				ld		b, a
-				ld		a, (hl)
-				push	hl
-				ld		h, high reverse_bits_table
+				push	af
+				ld		a, (bc)								; данные R
 				ld		l, a
 				ld		a, (hl)
-				pop		hl
 				ld		(de), a
-				ld		(hl), b
+				pop		af
+				ld		(bc), a
 				inc		de									; L -> следующая пара
-				dec		hl
-				dec		hl
-				dec		hl									; R -> предыдущая пара
+				dec		bc
+				dec		bc
+				dec		bc									; R -> предыдущая пара
 				ld		a, (kl_cnt)
 				dec		a
 				ld		(kl_cnt), a
@@ -287,19 +276,13 @@ fl_hmid:		ld		a, (kl_w)
 				and		1
 				jp		z, fl_hnext
 				ld		a, (de)								; средняя пара: только бит-реверс
-				push	hl
-				ld		h, high reverse_bits_table
 				ld		l, a
 				ld		a, (hl)
-				pop		hl
 				ld		(de), a
 				inc		de
 				ld		a, (de)
-				push	hl
-				ld		h, high reverse_bits_table
 				ld		l, a
 				ld		a, (hl)
-				pop		hl
 				ld		(de), a
 fl_hnext:		pop		de									; начало строки
 				ld		a, (kl_w)
