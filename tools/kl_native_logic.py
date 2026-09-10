@@ -222,10 +222,9 @@ sd_loop:		ld		a, (hl)								; graphic no
 				ld		a, l
 				add		a, 19
 				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a								; -> +26 pixel X
-				ld		a, (hl)
+				jp		nc, sd_p26
+				inc		h
+sd_p26:			ld		a, (hl)								; +26 pixel X
 				rrca
 				rrca
 				rrca
@@ -1525,16 +1524,14 @@ lo_1:			ld		a, (hl)
 lo_1b:			ld		a, l								; -7 и +32 одним сложением
 				add		a, 25
 				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a
+				jp		nc, lo_3
+				inc		h
 				jp		lo_3
 lo_2:			ld		a, l
 				add		a, 32
 				ld		l, a
-				ld		a, h
-				adc		a, 0
-				ld		h, a
+				jp		nc, lo_3
+				inc		h
 lo_3:			inc		c
 				dec		b
 				jp		nz, lo_1
