@@ -1163,6 +1163,51 @@ loc_CE40:		ld		hl, (z80_iy)
 				jp		loc_CE3A
 """
 
+# ---------------------------------------------------------------------------
+# dec_dZ_and_update_XYZ / add_dXYZ: X += dX, Y += dY, Z += dZ. Девять обращений (ix+n)
+# = 1180 тактов на вызов. Координата и смещение всегда стоят на 8 байт друг от друга,
+# поэтому здесь два указателя: HL на +1..+3, DE на +9..+11, оба двигаются inc.
+# Оригинал портит только A и флаги — BC/DE/HL уходят на стек. 1180 -> 190 тактов.
+# ---------------------------------------------------------------------------
+N_ADD_DXYZ = """dec_dZ_and_update_XYZ:
+				push	hl
+				ld		hl, (z80_ix)
+				ld		a, l
+				add		a, 11
+				ld		l, a								; ix+11 (+11 не переносит: младший байт <= 232)
+				dec		(hl)								; dec dZ
+				pop		hl
+				call    adj_for_out_of_bounds
+
+add_dXYZ:		push	hl									; X, Y, Z += dX, dY, dZ
+				push	de
+				ld		hl, (z80_ix)
+				inc		hl									; HL = ix+1 (X)
+				ld		a, l
+				add		a, 8
+				ld		e, a
+				ld		a, h
+				adc		a, 0
+				ld		d, a								; DE = ix+9 (dX)
+				ld		a, (de)
+				add		a, (hl)
+				ld		(hl), a								; X += dX
+				inc		hl
+				inc		de
+				ld		a, (de)
+				add		a, (hl)
+				ld		(hl), a								; Y += dY
+				inc		hl
+				inc		de
+				ld		a, (de)
+				add		a, (hl)
+				ld		(hl), a								; Z += dZ
+				pop		de
+				pop		hl
+				ret
+; End of function dec_dZ_and_update_XYZ
+"""
+
 N_ADJ_DX_OOB = """adj_dX_for_out_of_bounds:	; C = dX; прижать dX к границам комнаты по X
 				push	hl									; dY/dZ вызывателя
 				ld		hl, (z80_ix)
@@ -2110,6 +2155,7 @@ def apply(src):
                           ('adj_dZ_for_out_of_bounds', N_ADJ_DZ_OOB, 'adj_dZ_for_out_of_bounds'),
                           ('adj_dX_for_out_of_bounds', N_ADJ_DX_OOB, 'adj_dX_for_out_of_bounds'),
                           ('adj_dY_for_out_of_bounds', N_ADJ_DY_OOB, 'adj_dY_for_out_of_bounds'),
+                          ('dec_dZ_and_update_XYZ', N_ADD_DXYZ, 'dec_dZ_and_update_XYZ'),
                           ('adj_for_out_of_bounds', N_ADJ_OOB, 'adj_for_out_of_bounds')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
     src = _sub(src, r'(?m)^move_player:[^\n]*\n.*?(?=^clear_dX_dY:)', N_MOVE_PLAYER, 'move_player')
