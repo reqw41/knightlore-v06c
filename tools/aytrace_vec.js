@@ -75,7 +75,7 @@ let steps = 0, frc = 0, tacc = 0;
 // ВИ53 тикает вдвое медленнее CPU (1.5 МГц): без этого секундомер бюджета di стоит на месте
 const step = () => {
   if (cpu.pc === MSXWR) log.push([frame, cpu.regs[1] & 0x0F, cpu.regs[0] & 0xFF]);
-  const c = cpu.instruction(); steps++; frc += c;
+  cpu.instruction(); const c = cpu.vcycles; steps++; frc += c;
   tacc += c; if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
   if (cpu.last_opcode === 0xd3) io.commit();
 };

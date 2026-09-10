@@ -81,7 +81,7 @@ if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter; let steps=0,frc=0,tacc=0;   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
 
 while(iter-startIter<N&&steps<3e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
-  const c=cpu.instruction();steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
+  const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
 fs.writeFileSync(`build/scr_${TAG}.txt`,lines.join("\n")+"\n");
 const dump=Buffer.alloc(SCR1-SCR0+32*192);let di=0;
 for(let a=SCR0;a<SCR1;a++)dump[di++]=rd(a);                      // плоскость 0 целиком (вне картинки обязана быть нулём)

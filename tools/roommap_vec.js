@@ -59,7 +59,7 @@ function runRoom(room){
   let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
   if(phase!=="game")return {room,err:"нет комнаты"};
   const start=iter; let frc=0; total=0;
-  while(iter-start<N&&steps<5e7){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}const c=cpu.instruction();steps++;total+=c;frc+=c;cur+=c;if(cpu.last_opcode===0xd3)io.commit();}
+  while(iter-start<N&&steps<5e7){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;frc+=c;cur+=c;if(cpu.last_opcode===0xd3)io.commit();}
   let nobj=0;for(let i=0;i<40;i++)if(memory.read(OBJ+i*32,false))nobj++;
   const attr=memory.read(ROOM,false);
   return {room,attr,nobj,avg:total/(iter-start),max:maxc};

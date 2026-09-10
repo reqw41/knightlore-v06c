@@ -58,7 +58,7 @@ while(iter-startIter<N&&steps<3e8){
     else if(nm==="print_sprite")note(nm,{b:1,c:1,sp:cpu.sp});
     else if(nm==="vidbuf_clear_window")note(nm,{b:b,c:e,l:l,sp:cpu.sp});
     else note(nm,{b:b,c:c,l:l,sp:cpu.sp});}
-  const cc=cpu.instruction();steps++;frc+=cc;if(cpu.last_opcode===0xd3)io.commit();}
+  const cc=(cpu.instruction(),cpu.vcycles);steps++;frc+=cc;if(cpu.last_opcode===0xd3)io.commit();}
 const its=iter-startIter;
 for(const [n,s] of Object.entries(stat)){
   const top=o=>Object.entries(o).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>`${k}:${v}`).join(" ");

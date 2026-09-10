@@ -66,7 +66,7 @@ while(iter-startIter<N&&steps<3e8){
     perObj.set(curObj,e);}
   if(pc===CLW){clwCalls++;}
   if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
-  const c=cpu.instruction();steps++;frc+=c;total+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();
+  const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;total+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();
 }
 const it=iter-startIter;
 console.log(`комната ${process.env.KLROOM||"стартовая"}: итераций ${it}, тактов/итер ${(total/it).toFixed(0)}`);

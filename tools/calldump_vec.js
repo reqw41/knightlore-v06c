@@ -101,7 +101,7 @@ while(iter-startIter<N&&steps<3e8){
   if(lab){const rule=RULES[lab]||{regions:()=>[]};const r=regs();const regions=rule.regions(r);const entry={regs:r,memAddrs:regions.map(([n,a,len])=>[n,a,len]),mem:regions.map(([n,a,len])=>[n,a,hex(a,len)])};
     if(rule.point){out[lab].write(JSON.stringify({label:lab,iter,entry})+"\n");counts[lab]=(counts[lab]||0)+1;}
     else pending.push({label:lab,ret:rd16(cpu.sp),sp:cpu.sp,entry});}
-  if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();} const c=cpu.instruction();steps++;frc+=c;if(cpu.last_opcode===0xd3)io.commit();
+  if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();} const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;if(cpu.last_opcode===0xd3)io.commit();
 }
 for(const n of want)out[n].end();
 console.log("итераций",iter-startIter,"вызовов:",JSON.stringify(counts));

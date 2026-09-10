@@ -33,6 +33,7 @@ for(const [n,v] of [["print_sprite",PS],["ps_al",PSAL],["ps_shpg",PSSH],["z80_ix
 
 function runRoom(room){
   memory.init_from_array(IMG,0);
+if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==="vi"?2:1,false); // экран выбора звука: сразу AY
   cpu.pc=0;cpu.sp=0xC000;cpu.iff=false; for(let r=0;r<8;r++)keyboard.matrix[r]=0;
   const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
   let phase="menu",iter=0,roomSet=(room===null);
@@ -68,7 +69,7 @@ function runRoom(room){
       if(curS>=0){if(curS===0)st.cycAl+=d;else st.cycSh+=d;st.cycByS[curS]+=d;
         const dl=(st.total-loop0)-(st.halt-loopH0);
         if(curS===0)st.loopAl+=dl;else st.loopSh+=dl;st.loopByS[curS]+=dl;}}
-    const c=cpu.instruction();steps++;st.total+=c;frc+=c;if(cpu.last_opcode===0x76)st.halt+=c;
+    const c=(cpu.instruction(),cpu.vcycles);steps++;st.total+=c;frc+=c;if(cpu.last_opcode===0x76)st.halt+=c;
     if(cpu.last_opcode===0xd3)io.commit();
   }
   st.iters=iter-start;

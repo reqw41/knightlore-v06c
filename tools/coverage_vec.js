@@ -38,7 +38,7 @@ function runRoom(room){
     if(a===SEED2HI&&phase==="game")iter++;
     return ow(a,w,s);};
   // до входа в комнату — с покрытием (меню, инициализация)
-  const step=()=>{cov[cpu.pc]=1;const c=cpu.instruction();if(cpu.last_opcode===0xd3)io.commit();return c;};
+  const step=()=>{cov[cpu.pc]=1;const c=(cpu.instruction(),cpu.vcycles);if(cpu.last_opcode===0xd3)io.commit();return c;};
   let frc=0,frames=0,guard=0;
   while(phase!=="game"&&guard++<3e7){const c=step();frc+=c;
     if(frc>=59904){frc-=59904;frames++;if(frames===60)keyboard.matrix[2]|=1;v06c.irq=true;v06c.checkInterrupt();}}
