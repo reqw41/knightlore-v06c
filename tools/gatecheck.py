@@ -68,6 +68,11 @@ MUTS = [
          file="tools/kl_z80_to_8080.py",
          old="def vec_holes(base, pages=32):",
          new="def vec_holes(base, pages=32):\n    import os as _os\n    if _os.environ.get('KL_GATECHECK_PLANE2') and base == 0xC000:\n        return [(base + (p << 8) + 100, 60) for p in range(pages)]"),
+    dict(name="ixflags", gate="check_ixflags",
+         why="хелпер il_ix_dec (портит перенос) поставлен прямо перед чтением переноса — исторический баг upd_103",
+         file="tools/kl_native_logic.py",
+         old="\t\t\t\tjp\t\tnc, loc_C1EE\t\t\t\t\t\t; не рядом — пропустить",
+         new="\tcall il_ix_dec\n\tdb 4\n\t\t\t\tjp\t\tnc, loc_C1EE\t\t\t\t\t\t; не рядом — пропустить"),
     dict(name="i8080", gate="check_i8080",
          why="одна инструкция осталась Z80-only (bit n,r не транслируется)",
          file="tools/kl_z80_to_8080.py",
@@ -86,6 +91,7 @@ GATES = {
     "hudcolor": None,          # особый: снять дамп и прогнать hudcolor.py
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
+    "check_ixflags": None,     # то же
 }
 
 
@@ -102,7 +108,7 @@ def build(target, env=None):
 
 def gate_result(gate, env=None):
     """-> (rc, хвост вывода). rc != 0 = гейт покраснел."""
-    if gate in ("check_plane2", "check_i8080"):
+    if gate in ("check_plane2", "check_i8080", "check_ixflags"):
         r = build("vec", env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "lockstep":
