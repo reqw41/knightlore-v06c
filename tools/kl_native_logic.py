@@ -7,6 +7,8 @@ SCRATCH = """
 kl_wl:			DS		1			; wipe_next_object: ширина стирания (уходит в L)
 kl_wh:			DS		1			; wipe_next_object: высота стирания (уходит в H) — обязана идти сразу за kl_wl
 kl_scan:		DS		2			; calc_display_order_and_render: первая ещё не отрисованная запись objects_to_draw
+kl_cpcnt:		DS		1			; loc_D653/.copy_loop: счётчик копий (стек занят параметрами blit_to_screen)
+kl_seed0:		DS		1			; START: байт-затравка seed_1, переживающий clr_mem
 """
 
 # ---------------------------------------------------------------------------
@@ -2486,6 +2488,81 @@ loc_BE72:		and		0x7F								; снять признак конца строки
 """
 
 
+# ---------------------------------------------------------------------------
+# set_wipe_and_draw_IY: «сделать то же самое, но для объекта в IY».
+# Оригинал — восемь команд с IX/IY (push iy/push ix/push iy/pop ix/call/pop ix/pop iy),
+# после трансляции 64 Б: каждый push/pop индексного регистра — это обмен с ячейкой.
+# IY сохранять ОБЯЗАТЕЛЬНО: set_draw_objs_overlapped (нативная) пишет z80_iy в конце.
+# ---------------------------------------------------------------------------
+N_SET_WD_IY = """set_wipe_and_draw_IY:	; WIPE|DRAW объекту (z80_iy); IX и IY восстанавливаются
+				ld		hl, (z80_ix)
+				push	hl
+				ld		hl, (z80_iy)
+				push	hl
+				ld		(z80_ix), hl						; IX = IY
+				call	set_wipe_and_draw_flags
+				pop		hl
+				ld		(z80_iy), hl						; set_draw_objs_overlapped портит IY
+				pop		hl
+				ld		(z80_ix), hl
+				ret
+; End of function set_wipe_and_draw_IY
+"""
+
+# ---------------------------------------------------------------------------
+# prepare_final_animation: два прохода по таблице объектов с указателем в IX.
+# Первый — пометить 11 объектов комнаты WIPE|DRAW и объявить их несуществующими;
+# второй — заменить блоки (graphic 7) на искристый спрайт 131 до конца таблицы (clear_end).
+# Указатель переезжает в HL; z80_ix заполняется только там, где его читает вызываемая
+# процедура (set_wipe_and_draw_flags -> set_draw_objs_overlapped), и восстанавливается на выходе.
+# Конец таблицы — точное равенство не годится (шаг 32 от special_objs_here_1, а сравнение
+# идёт с clear_end), поэтому оставлено 16-битное вычитание, но без push ix/pop hl.
+# HL/DE/BC/A на выходе мертвы: единственный вызыватель (chk_all_objs_in_cauldron) сразу делает ret.
+# ---------------------------------------------------------------------------
+N_PREP_FINAL = """prepare_final_animation:
+				ld		a, 1
+				ld		(all_objs_in_cauldron), a
+				ld		hl, (z80_ix)
+				push	hl									; сохранить IX
+				ld		hl, special_objs_here_1				; special_objs_here[1]
+				ld		b, 11								; 11 объектов комнаты (1 спец, 7 фоновых, 3 передних)
+pfa_1:			ld		(z80_ix), hl
+				push	bc
+				push	hl
+				call	set_wipe_and_draw_flags
+				pop		hl
+				pop		bc
+				ld		(hl), 1								; graphic no = INVALID
+				ld		a, l								; следующая запись
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				dec		b
+				jp		nz, pfa_1
+pfa_2:			ld		a, (hl)								; graphic no
+				cp		7									; блок?
+				jp		nz, pfa_3
+				ld		(hl), 131							; искристый спрайт
+pfa_3:			ld		a, l
+				add		a, 32
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				ld		a, l								; конец таблицы объектов?
+				sub		low clear_end
+				ld		a, h
+				sbc		a, high clear_end
+				jp		c, pfa_2
+				pop		hl
+				ld		(z80_ix), hl						; вернуть IX
+				ret
+; End of function prepare_final_animation
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -2493,9 +2570,13 @@ def _sub(src, pattern, repl, name, flags=re.S):
 
 
 def apply(src, attrs_cut=False):
-    """attrs_cut=True — цель vec: атрибутная память ZX уже вырезана (kl_cut_zx_attributes),
-    значит второй набор регистров в печати строк остался без работы и его можно снять.
-    Для цели lockstep атрибуты на месте, и эти переписки НЕЛЬЗЯ применять: логика разойдётся с ZX."""
+    """attrs_cut=True — цель vec. Что под этим флагом и почему только vec:
+      * печать строк: атрибутная память ZX вырезана (kl_cut_zx_attributes), второй набор
+        регистров остался без работы. В цели lockstep атрибуты на месте — там логика разойдётся с ZX;
+      * loc_D653/.copy_loop: в цели lockstep kl_logic_fixes уже переписал этот цикл на счётчик
+        в памяти (квирк оригинала 0xD666), ex af,af' там нет;
+      * START: перестановка чтения затравки за clr_mem законна, потому что 0x5C78 у ЦЕЛИ VEC
+        лежит в коде, а не в очищаемой области (clear_start = 0x7A80)."""
     src = _sub(src, r'(?m)^is_near_to:\n.*?; End of function is_near_to\r?\n', N_IS_NEAR_TO, 'is_near_to')
     src = _sub(src, r'(?m)^chk_plyr_spec_near_arch:\n.*?; End of function chk_plyr_spec_near_arch\r?\n',
                N_CHK_NEAR_ARCH, 'chk_plyr_spec_near_arch')
@@ -2557,6 +2638,27 @@ def apply(src, attrs_cut=False):
         for lbl in ('menu_colours', 'gameover_colours', 'complete_colours'):
             src = _sub(src, r'(?m)^[ \t]*ld[ \t]+de,[ \t]*' + lbl + r'[^\n]*\n[ \t]*exx[^\n]*\n', '',
                        'снятие exx у вызывателя display_text_list (' + lbl + ')')
+        # loc_D653/.copy_loop: счётчик копий жил в AF' (2 x ex af,af' = 42 Б после трансляции).
+        # Стек занят параметрами blit_to_screen (pop bc/hl/de), поэтому счётчик — в ячейку kl_cpcnt.
+        src = _sub(src, r"(?m)^\.copy_loop:[ \t]*ex[ \t]+af,[ \t]*af'[^\n]*\n",
+                   "\t\t\t\t; счётчик копий: blit_to_screen портит A, а стек занят параметрами\n"
+                   ".copy_loop:\t\tld\t\t(kl_cpcnt), a\n", 'loc_D653 .copy_loop вход')
+        src = _sub(src, r"(?m)^[ \t]*ex[ \t]+af,[ \t]*af'[^\n]*\n[ \t]*dec[ \t]+a[^\n]*\n"
+                        r"[ \t]*jr[ \t]+nz,[ \t]*\.copy_loop[^\n]*\n",
+                   "\t\t\t\tld\t\ta, (kl_cpcnt)\n\t\t\t\tdec\t\ta\n\t\t\t\tjr\t\tnz, .copy_loop\n",
+                   'loc_D653 .copy_loop выход')
+        # START: байт-затравка seed_1 бралась ДО clr_mem и пряталась в AF' (2 x ex af,af' = 42 Б).
+        # На Векторе адрес 0x5C78 (на ZX это системная FRAMES) лежит в КОДЕ, а не в очищаемой
+        # области (clear_start = 0x7A80), поэтому читать его можно и ПОСЛЕ clr_mem — байт тот же.
+        src = _sub(src, r"(?m)^[ \t]*ld[ \t]+a,[ \t]*\(0x5C78\)[^\n]*\n[ \t]*ex[ \t]+af,[ \t]*af'[^\n]*\n"
+                        r"[ \t]*call[ \t]+clr_mem[^\n]*\n[ \t]*ex[ \t]+af,[ \t]*af'[^\n]*\n",
+                   "\t\t\t\tcall\tclr_mem\n"
+                   "\t\t\t\tld\t\ta, (0x5C78)\t\t; затравка seed_1: байт кода (на ZX — FRAMES), вне очищаемой области\n",
+                   "START: затравка seed_1 без AF'")
+    src = _sub(src, r'(?m)^set_wipe_and_draw_IY:[^\n]*\n.*?; End of function set_wipe_and_draw_IY\r?\n',
+               N_SET_WD_IY, 'set_wipe_and_draw_IY')
+    src = _sub(src, r'(?m)^prepare_final_animation:[^\n]*\n.*?; End of function prepare_final_animation\r?\n',
+               N_PREP_FINAL, 'prepare_final_animation')
     src = _sub(src, r'(?m)^find_special_objs_here:[^\n]*\n.*?; End of function find_special_objs_here\r?\n',
                N_FIND_SPEC_HERE, 'find_special_objs_here')
     src = _sub(src, r'(?m)^update_special_objs:[^\n]*\n.*?; End of function update_special_objs\r?\n',

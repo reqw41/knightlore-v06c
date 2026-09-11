@@ -2435,6 +2435,12 @@ def main():
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"
+        # Второй набор регистров в цели vec больше не используется ни разу (последние exx ушли
+        # вместе с атрибутами ZX в печати строк) — ячейки обмена мертвы, а scratch до 0x00A0 тесен.
+        for cell in ('z80_bc_alt', 'z80_de_alt', 'z80_hl_alt', 'z80_af_alt'):
+            if len(re.findall(r'\b' + cell + r'\b', src)) == 1:      # только объявление
+                src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+2[^\n]*\n', '', src, count=1)
+                assert n == 1, 'снятие мёртвой ячейки ' + cell
         src, moved, nblk = vec_pack_holes(src, VEC_HOLES, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_vec.r0m", 0, 0x10000', src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)

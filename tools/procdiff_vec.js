@@ -48,6 +48,17 @@ function machine(rom) {
 // --- генератор состояния: массив [имяМетки, смещение, байты] ---
 function rng(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) >>> 24; }
 
+// таблица объектов: 40 записей по 32. graphic_no берём из реальных (0 = пусто, иначе 1..40:
+// дальше по спрайтовой таблице ходит calc_2d_info, и произвольный номер увёл бы её в мусор).
+function objtbl(r) {
+  const t = [];
+  for (let i = 0; i < 40; i++) {
+    t.push(r() < 48 ? 0 : (r() % 40) + 1);          // graphic no
+    for (let k = 1; k < 32; k++) t.push(r());
+    t[i * 32 + 7] &= 0xCF;                          // WIPE|DRAW снимем — их и ставит процедура
+  }
+  return t;
+}
 const GEN = {
   // вход в комнату: таблица спецобъектов (32 записи по 9) и текущий экран игрока
   find_special_objs_here(r) {
@@ -63,7 +74,7 @@ const GEN = {
     for (const j of pick) { sot[j * 9] = (r() % 40) + 1; sot[j * 9 + 8] = scr; }
     const here = []; for (let i = 0; i < 96; i++) here.push(r());
     const ix = []; for (let i = 0; i < 32; i++) ix.push(r()); ix[8] = scr;
-    return { regs: { sp: 0x7DF0 }, set: [["special_objs_tbl", 0, sot], ["special_objs_here", 0, here],
+    return { regs: {}, set: [["special_objs_tbl", 0, sot], ["special_objs_here", 0, here],
                                         ["graphic_objs_tbl", 0, ix]],
              ptr: [["z80_ix", "graphic_objs_tbl", 0]] };
   },
@@ -71,12 +82,22 @@ const GEN = {
   // suppress_border = 1, чтобы не уходить в print_border/update_screen (железо экрана).
   display_menu(r) {
     const buf = []; for (let i = 0; i < 32 * 192; i++) buf.push(r());
-    return { regs: { sp: 0x7DF0 }, set: [["vidbufpic", 0, buf], ["suppress_border", 0, [1]]] };
+    return { regs: {}, set: [["vidbufpic", 0, buf], ["suppress_border", 0, [1]]] };
   },
   // HUD: display_day -> print_text (пропуск байта атрибута, шрифт day_font)
   display_day(r) {
     const buf = []; for (let i = 0; i < 32 * 192; i++) buf.push(r());
-    return { regs: { sp: 0x7DF0 }, set: [["vidbufpic", 0, buf], ["curr_room_attrib", 0, [r()]]] };
+    return { regs: {}, set: [["vidbufpic", 0, buf], ["curr_room_attrib", 0, [r()]]] };
+  },
+  // WIPE|DRAW объекту в IY (проверяется заодно сохранность IX и IY)
+  set_wipe_and_draw_IY(r) {
+    return { regs: {}, set: [["graphic_objs_tbl", 0, objtbl(r)]],
+             ptr: [["z80_ix", "graphic_objs_tbl", 32 * (r() % 40)], ["z80_iy", "graphic_objs_tbl", 32 * (r() % 40)]] };
+  },
+  // финальная анимация: два прохода по таблице объектов (пометить 11 объектов, блоки -> искры)
+  prepare_final_animation(r) {
+    return { regs: {}, set: [["graphic_objs_tbl", 0, objtbl(r)]],
+             ptr: [["z80_ix", "graphic_objs_tbl", 32 * (r() % 40)], ["z80_iy", "graphic_objs_tbl", 0]] };
   },
   // выход из комнаты: перенести координаты из special_objs_here обратно в special_objs_tbl
   update_special_objs(r) {
@@ -88,7 +109,7 @@ const GEN = {
     }
     const sot = []; for (let i = 0; i < 288; i++) sot.push(r());
     const slot = [r() % 32, r() % 32, r() < 32 ? -1 : r() % 32];   // -1 = нулевой указатель (баг оригинала)
-    return { regs: { sp: 0x7DF0 }, set: [["special_objs_here", 0, here], ["special_objs_tbl", 0, sot]],
+    return { regs: {}, set: [["special_objs_here", 0, here], ["special_objs_tbl", 0, sot]],
              ptrEntry: slot };
   },
 };
@@ -100,10 +121,16 @@ const DEAD = {
   // вызыватели (menu_loop, game_over, display_status_info) сразу перезадают всё
   display_menu: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
   display_day: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
+  // единственный вызыватель (loc_C0DD+..., drop_object) сразу делает ld hl, object_carried_2
+  set_wipe_and_draw_IY: ["a", "b", "c", "d", "e", "h", "l", "f"],
+  // chk_all_objs_in_cauldron сразу делает ret; IY процедура и в оригинале не восстанавливает
+  prepare_final_animation: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
 };
 const CMP = {
   display_menu: [["vidbufpic", 0, 0]],
   display_day: [["vidbufpic", 0, 0]],
+  set_wipe_and_draw_IY: [["graphic_objs_tbl", 0, 40 * 32]],
+  prepare_final_animation: [["graphic_objs_tbl", 0, 40 * 32], ["special_objs_here", 0, 96]],
   find_special_objs_here: [["special_objs_here", 0, 96], ["special_objs_tbl", 0, 288]],
   update_special_objs: [["special_objs_tbl", 0, 288], ["special_objs_here", 0, 96]],
 };
@@ -125,7 +152,10 @@ function run(m, L, st) {
     const s = st.ptrEntry[i], p = s < 0 ? 0 : L.special_objs_tbl + s * 9;
     m.poke(L.special_objs_here + i * 32 + 16, p & 0xff); m.poke(L.special_objs_here + i * 32 + 17, p >> 8);
   }
-  cpu.sp = st.regs.sp; m.poke(cpu.sp - 1, SENT >> 8); m.poke(cpu.sp - 2, SENT & 0xff); cpu.sp -= 2;
+  // стек — туда же, куда его ставит сама игра (ld sp, clear_start): он растёт ВНИЗ от переменных.
+  // Любой другой адрес рискует лечь в сравниваемый регион: с SP = 0x7DF0 стек вызовов затирал
+  // объекты 23-24 таблицы (0x7AE8..0x7FE8) и гейт показывал ложное расхождение.
+  cpu.sp = st.regs.sp || L.clear_start; m.poke(cpu.sp - 1, SENT >> 8); m.poke(cpu.sp - 2, SENT & 0xff); cpu.sp -= 2;
   cpu.pc = L[LABEL]; cpu.iff = false;
   m.trace = []; m.on = true;
   let n = 0; while (cpu.pc !== SENT && n < 3000000) { cpu.instruction(); n++; }
@@ -165,8 +195,10 @@ for (let i = 0; i < N; i++) {
   for (const k of ["a", "b", "c", "d", "e", "h", "l", "f", "ixo", "iyn"])
     if (!dead.has(k) && a.regs[k] !== b.regs[k]) d.push(`${k}: ref=${a.regs[k]} new=${b.regs[k]}`);
   for (const k of Object.keys(a.mem)) if (a.mem[k] !== b.mem[k]) {
-    let j = 0; while (a.mem[k][j] === b.mem[k][j]) j++;
-    d.push(`${k}: расходится с байта ${j >> 1} (ref=${a.mem[k].substr(j & ~1, 2)} new=${b.mem[k].substr(j & ~1, 2)})`);
+    const bad = []; for (let j = 0; j * 2 < a.mem[k].length; j++)
+      if (a.mem[k].substr(j * 2, 2) !== b.mem[k].substr(j * 2, 2) && bad.length < 12)
+        bad.push(`${j}(об.${j >> 5}+${j & 31}) ref=${a.mem[k].substr(j * 2, 2)} new=${b.mem[k].substr(j * 2, 2)}`);
+    d.push(`${k}: ` + bad.join(", "));
   }
   if (a.trace !== b.trace) d.push(`нулевая страница: ref=[${a.trace}] new=[${b.trace}]`);
   if (d.length) { bad++; if (bad <= 3) console.log(`тест ${i}: ` + d.join("; ")); }
