@@ -12,7 +12,11 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 REF=${1:-HEAD}; N=${2:-300}; ROOMS=${3:-39,163,3,133}
-ALIVE=$(cd ../../knightlore-research/zx-stand && pwd)/inputs_alive.txt
+# репозиторий бывает и корнем (~/projects/knightlore-v06c), и рабочим деревом-подпапкой
+for d in ../knightlore-research ../../knightlore-research; do
+  [ -d "$d/zx-stand" ] && ALIVE=$(cd "$d/zx-stand" && pwd)/inputs_alive.txt && break
+done
+[ -n "$ALIVE" ] || { echo "не найден knightlore-research/zx-stand"; exit 1; }
 IFS=, read -r -a ROOMA <<< "$ROOMS"
 SCEN=(rest alive); for r in "${ROOMA[@]}"; do SCEN+=("r$r"); done
 run() { # $1 = метка, cwd = дерево сборки

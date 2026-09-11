@@ -2370,7 +2370,10 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
             continue
         if not _H_TERM.match(b['last']):
             continue
-        if pv is None or pv['size'] == 0 or not (pv['ok'] and _H_TERM.match(pv['last'])):
+        # в блок проваливаются сверху: двигать можно, оставив на его месте jp <метка> (3 Б).
+        # Чистый выигрыш = size - 3, поэтому мелочь не трогаем.
+        b['stub'] = pv is None or pv['size'] == 0 or not (pv['ok'] and _H_TERM.match(pv['last']))
+        if b['stub'] and b['size'] < 16:
             continue
         cand.append(b)
     cand.sort(key=lambda b: (-b['size'], b['name']))
@@ -2384,14 +2387,16 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
                 placed[j].append(b)
                 free[j][0] += b['size']
                 free[j][1] -= b['size']
-                moved += b['size']
+                moved += b['size'] - (3 if b.get('stub') else 0)
                 break
     if not moved:
         return src, 0, 0
-    drop = set()
+    drop, stubs = set(), {}
     for lst in placed:
         for b in lst:
             drop.update(range(b['i0'], b['iend']))
+            if b.get('stub'):                      # оставить переход на уехавший блок
+                stubs[b['i0']] = '\t\t\t\tjp\t\t%s\t\t\t; блок уехал в дыру' % b['name']
     out = ['\n; ==== дыры вне картинки (строки 224..255/0..31 столбцов): мелкие процедуры нижнего региона ====']
     for j, (a, sz) in enumerate(holes):
         if not placed[j]:
@@ -2400,7 +2405,7 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
         for b in placed[j]:
             out += [lines[i] for i in range(b['i0'], b['iend'])]
         out.append('\t\t\t\tASSERT $ <= %#06x\t\t; дыра %#06x (%d Б)' % (a + sz, a, sz))
-    kept = [l for i, l in enumerate(lines) if i not in drop]
+    kept = [stubs[i] if i in stubs else l for i, l in enumerate(lines) if i not in drop or i in stubs]
     ei = next(i for i, l in enumerate(kept) if 'ASSERT $ <=' in l and 'нижний регион' in l)
     return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, sum(len(x) for x in placed)
 
