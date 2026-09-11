@@ -48,10 +48,13 @@ const rev=new Uint8Array(256); for(let i=0;i<256;i++)rev[i]=rd(REV+i);
  if(!ok)throw new Error("reverse_bits_table в памяти не похожа на бит-реверс");}
 
 // --- список спрайтов: адреса из sprite_tbl, пока запись осмысленна ---
+// ⚠️ по указателям из sprite_tbl брать НЕЛЬЗЯ: в таблице есть мусорные записи (0x7FF, 0xFBF,
+// 0xFFF, 0x1FFF, 0x2FFF), игра их не использует, а гейт разворачивал по ним код «на месте» и
+// портил память — падение зависело от того, что случайно лежало по этим адресам после сдвига кода.
 const spr=[];
-for(let i=0;i<256;i++){const a=rd(STBL+2*i)|(rd(STBL+2*i+1)<<8);
-  if(a<0x0300||a>0xF000)continue; const w=rd(a)&0x0F,h=rd(a+1);
+for(const [n,a] of Object.entries(L)) if(/^spr_\d+$/.test(n)){const w=rd(a)&0x0F,h=rd(a+1);
   if(w===0||h===0||h>64)continue; if(!spr.includes(a))spr.push(a);}
+spr.sort((x,y)=>x-y);
 if(spr.length<20)throw new Error("подозрительно мало спрайтов: "+spr.length);
 
 // --- модель ---
