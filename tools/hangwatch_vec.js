@@ -44,7 +44,11 @@ if(process.env.KLGAG){ const s3=L.seed_3&0xff, s3h=(L.seed_3>>8)&0xff;
   if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
   ow(at+3,0x00,false); }
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
-const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
+// Цель vec: игрока читает kl_vec_input прямо из vec_kbmat, раскладка 1 (kl_in_t1) — O/P поворот,
+// Q вперёд, A прыжок, цифры взять. Имена клавиш в сценариях остаются ZX-логическими
+// (z/x поворот, a вперёд, q прыжок) — здесь они переводятся в клавиши Вектора.
+// Ряды Вектора: 2 цифры 0..7, 4 @ABCDEFG, 5 HIJKLMNO, 6 PQRSTUVW, 7 XYZ[\]^ПРБ.
+const VKEYS={z:[5,0x80],x:[6,0x01],a:[6,0x02],q:[4,0x02],"0":[2,0x01],space:[7,0x80]};
 function key(k,down){
   if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
@@ -55,15 +59,25 @@ let rndState=(+process.env.KLSEED||12345)>>>0;
 function rnd(){rndState=(rndState*1103515245+12345)>>>0;return rndState>>>16;}
 const WALK=!!process.env.KLWALK;
 let walkHeld=null, walkUntil=0;
+// ВК (пауза) и отпускания планируются ПО КАДРАМ: пока игра на паузе, итерации не идут,
+// и расписание по итерациям само себя не расклинит.
+const frameAct=new Map();
+function atFrame(f,fn){const a=frameAct.get(f)||[];a.push(fn);frameAct.set(f,a);}
+function vk(down){const [r,b]=[0,0x04];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;}
 function walkStep(it){
   if(!WALK)return;
   if(it<walkUntil)return;
   if(walkHeld){key(walkHeld,false);walkHeld=null;walkUntil=it+2;return;}
   const r=rnd()%100;
-  if(r<60){walkHeld="a";walkUntil=it+30+(rnd()%60);}          // идти вперёд
+  if(r<64){walkHeld="a";walkUntil=it+60+(rnd()%120);}         // идти вперёд (долго: так и выходят из комнаты)
   else if(r<78){walkHeld="z";walkUntil=it+2+(rnd()%3);}       // поворот влево
   else if(r<92){walkHeld="x";walkUntil=it+2+(rnd()%3);}       // поворот вправо
-  else {walkHeld="q";walkUntil=it+2;}                          // прыжок
+  else if(r<97){walkHeld="q";walkUntil=it+2;}                 // прыжок
+  else if(process.env.KLPAUSE){                               // ВК: пауза и снятие паузы (по кадрам)
+    vk(true);atFrame(frames+4,()=>vk(false));
+    atFrame(frames+40,()=>vk(true));atFrame(frames+46,()=>vk(false));
+    walkUntil=it+4;return;}
+  else {walkHeld="0";walkUntil=it+3;}                          // взять/бросить
   key(walkHeld,true);
 }
 
@@ -109,7 +123,7 @@ function dumpState(tag){
   if(L.msx_sfx!==undefined)console.log("msx_sfx: "+[...Array(12)].map((_,i)=>rdb(L.msx_sfx+i).toString(16).padStart(2,"0")).join(" "));
   // PC-гистограмма за следующие 300000 шагов
   const h={};let hs=0;
-  for(let i=0;i<300000;i++){if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();}
+  for(let i=0;i<300000;i++){if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();const fa_=frameAct.get(frames);if(fa_){for(const f_ of fa_)f_();frameAct.delete(frames);}}
     const pc=cpu.pc;h[pc]=(h[pc]||0)+1;hs++;const c=(cpu.instruction(),cpu.vcycles);TOT+=c;frc+=c;
     tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();}
   const top=Object.entries(h).sort((a,b)=>b[1]-a[1]).slice(0,15);
@@ -120,7 +134,7 @@ function dumpState(tag){
 const MENU=L.start_menu, LOSE=L.lose_life;
 let deaths=0, menuHit=false, lastLives=rdb(L.lives);
 while(iter-startIter<N&&steps<3e9){
-  if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();}
+  if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();const fa_=frameAct.get(frames);if(fa_){for(const f_ of fa_)f_();frameAct.delete(frames);}}
   const pc=cpu.pc;
   if(pc===LOSE){deaths++;if(process.env.KLTRACE)console.log(`  итер ${iter}: lose_life, lives=${rdb(L.lives)}`);}
   if(pc===MENU){menuHit=true;console.log(`  итер ${iter}: ВОЗВРАТ В МЕНЮ (game over), смертей ${deaths}`);break;}
