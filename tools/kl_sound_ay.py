@@ -1094,18 +1094,6 @@ audio_B454:		; ZX: покадровая проверка «блоки подни
 				ld		c, 0
 				jp		msx_sfx_start
 
-audio_B489:		; ZX: решётка ударилась о пол — 16 итераций по 2 периода, задержка = байт ПЗУ ZX
-				; по СЛУЧАЙНОМУ адресу (seed_2 AND 31):(seed_3), маска 0x7F (>= 1034 Гц, 15.7 мс).
-				; -> эффект 8 по той же kl_tbchat, но со случайным смещением (seed_3) и периодом
-				; пополам — маска 0x7F у ZX ровно вдвое режет задержку, то есть поднимает октаву.
-				ld		a, (seed_3)
-				ld		e, a
-				ld		d, 1
-				ld		a, 8
-				ld		b, 16
-				ld		c, 1
-				jp		msx_sfx_start
-
 toggle_audio_hw_x16:	; ZX: подтверждение подбора предмета и «получена жизнь» — 16 периодов с
 				; задержкой 0x80 = ровный тон 1026 Гц, 15.6 мс. -> готовый эффект 7, слот 2 / канал C,
 				; период AY 108 = 1027 Гц, 16 тиков ~ 20 мс.
@@ -1260,6 +1248,25 @@ def apply(src):
     cut(r'play_audio_until_keypress:\n.*?; End of function play_audio_until_keypress\r?\n',
         'play_audio_until_keypress', TUNE_PLAYERS)
     cut(r'play_audio:\n.*?; End of function play_audio\r?\n', 'play_audio', PLAY_AUDIO)
+
+    # 4а. РЕШЁТКА. На ZX звук удара о пол стоит в upd_9 сразу после «вышла за границу»; на MSX
+    #     эта точка ПУСТА (0x5B04 -> сразу stop_portcullis), а звук перенесён в обработчик УЖЕ
+    #     НЕПОДВИЖНОЙ решётки upd_8 (MSX 0x5A75): он видит, что флаг «вне границ» (ix+12).2 ещё
+    #     стоит с прошлого прохода, гасит биты 0..2 и заводит эффект 1 (шум, слот 0, 31 тик,
+    #     дескриптор MSX 0x43F3 = наш audio_msx_noise). Задержка — ровно один проход диспетчера.
+    cut(r'\t+call    audio_B489\r?\n', 'решётка: снять звук из upd_9')
+    old = "upd_8:\n\t\t\t\tcall    adj_m6_m12\n"
+    assert src.count(old) == 1, 'kl_sound_ay: upd_8'
+    src = src.replace(old, old +
+                      "\t\t\t\tld      a, (ix+12)                               ; MSX 0x5A78: решётка ударилась о пол\n"
+                      "\t\t\t\tand     4                                       ;   в прошлом проходе диспетчера?\n"
+                      "\t\t\t\tjr      Z, upd_8_no_thud                        ; нет, дальше как обычно\n"
+                      "\t\t\t\tld      a, (ix+12)\n"
+                      "\t\t\t\tand     0xF8                                    ; MSX 0x5A7F: снять флаги «вне границ»\n"
+                      "\t\t\t\tld      (ix+12), a\n"
+                      "\t\t\t\tcall    audio_msx_noise                         ; MSX 0x5A84 (дескриптор 0x43F3)\n"
+                      "\nupd_8_no_thud:\n", 1)
+    rep['решётка: звук в upd_8 (как MSX)'] = 0
 
     # 5. три вызова, которые на MSX ведут не туда, куда общая процедура ZX: разводим адресно
     for old, new, name in (
