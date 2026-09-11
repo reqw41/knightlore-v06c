@@ -1066,14 +1066,7 @@ KL_SETMODE_VEC = """kl_setmode:		; номер режима (old_input_method 0..
 				; именно поэтому: пришлось бы красить индексы с p0=0, и весь этот код вылез бы синей рябью.
 				; Экран Вектора столбцовый: адрес = 0x8000 + столбец*256 + (Y + 32); глиф print_8x8 идёт ВНИЗ
 				; по младшему байту, поэтому нижняя строка знакоместа = Y + 25.
-				ld      hl, vidbuf + 6*256 + 112				; чистый текст трёх строк режимов из буфера
-				ld      de, 0x8000 + 6*256 + 112				; в плоскость 0: снимает прежнюю полосу.
-				ld      bc, 28*256 + 21							; Столбцы 6..26, строки 112..167; два блита по
-				call    blit_to_screen							; 28 строк — быстрый путь blit_to_screen до 32
-				ld      hl, vidbuf + 6*256 + 140
-				ld      de, 0x8000 + 6*256 + 140
-				ld      bc, 28*256 + 21
-				call    blit_to_screen
+				call    kl_unbar								; снять прежнюю полосу
 				ld      a, (old_input_method)
 				ld      e, a
 				add     a, a
@@ -1099,9 +1092,25 @@ ksm_row:		ld      (hl), a
 				inc     h
 				dec     b
 				jp      nz, ksm_col
-kl_menu_exit:	; полосу за собой убирать не надо: в игру идут через clr_bitmap_memory + update_screen,
-				; а палитру перебивает vec_set_pal по цвету комнаты
-				ret
+				ret												; ПРОВАЛИТЬСЯ В kl_menu_exit НЕЛЬЗЯ: он снимает полосу
+kl_menu_exit:	; Картинка меню висит на экране, пока не отрисована комната (несколько секунд:
+				; мелодия старта, тасовка предметов, первый рендер), а буфер к тому времени уже
+				; очищен. Поэтому уходим из меню начисто: полосу снять, палитру вернуть белую —
+				; иначе всё это время висели бы белый прямоугольник вместо строки и синий текст
+				; (в палитре меню p1=0 — синий, а буфер пуст).
+				call    kl_unbar
+				ld      a, 7
+				jp      vec_set_pal
+kl_unbar:		; чистый текст трёх строк режимов из буфера в плоскость 0: столбцы 6..26,
+				; строки 112..167. Два блита по 28 строк — быстрый путь blit_to_screen до 32.
+				ld      hl, vidbuf + 6*256 + 112
+				ld      de, 0x8000 + 6*256 + 112
+				ld      bc, 28*256 + 21
+				call    blit_to_screen
+				ld      hl, vidbuf + 6*256 + 140
+				ld      de, 0x8000 + 6*256 + 140
+				ld      bc, 28*256 + 21
+				jp      blit_to_screen
 kl_modetab:		; режим: user_input_method, нижняя строка полосы, ширина в знакоместах
 				DB      0, 160, 10								; 1 KEYBOARD            (Y = 135, 10 знаков)
 				DB      4, 136, 8								; 2 CURSOR              (Y = 111,  8 знаков)
@@ -1299,7 +1308,6 @@ vb_clr:			ld		(hl), 0
 				ld		a, b
 				or		c
 				jp		nz, vb_clr
-				call	vec_hud_mask			; маска HUD: зоны обнуляются силуэтом пустого экрана
 				jp		START
 """
 VEC_TAIL = """
@@ -1433,17 +1441,27 @@ vec_set_pal:	and		7
 				ret
 vec_zxcol:		DB		0xFF, 0xC0, 0x07, 0xC7, 0x38, 0xF8, 0x3F, 0xFF	; ZX 0..7: (чёрный->белый) синий красный пурпурный зелёный голубой жёлтый белый
 
-; vec_hud_mask: строит маску HUD в плоскости 2 по таблице зон. Маска СТАТИЧНА: её кладут один раз
-; в vec_boot (после очистки плоскости 0) и больше не трогают — ни перерисовка цифр, ни ход знака
-; солнца/луны её не меняют. Так цвет элемента не может отстать от картинки: любой пиксель, попавший
+; vec_hud_mask: строит маску HUD в плоскости 2 по таблице зон. Внутри ИГРОВОГО экрана маска
+; СТАТИЧНА: её кладут один раз на комнату (блок перерисовки панели, render_status_info != 0) и
+; больше не трогают — ни перерисовка цифр, ни ход знака солнца/луны её не меняют. Так цвет элемента не может отстать от картинки: любой пиксель, попавший
 ; внутрь прямоугольника зоны, красится пером HUD в тот же кадр, кто бы его ни нарисовал.
 ; Запись зоны — 5 байт: страница столбца в плоскости 2 (0xC0 + столбец), сколько столбцов, первая
 ; строка, сколько строк, ЗНАЧЕНИЕ (0xFF — заливка; 0 — силуэт: байт картинки из плоскости 0, оставлен
 ; на случай зоны, которую нельзя обвести прямоугольником). Конец таблицы — нулевая страница.
 ; Портит A, BC, DE, HL.
+vec_hud_off:	; ПОГАСИТЬ зоны маски. Экраны без HUD (меню, game over, финал) рисуют в те же
+				; прямоугольники рамку и текст, а статичная маска красила их пером HUD — на рамке
+				; game over выходили белые куски (замер: 320 точек, все внутри vec_hudcols).
+				IF VEC_HUD_WHITE == 0
+				ret
+				ENDIF
+				xor		a
+				jp		vhm_sel
 vec_hud_mask:	IF VEC_HUD_WHITE == 0
 				ret
 				ENDIF
+				ld		a, 0xFF
+vhm_sel:		ld		(vhm_put+1), a		; патч: 0xFF — класть зону, 0x00 — гасить
 				ld		hl, vec_hudcols
 vhm_run:		ld		a, (hl)
 				or		a
@@ -1473,7 +1491,8 @@ vhm_r:			ld		a, (vec_tmp+1)
 				or		a
 				jp		nz, vhm_put
 				ld		a, (hl)
-vhm_put:		ld		(de), a
+vhm_put:		and		0xFF				; патч из vec_hud_mask / vec_hud_off
+				ld		(de), a
 				inc		l
 				inc		e
 				dec		c
@@ -2623,8 +2642,24 @@ hp_rel2:		ld      a, (vec_kbmat+0)
 ; End of function handle_pause
 """, 'pause')
     # цвет комнаты как на ZX: после flag_room_visited (конец build_screen_objects) — палитра по атрибуту; меню — белое
-    src, n_rp = re.subn(r'(\t+call    flag_room_visited\r?\n\t+ret\r?\n)', r'\t\t\t\tcall    flag_room_visited\n\t\t\t\tld      a, (curr_room_attrib)\n\t\t\t\tjp      vec_set_pal\n', src, count=1)
+    # ПАЛИТРА КОМНАТЫ — вместе с картинкой, а не раньше неё. Прежде её ставили в хвосте
+    # build_screen_objects (после flag_room_visited): к тому моменту на экране ещё СТАРАЯ комната
+    # (а при старте — меню), и новый цвет успевал мигнуть на чужой картинке. Теперь — сразу после
+    # update_screen в блоке перерисовки панели: этот блок идёт ровно один раз на комнату
+    # (render_status_info != 0), и его update_screen и есть первый показ новой комнаты.
+    # Там же кладём маску HUD: на экранах без панели её гасит print_border (см. vec_hud_off).
+    src, n_hm = re.subn(r'(\t+xor     a\s+; reset flag\r?\n\t+ld      \(render_status_info\), a\r?\n)',
+        r'\g<1>\t\t\t\tcall    vec_hud_mask                            ; зоны белого HUD: панель снова на экране\n', src, count=1)
+    assert n_hm == 1, "hud mask hook"
+    src, n_rp = re.subn(r'\t+call    update_screen\s+; copy to display\r?\n',
+        '\t\t\t\tcall    update_screen                           ; copy to display\n'
+        '\t\t\t\tld      a, (curr_room_attrib)                   ; палитра комнаты — вместе с картинкой\n'
+        '\t\t\t\tcall    vec_set_pal\n', src, count=1)
     assert n_rp == 1, "room palette hook"
+    # print_border рисуют только полноэкранные текстовые экраны (меню, game over, финал) —
+    # на них панели нет, и зоны маски надо погасить, иначе рамка и текст красятся пером HUD
+    src, n_ho = re.subn(r'(print_border:\r?\n)', r'\g<1>\t\t\t\tcall    vec_hud_off\n', src, count=1)
+    assert n_ho == 1, "hud off hook"
     src, n_mp = re.subn(r'(do_menu_selection:\r?\n)',
         '\\g<1>\t\t\t\tld      a, 7\n\t\t\t\tcall    vec_set_pal\n'
         '\t\t\t\tld      a, 0xC0                                 ; ФОН ПОЛОСЫ ПОДСВЕТКИ — синий.\n'

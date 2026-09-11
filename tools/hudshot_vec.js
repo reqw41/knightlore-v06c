@@ -4,6 +4,7 @@
 // Ключи: KLROOM=<n> комната, KLGAG=1 погасить seed_3 (детерминизм), KLSCALE=<n> масштаб (2),
 //        KLCROP=y0,y1 вырезать экранные строки [y0..y1] (0 = верх кадра), KLPLANE=0..3 показать одну плоскость ч/б,
 //        KLMENU=1|2|3 нажать клавишу выбора режима в меню (вместе с KLFRAMES),
+//        KLJP=метка[@кадров] после прогона перейти на метку (снимок game over и т.п.),
 //        KLGRID=1 сетка по знакоместам 8x8 с подписями столбцов/строк ПАМЯТИ Вектора.
 // Экран: адрес байта = 0x8000 + (столбец<<8) + строка_памяти; строка памяти 255 = ВЕРХ кадра (скролл 0xFF).
 // Индекс палитры = p0<<3|p1<<2|p2<<1|p3 (p0 = 0x8000 ... p3 = 0xE000), байт палитры %BBGGGRRR.
@@ -80,6 +81,16 @@ function doScan(){scan.n++;for(let col=scan.c0;col<=scan.c1;col++)for(let r=scan
 while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;if(scan)doScan();v06c.irq=true;v06c.checkInterrupt();}
   const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();}
+
+// KLJP=метка[@кадров]: после N итераций перейти на метку и покрутить кадры — снимок экранов,
+// до которых игрой не доехать (game over, финал). Стек как у игры: SP = clear_start.
+if(process.env.KLJP){const m=process.env.KLJP.split("@"); const lbl=m[0], nf=+(m[1]||300);
+  if(L[lbl]===undefined)throw new Error("KLJP: нет метки "+lbl);
+  cpu.pc=L[lbl]; cpu.sp=L.clear_start; let f2=0;
+  while(f2<nf&&steps<4e8){if(frc>=59904){frc-=59904;f2++;v06c.irq=true;v06c.checkInterrupt();}
+    const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
+    if(cpu.last_opcode===0xd3)io.commit();}
+  console.log(`KLJP: ${lbl}, ${nf} кадров`);}
 
 if(scan){const lines=[];
   for(let col=scan.c0;col<=scan.c1;col++)for(let r=scan.r0;r<=scan.r1;r++){
