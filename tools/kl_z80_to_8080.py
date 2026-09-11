@@ -1189,7 +1189,9 @@ VEC_HEADER = """
 vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active-high (ряд 0..7)
 vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
-vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
+vec_zxrows:		DB		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF	; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap;
+									; 0xFF — согласовано с vec_kbmat = 0 и vec_kbchg = 0 (ранний выход vec_zxbuild)
+vec_kbchg:		DS		1			; != 0, если vec_scan увидел отличие матрицы от прошлого кадра
 vec_pal:		DS		16			; палитра (индекс = p0<<3|p1<<2|p2<<1|p3), строит vec_set_pal
 pace_el:		DS		1			; ограничитель темпа: кадров с начала итерации (ISR инкрементит, насыщение 255)
 pace_acc:		DS		1			; ограничитель темпа: аккумулятор Брезенхэма (дробная часть периода, 1/256 кадра)
@@ -1433,59 +1435,109 @@ vec_hudcols:		DB		0xC2, 2, 64, 16, 0xFF	; фигурка жизней: стол�
 					DB		0xDB, 1, 39, 17, 0xFF	; столбец 27, строки 39..55
 					DB		0
 
-vec_scan:		ld		a, 0x8A				; порт B на вход
+vec_scan:		; ряды матрицы Вектора -> vec_kbmat (active-high) + vec_kbchg = 0, если матрица та же.
+				; Цикл развёрнут: в нём на ряд уходило 70 тактов (счётчик, поворот маски ряда),
+				; развёртка с непосредственной маской — 64 такта И заодно считает отличие от
+				; прошлого кадра. Ряд 1 не опрашивается: в vec_kbzx все восемь его записей 0xFF
+				; (ни одна клавиша ряда 1 не отображена на ZX), а раньше его биты впустую гоняли
+				; цепочку zb_bit и гасили биты 5..7 ряда ZX 7, которые read_port всё равно срезает.
+				; ПРИМЕСЬ СТРЕЛОК УБРАНА ОТСЮДА в vec_zxbuild: раньше vec_scan дописывал в
+				; vec_kbmat+4/+6/+7 зеркало стрелок, и сравнение с прошлым кадром ловило бы
+				; собственную примесь как «изменение». Портит A, BC, HL, флаги.
+				ld		a, 0x8A				; порт B на вход
 				out		(0x00), a
 				ld		hl, vec_kbmat
-				ld		c, 0xFE				; бит i = 0 -> ряд i
-				ld		b, 8
-vs_l:			ld		a, c
+				ld		b, 0				; накопитель отличий
+vs_l:			ld		a, 0xFE				; ряд 0
 				out		(0x03), a
 				in		a, (0x02)
 				cpl
-				ld		(hl), a
-				inc		hl
-				ld		a, c
-				rlca
 				ld		c, a
-				dec		b
-				jp		nz, vs_l
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				inc		hl					; ряд 1 Вектора не отображён ни на одну клавишу ZX
+										; (vec_kbzx 8..15 = 0xFF) — не опрашиваем его вовсе
+				ld		a, 0xFB				; ряд 2
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xF7				; ряд 3
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xEF				; ряд 4
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xDF				; ряд 5
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xBF				; ряд 6
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0x7F				; ряд 7
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
 				ld		a, 0x88
 				out		(0x00), a
+				ld		a, b
+				ld		(vec_kbchg), a
 				ld		a, 0xFF
 				out		(0x03), a			; вернуть скролл
 				xor		a
 				out		(0x02), a			; вернуть бордюр/режим
-				; стрелки (ряд 0: DN=7 RT=6 UP=5 LT=4) -> Z / X / A / Q
-				ld		a, (vec_kbmat+0)
-				ld		b, a
-				and		0x10				; LT -> Z (ряд 7 бит 2)
-				jp		z, vs_1
-				ld		a, (vec_kbmat+7)
-				or		0x04
-				ld		(vec_kbmat+7), a
-vs_1:			ld		a, b
-				and		0x40				; RT -> X (ряд 7 бит 0)
-				jp		z, vs_2
-				ld		a, (vec_kbmat+7)
-				or		0x01
-				ld		(vec_kbmat+7), a
-vs_2:			ld		a, b
-				and		0x20				; UP -> A (ряд 4 бит 1)
-				jp		z, vs_3
-				ld		a, (vec_kbmat+4)
-				or		0x02
-				ld		(vec_kbmat+4), a
-vs_3:			ld		a, b
-				and		0x80				; DN -> Q (ряд 6 бит 1)
-				ret		z
-				ld		a, (vec_kbmat+6)
-				or		0x02
-				ld		(vec_kbmat+6), a
 				ret
 
 ; vec_zxbuild: vec_kbmat (active-high) -> vec_zxrows: 8 байт рядов ZX, бит i = 0 если клавиша i ряда нажата.
-; Раз в кадр из ISR (~1.4К тактов); read_port потом только AND'ит готовые байты.
-vec_zxbuild:	ld		hl, vec_zxrows
+; Раз в кадр из ISR; read_port потом только AND'ит готовые байты. Если матрица не изменилась с прошлого
+; кадра (vec_kbchg = 0) — ряды ZX уже верны, выходим сразу: полный обход стоит ~900 тактов, выход 22.
+; Начальное состояние согласовано статически: vec_kbmat = 0 (DS), vec_zxrows = 0xFF (DB), vec_kbchg = 0.
+vec_zxbuild:	ld		a, (vec_kbchg)
+				or		a
+				ret		z
+				ld		hl, vec_zxrows
 				ld		a, 0xFF
 				ld		b, 8
 zb_clr:			ld		(hl), a
@@ -1533,14 +1585,42 @@ zb_skip:		inc		de
 				ld		a, c
 				or		a
 				jp		nz, zb_bit			; остались нажатые биты
-				ld		a, e				; добрать до конца 8 записей ряда (таблица ALIGN 8)
-				or		7
-				ld		e, a
-				inc		de				; 16-битный inc: перенос в D не теряется
+				dec		de					; добрать до конца 8 записей ряда (таблица ALIGN 8).
+				ld		a, e				; DE = база+k, k = 1..8 (k-1 = номер старшего нажатого бита).
+				or		7					; ДЕКРЕМЕНТ ОБЯЗАТЕЛЕН: без него при k = 8 (нажат бит 7 ряда)
+				ld		e, a				; «or 7 : inc de» проскакивало целую восьмёрку, и ВСЕ следующие
+				inc		de					; ряды читались из чужих записей, а ряд 7 — вообще за таблицей.
+									; Ловилось на стрелке ВНИЗ (ряд 0 бит 7) и на клавишах G, O, W, '7'.
+									; 16-битный inc: перенос в D не теряется.
 zb_next:		inc		hl
 				dec		b
 				jp		nz, zb_row
+				; стрелки ряда 0 Вектора -> Z / X / A / Q прямо в рядах ZX (раньше их подмешивал
+				; vec_scan в vec_kbmat; см. комментарий там). Таблица: маска стрелки в ряду 0,
+				; младший байт адреса ряда ZX, маска гашения бита клавиши.
+				ld		a, (vec_kbmat+0)
+				ld		c, a
+				ld		de, vec_arrzx
+				ld		b, 4
+zb_ar:			ld		a, (de)
+				and		c
+				inc		de
+				ld		a, (de)				; младший байт адреса ряда ZX (LDAX/INX флаги не трогают)
+				inc		de
+				jp		z, zb_arn
+				ld		l, a
+				ld		h, high vec_zxrows
+				ld		a, (de)
+				and		(hl)
+				ld		(hl), a
+zb_arn:			inc		de
+				dec		b
+				jp		nz, zb_ar
 				ret
+vec_arrzx:		DB		0x10, low (vec_zxrows+0), 0xFD	; LT -> Z  (ряд ZX 0, бит 1)
+				DB		0x40, low (vec_zxrows+0), 0xFB	; RT -> X  (ряд ZX 0, бит 2)
+				DB		0x20, low (vec_zxrows+1), 0xFE	; UP -> A  (ряд ZX 1, бит 0)
+				DB		0x80, low (vec_zxrows+2), 0xFE	; DN -> Q  (ряд ZX 2, бит 0)
 __VEC_KBZX__
 ; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
 ; ZX ряды: 0 SHIFT Z X C V | 1 A S D F G | 2 Q W E R T | 3 1 2 3 4 5 | 4 0 9 8 7 6 | 5 P O I U Y | 6 ENTER L K J H | 7 SPACE SYM M N B
