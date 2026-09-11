@@ -75,10 +75,15 @@ memory.write=function(a,w,s){a&=0xffff;
 for(let f=0;f<60;f++)v06c.oneInterrupt(true);
 // KLFRAMES=n: снимок через n кадров от сброса, не дожидаясь комнаты (меню, заставка)
 if(process.env.KLFRAMES){const N2=+process.env.KLFRAMES;
-  // KLMENU=1|2|3: нажать клавишу выбора режима в меню на 8 кадров и отпустить (снимок подсветки)
-  const mk=process.env.KLMENU, at=N2-30;
-  for(let f=60;f<N2;f++){ if(mk&&f===at)key(mk,true); if(mk&&f===at+8)key(mk,false); v06c.oneInterrupt(true);} }
+  // KLMENU=1|2|3: нажать клавишу выбора режима в меню на 60 кадров и отпустить (снимок подсветки).
+  // 60, а не 8: меню играет мотив в play_audio_wait_key, и за 8 кадров read_port клавишу не застаёт.
+  const mk=process.env.KLMENU, at=N2-90;
+  for(let f=60;f<N2;f++){ if(mk&&f===at)key(mk,true); if(mk&&f===at+60)key(mk,false); v06c.oneInterrupt(true);} }
 else{
+// KLMODE=1|2|3 — выбрать раскладку управления в меню (клавиши 1/2/3) и только потом стартовать
+if(process.env.KLMODE){const mk=process.env.KLMODE;
+  key(mk,true); for(let f=0;f<60;f++)v06c.oneInterrupt(true);   // 60 кадров: меню играет мотив, за 20 кадров read_port клавишу не застаёт
+  key(mk,false); for(let f=0;f<20;f++)v06c.oneInterrupt(true);}
 key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");}
