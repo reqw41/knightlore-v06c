@@ -50,12 +50,14 @@ function key(k,down){
   if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
+var FR=0, iterFr=[], iterCy=[];   // FR: кадров с начала прогона; iterFr/iterCy: снимок на границе итерации (запись seed_2+1)
+var TOT=0;
 let phase="menu",iter=0,steps=0,total=0; const cyc=new Float64Array(fa.length), calls=new Float64Array(fa.length);
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}  // KLROOM: подмена комнаты при clear_scrn_buffer перед retrieve_screen
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
-  if(a===SEED2HI&&phase==="game"){iter++;for(const [k,d] of (inputs[iter]||[]))key(k,d);if(process.env.KLDBG&&iter%25===0)console.log(`iter ${iter} kbmat ${[...Array(8)].map((_, r)=>memory.read(0x40+r,false).toString(16).padStart(2,'0')).join(' ')} matrix ${[...keyboard.matrix].map(x=>x.toString(16)).join(' ')} input ${memory.read(L.user_input,false).toString(16)} CW ${io.CW.toString(16)} PA ${io.PA.toString(16)} in2 ${io.input(2).toString(16)} X ${memory.read(L.graphic_objs_tbl+1,false)} Y ${memory.read(L.graphic_objs_tbl+2,false)}`);}
+  if(a===SEED2HI&&phase==="game"){iter++;iterFr.push(FR);iterCy.push(TOT);for(const [k,d] of (inputs[iter]||[]))key(k,d);if(process.env.KLDBG&&iter%25===0)console.log(`iter ${iter} kbmat ${[...Array(8)].map((_, r)=>memory.read(0x40+r,false).toString(16).padStart(2,'0')).join(' ')} matrix ${[...keyboard.matrix].map(x=>x.toString(16)).join(' ')} input ${memory.read(L.user_input,false).toString(16)} CW ${io.CW.toString(16)} PA ${io.PA.toString(16)} in2 ${io.input(2).toString(16)} X ${memory.read(L.graphic_objs_tbl+1,false)} Y ${memory.read(L.graphic_objs_tbl+2,false)}`);}
   return ow(a,w,s);};
 // до входа в комнату — кадрами; потом — по инструкциям, RST7 раз в 59904 тактов (ISR: клавиатура, звук, палитра)
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
@@ -64,10 +66,26 @@ if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter;
 if(process.env.KLIO){let n=0;const oi=io.input.bind(io),oo=io.output.bind(io);io.input=function(p){const r=oi(p);if(n++<60)console.log('in',p.toString(16),'->',r.toString(16),'CW',io.CW.toString(16),'PA',io.PA.toString(16));return r;};io.output=function(p,w){if(n++<60)console.log('out',p.toString(16),'<-',w.toString(16));return oo(p,w);};} let cur=-1; const hcyc=new Float64Array(fa.length);
 let frc=0,tacc=0,lost=0,frames=0,hcyc_halt=0;   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
- while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;frames++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();} const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;frc+=c;if(cpu.last_opcode===0x76)hcyc_halt+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();/* без filler вывод в порты не фиксируется */let i=idx(pc);if(i>=0){if(isHelper[i]){if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
+ while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();} const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;if(cpu.last_opcode===0x76)hcyc_halt+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();/* без filler вывод в порты не фиксируется */let i=idx(pc);if(i>=0){if(isHelper[i]){if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
 const iters=iter-startIter; console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
 // на Векторе кадровое прерывание НЕ защёлкивается: обратный ход внутри di = потерянный кадр
 console.log(`кадров ${frames}, обратный ход пришёлся на di: ${lost} (${(100*lost/frames).toFixed(1)} %) — на железе это потерянные прерывания; в halt ${(hcyc_halt/iters).toFixed(0)} тактов/итер (${(100*hcyc_halt/total).toFixed(1)} %)`);
+// Разброс длительности итерации в кадрах (метрика сглаженности темпа).
+// Первая итерация окна — вход в комнату (десятки кадров), она считается отдельно: «без входа».
+{ const d=[]; for(let i=1;i<iterFr.length;i++)d.push(iterFr[i]-iterFr[i-1]);
+  const dc=[]; for(let i=1;i<iterCy.length;i++)dc.push((iterCy[i]-iterCy[i-1])/59904);
+  const w=d.slice(-N), wc=dc.slice(-N);
+  if(w.length>1){ const t=w.slice(1), tc=wc.slice(1);
+    const sr=[...t].sort((a,b)=>a-b), med=sr[sr.length>>1];
+    const off=t.filter(x=>x!==med).length;
+    const mean=t.reduce((a,b)=>a+b,0)/t.length, meanc=tc.reduce((a,b)=>a+b,0)/tc.length;
+    const sd=Math.sqrt(tc.reduce((a,b)=>a+(b-meanc)*(b-meanc),0)/tc.length);
+    const h={}; for(const x of t)h[x]=(h[x]||0)+1;
+    const FPS=3000000/59904;
+    console.log(`длительность итерации без входа в комнату (${t.length} итер), кадров: среднее ${mean.toFixed(3)} (= ${(FPS/mean).toFixed(2)} итер/с) мин ${Math.min(...t)} макс ${Math.max(...t)} медиана ${med}, не равны медиане ${(100*off/t.length).toFixed(1)} %`);
+    console.log(`  по тактам: среднее ${meanc.toFixed(3)} мин ${Math.min(...tc).toFixed(3)} макс ${Math.max(...tc).toFixed(3)} СКО ${sd.toFixed(3)}`);
+    console.log(`  гистограмма кадров: ${Object.keys(h).map(Number).sort((a,b)=>a-b).map(k=>k+":"+h[k]).join(" ")}`);
+    console.log(`  узор (первые 60): ${t.slice(0,60).join("")}`); } }
 const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
 console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");

@@ -4,7 +4,7 @@ Core (split_line/expand/_ixiy/_exx/_classify_exx/_bit/_resset/_shift/_ldir/_adcs
 is lifted verbatim from kvalley-v06c/tools/kv_z80_to_8080.py (tag asm-freeze); glue is Knight Lore specific.
 Usage: python3 tools/kl_z80_to_8080.py <in.asm> <out.asm> [--target lockstep|vector]
 """
-import sys, re
+import sys, re, os
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 import kl_native
 import kl_native_render
@@ -870,6 +870,53 @@ def translate(src):
 
 
 
+def kl_pace(src):
+    """Потолок темпа: итерация главного цикла не короче заданного времени (кадрами, с дробью).
+
+    KLPACE — потолок в итерациях в секунду (по умолчанию 22.4 = максимум оригинала ZX
+    по замеренным комнатам); KLPACE=off (или 0) — ограничитель не собирается вовсе.
+    KLPACEMODE=a — только потолок (в тяжёлых комнатах ожидания нет, длительность не округляется);
+    KLPACEMODE=b — длительность итерации всегда целое число кадров (минимум = потолок).
+    Возвращает (src, описание).
+    """
+    env = os.environ.get('KLPACE', '22.4').strip().lower()
+    if env in ('off', 'no', 'none', '0', ''):
+        # ограничителя нет: снять код и переменные, чтобы не платить ни байта
+        src = src.replace("@PACE_ROUND@", "")
+        i0 = src.index("; ---- ОГРАНИЧИТЕЛЬ ТЕМПА")
+        i1 = src.index("vp_done:", i0)
+        i1 = src.index("\n", src.index("ret", i1)) + 1
+        src = src[:i0] + src[i1:]
+        for cell in ('pace_el', 'pace_acc'):
+            src = re.sub(r'(?m)^' + cell + r':[ \t]*DS[ \t]+1[^\n]*\n', '', src, count=1)
+        src = re.sub(r'(?m)^[ \t]*ld[ \t]+hl, pace_el[^\n]*\n[ \t]*inc[ \t]+\(hl\)[^\n]*\n'
+                     r'[ \t]*jp[ \t]+nz, vi_pace[^\n]*\n[ \t]*dec[ \t]+\(hl\)[^\n]*\n[ \t]*vi_pace:[^\n]*\n',
+                     '', src, count=1)
+        src = src.replace("vi_pace:\n", "", 1)
+        return src, 'выключен (KLPACE=off)'
+    rate = float(env)
+    FPS = 3000000.0 / 59904.0          # кадр Вектора = 59904 такта на 3 МГц -> 50.08 Гц
+    period = FPS / rate
+    pint = int(period)
+    pfrc = int(round((period - pint) * 256))
+    if pfrc == 256:
+        pint, pfrc = pint + 1, 0
+    assert 0 <= pint <= 255, 'потолок темпа вне диапазона'
+    mode = os.environ.get('KLPACEMODE', 'a').strip().lower()
+    assert mode in ('a', 'b'), 'KLPACEMODE = a или b'
+    src = src.replace("@PACE_ROUND@",
+                      "\t\t\t\tjp\t\tvp_h\t\t\t\t; вариант Б: хотя бы один кадр ожидания всегда\n" if mode == 'b' else "", 1)
+    src = src.replace("vec_pace:\t\t",
+                      "PACE_INT\t\tequ\t\t%d\t\t\t; потолок темпа: целых кадров на итерацию\n"
+                      "PACE_FRC\t\tequ\t\t%d\t\t\t; и дробь, 1/256 кадра (%.1f итер/с)\n"
+                      "vec_pace:\t\t" % (pint, pfrc, rate), 1)
+    old = "loc_B000:\n"
+    assert old in src, 'loc_B000'
+    src = src.replace(old, old + "\t\t\t\tcall    vec_pace                                ; KL: потолок темпа (вариант %s)\n" % mode.upper(), 1)
+    eff = FPS / (pint + pfrc / 256.0)
+    return src, 'вариант %s, %d+%d/256 кадра = %.2f итер/с' % (mode.upper(), pint, pfrc, eff)
+
+
 def kl_no_delay(src):
     """Искусственная задержка оригинала (при <6 объектов) — снять: на i8080 темп и так ниже; состояние не меняет."""
     old = "game_delay:\n\t\t\t\tld      hl, 0x500\n"
@@ -1144,6 +1191,8 @@ vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
 vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
 vec_pal:		DS		16			; палитра (индекс = p0<<3|p1<<2|p2<<1|p3), строит vec_set_pal
+pace_el:		DS		1			; ограничитель темпа: кадров с начала итерации (ISR инкрементит, насыщение 255)
+pace_acc:		DS		1			; ограничитель темпа: аккумулятор Брезенхэма (дробная часть периода, 1/256 кадра)
 VEC_HUD_WHITE	equ		1			; 1 = белый HUD через плоскость 2 (плоскость 2 без кода: верхний регион с 0xE000)
 				ASSERT $ <= 0x00A0
 				ORG		0x0060
@@ -1188,6 +1237,11 @@ vec_isr:		push	af				; RST 38h каждый кадр (VBlank): палитра п
 vi_nostop:		push	bc
 				push	de
 				push	hl
+				ld		hl, pace_el			; ограничитель темпа: кадров с начала итерации
+				inc		(hl)
+				jp		nz, vi_pace
+				dec		(hl)				; насыщение на 255 (длинная пауза не должна переполнять счётчик)
+vi_pace:
 				; палитра: записи 15..8 (точка экрана есть) — КАЖДЫЙ кадр, 4 OUT на запись (~900 тактов): запись
 				; защёлкивается цветом под лучом, и одиночная загрузка «по запросу» может частично промахнуться мимо
 				; обратного хода (поздний вход в ISR) — тогда часть индексов остаётся старой («картинка не полностью
@@ -1507,6 +1561,31 @@ vec_di_budget:	xor		a
 vdb_wait:		ei
 				halt						; ждём кадрового прерывания
 vdb_ok:			ret
+
+; ---- ОГРАНИЧИТЕЛЬ ТЕМПА (потолок скорости игры) --------------------------------------------
+; Итерация главного цикла не может быть короче PACE_INT + PACE_FRC/256 кадров. Дробность даёт
+; Брезенхэм: каждую итерацию pace_acc += PACE_FRC, перенос -> лишний кадр. Узор шагов регулярный
+; (для 2+60/256 это 2 2 2 2 3 2 2 2 2 3 ...), пачек не бывает.
+; Счётчик кадров pace_el ведёт ISR; здесь ждём, пока он не дорастёт до шага, и обнуляем.
+; Ожидание — только ei/halt: прерывание Вектора не защёлкивается, под di кадр теряется.
+; В тяжёлой комнате (итерация длиннее шага) ожидания нет вообще, темп не трогаем.
+; Вызывается из loc_B000 (начало итерации), где свободны все регистры. Портит A, B, HL, флаги.
+vec_pace:		ld		a, (pace_acc)
+				add		a, PACE_FRC			; дробная часть периода (1/256 кадра)
+				ld		(pace_acc), a
+				ld		a, PACE_INT
+				adc		a, 0				; A = шаг этой итерации в кадрах
+				ld		b, a
+				ld		hl, pace_el
+@PACE_ROUND@vp_e:			ld		a, b
+				sub		(hl)				; шаг - прошло кадров
+				jp		z, vp_done
+				jp		c, vp_done			; прошло больше шага (тяжёлая комната) — не ждём
+vp_h:			ei							; halt только при разрешённых прерываниях
+				halt
+				jp		vp_e
+vp_done:		ld		(hl), 0				; отсчёт с этого кадра (сразу после обратного хода)
+				ret
 
 ; Оценка пиксельного цикла print_sprite в тиках ВИ53 (тик = 2 такта CPU).
 ; ТОЧНАЯ модель строки по слотам шины (замер psbreak_vec.js подтверждает такт в такт):
@@ -2431,6 +2510,7 @@ def main():
     if target == 'vec':
         src = kl_vec_glue(src, translate_later=True)
         src = kl_no_delay(src)
+        src, pace_desc = kl_pace(src)
         src = kl_native.apply(src)
         src = kl_native_render.apply(src)
         src = kl_native_logic.apply(src, attrs_cut=True)   # атрибуты ZX вырезаны -> второй набор регистров не нужен
@@ -2453,7 +2533,8 @@ def main():
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_vec.r0m", 0, 0x10000', src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)
         print(f"vector glue + translate (i8080) {inp} -> {outp}; exx-B pairs={exx_pairs}; IX-хелперов {len(_ix_used)}; "
-              f"в дыры вне картинки увезено {moved} Б ({nblk} процедур)")
+              f"в дыры вне картинки увезено {moved} Б ({nblk} процедур)"
+              f"; ограничитель темпа: {pace_desc}")
         return
     if target == 'z80vec':
         src = kl_vec_glue(src, translate_later=False)
