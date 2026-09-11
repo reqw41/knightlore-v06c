@@ -2007,6 +2007,7 @@ N_GET_PTR_OBJ = """get_ptr_object:
 # render_list/rendered_objs_cnt/render_obj_1 — как в оригинале.
 # ---------------------------------------------------------------------------
 N_DISPLAY_ORDER = """KL_GPO_K		equ		(graphic_objs_tbl >> 5) & 7	; get_ptr_object: старшие биты младшего байта базы уходят в индекс
+
 KL_GPO_PG		equ		(graphic_objs_tbl - 32*KL_GPO_K - (graphic_objs_tbl & 31)) >> 8
 calc_display_order_and_render:
 				ASSERT (graphic_objs_tbl & 31) <= 25		; иначе l+6 переносит и чтение полей объекта 2 ломается
@@ -2045,20 +2046,13 @@ loc_CEDB:		ld		a, (de)								; следующий graphic no
 				jp		loc_CEDB							; уже отрисован
 ov_i1:			cp		0									; тот же объект? (иммедиат = индекс объекта 1)
 				jp		z, loc_CEDB
-				add		a, KL_GPO_K							; get_ptr_object по месту (индекс уже без бита 7)
-				rrca
-				rrca
-				rrca
+				add		a, a								; индекс -> адрес объекта 2 + 2 по таблице
 				ld		l, a
-				and		0x1F
-				add		a, KL_GPO_PG
-				ld		h, a
-				ld		a, l
-				and		0xE0
-				add		a, graphic_objs_tbl & 31
-				ld		l, a								; HL = объект 2
+				ld		h, KL_OPTR_PG
+				ld		a, (hl)
 				inc		l
-				inc		l									; +2 = Y2
+				ld		h, (hl)
+				ld		l, a								; HL = объект 2 + 2 (поле Y)
 				ld		a, (hl)
 				ld		b, a
 				inc		l
@@ -2267,6 +2261,22 @@ render_done:	pop		hl									; восстановить IY, IX вызывате�
 				pop		hl
 				ld		(z80_ix), hl
 				ret
+				ALIGN	256
+kl_optr:	; индекс объекта (0..39) -> адрес его поля +2 (Y). Таблица СТАТИЧЕСКАЯ: адрес объекта
+			; = graphic_objs_tbl + 32*i, ничего поддерживать не нужно. Выравнивание на страницу
+			; экономит add a,low kl_optr (7 тактов) на каждой паре объектов внутренного цикла.
+				DW		graphic_objs_tbl+2+32*0, graphic_objs_tbl+2+32*1, graphic_objs_tbl+2+32*2, graphic_objs_tbl+2+32*3
+				DW		graphic_objs_tbl+2+32*4, graphic_objs_tbl+2+32*5, graphic_objs_tbl+2+32*6, graphic_objs_tbl+2+32*7
+				DW		graphic_objs_tbl+2+32*8, graphic_objs_tbl+2+32*9, graphic_objs_tbl+2+32*10, graphic_objs_tbl+2+32*11
+				DW		graphic_objs_tbl+2+32*12, graphic_objs_tbl+2+32*13, graphic_objs_tbl+2+32*14, graphic_objs_tbl+2+32*15
+				DW		graphic_objs_tbl+2+32*16, graphic_objs_tbl+2+32*17, graphic_objs_tbl+2+32*18, graphic_objs_tbl+2+32*19
+				DW		graphic_objs_tbl+2+32*20, graphic_objs_tbl+2+32*21, graphic_objs_tbl+2+32*22, graphic_objs_tbl+2+32*23
+				DW		graphic_objs_tbl+2+32*24, graphic_objs_tbl+2+32*25, graphic_objs_tbl+2+32*26, graphic_objs_tbl+2+32*27
+				DW		graphic_objs_tbl+2+32*28, graphic_objs_tbl+2+32*29, graphic_objs_tbl+2+32*30, graphic_objs_tbl+2+32*31
+				DW		graphic_objs_tbl+2+32*32, graphic_objs_tbl+2+32*33, graphic_objs_tbl+2+32*34, graphic_objs_tbl+2+32*35
+				DW		graphic_objs_tbl+2+32*36, graphic_objs_tbl+2+32*37, graphic_objs_tbl+2+32*38, graphic_objs_tbl+2+32*39
+KL_OPTR_PG		equ		kl_optr >> 8
+				ASSERT	(kl_optr & 0xFF) == 0
 ; End of function calc_display_order_and_render
 """
 
