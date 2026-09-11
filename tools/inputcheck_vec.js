@@ -128,5 +128,15 @@ cpu.iff = false; cpu.sp = 0xBFFE; wr(0xBFFF, 0x00); wr(0xBFFE, 0x30); cpu.pc = L
 n = 0; for (; n < 5000 && cpu.pc !== 0x0030; n++) cpu.instruction();
 chk(cpu.pc === 0x0030, "пробел паузу не ставит");
 
+// ЗАЩИТА ОРИГИНАЛА: пауза только если нажат ВК и НИ ОДНОЙ клавиши того же ряда. В ряду 0 Вектора
+// вместе с ВК лежат стрелки — клавиши движения раскладок 2 и 3; без этой проверки ложная пауза
+// (в том числе «призрак» матрицы) выглядит как зависание.
+for (const arr of ["<", ">", "^", "v"]) {
+  cpu.iff = true; press(["ВК", arr]); for (let f = 0; f < 3; f++) v06c.oneInterrupt(true);
+  cpu.iff = false; cpu.sp = 0xBFFE; wr(0xBFFF, 0x00); wr(0xBFFE, 0x30); cpu.pc = L.handle_pause;
+  n = 0; for (; n < 5000 && cpu.pc !== 0x0030; n++) cpu.instruction();
+  chk(cpu.pc === 0x0030, `ВК вместе со стрелкой ${arr} паузу НЕ ставит (защита оригинала)`);
+}
+
 console.log(bad ? `РАСХОЖДЕНИЙ: ${bad}` : "все проверки сошлись");
 process.exit(bad ? 1 : 0);
