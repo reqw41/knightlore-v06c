@@ -162,6 +162,9 @@ def main():
             rc, out = gate_result(m["gate"], env)
         finally:
             run(["git", "checkout", "--", m["file"]])
+            # пересобрать ОБЕ цели: иначе в build/ остаётся испорченный образ, и следующий
+            # ручной прогон гейта краснеет «на ровном месте» (наступали)
+            build("lockstep"); build("vec")
         ok = rc != 0
         print(f"[{m['name']}] гейт {m['gate']}: {'ПОЙМАЛ' if ok else 'ПРОПУСТИЛ'} — {m['why']}")
         if not ok:
