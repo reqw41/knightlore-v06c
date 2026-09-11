@@ -1589,7 +1589,7 @@ loc_C9CD:		dec		a
 
 N_CALC_2D = """calc_2d_info:	; obj[24] = ширина спрайта в байтах (+1, если pixelX не кратен 8), obj[25] = высота
 				call	calc_pixel_XY
-				call	flip_sprite							; DE -> данные спрайта
+				call	sprite_addr							; DE -> данные спрайта (без разворота: w/h от него не зависят)
 				ld		hl, (z80_ix)
 				ld		a, l
 				add		a, 24
