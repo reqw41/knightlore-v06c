@@ -67,6 +67,17 @@ const GEN = {
                                         ["graphic_objs_tbl", 0, ix]],
              ptr: [["z80_ix", "graphic_objs_tbl", 0]] };
   },
+  // меню: display_menu -> display_text_list -> print_text_single_colour (8 строк в буфер).
+  // suppress_border = 1, чтобы не уходить в print_border/update_screen (железо экрана).
+  display_menu(r) {
+    const buf = []; for (let i = 0; i < 32 * 192; i++) buf.push(r());
+    return { regs: { sp: 0x7DF0 }, set: [["vidbufpic", 0, buf], ["suppress_border", 0, [1]]] };
+  },
+  // HUD: display_day -> print_text (пропуск байта атрибута, шрифт day_font)
+  display_day(r) {
+    const buf = []; for (let i = 0; i < 32 * 192; i++) buf.push(r());
+    return { regs: { sp: 0x7DF0 }, set: [["vidbufpic", 0, buf], ["curr_room_attrib", 0, [r()]]] };
+  },
   // выход из комнаты: перенести координаты из special_objs_here обратно в special_objs_tbl
   update_special_objs(r) {
     const here = []; for (let i = 0; i < 96; i++) here.push(r());
@@ -86,15 +97,26 @@ const DEAD = {
   // build_screen_objects: сразу call clear_scrn_buffer / call adjust_plyr_xyz_for_room_size
   find_special_objs_here: ["a", "b", "c", "d", "e", "h", "l", "f"],
   update_special_objs: ["a", "b", "c", "d", "e", "h", "l", "f"],
+  // вызыватели (menu_loop, game_over, display_status_info) сразу перезадают всё
+  display_menu: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
+  display_day: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
 };
 const CMP = {
+  display_menu: [["vidbufpic", 0, 0]],
+  display_day: [["vidbufpic", 0, 0]],
   find_special_objs_here: [["special_objs_here", 0, 96], ["special_objs_tbl", 0, 288]],
   update_special_objs: [["special_objs_tbl", 0, 288], ["special_objs_here", 0, 96]],
 };
 
+// «картинка буфера»: только строки 32..223 каждого столбца. Строки 224..255/0..31 отданы под
+// код (vec_pack_holes) — их нельзя ни забивать случайными байтами, ни сравнивать между сборками.
+const PIC = [];
+for (let p = 0xA000; p < 0xC000; p += 256) for (let a = p + 32; a < p + 224; a++) PIC.push(a);
+
 function run(m, L, st) {
   const cpu = m.cpu;
   for (const [lbl, off, bytes] of st.set) {
+    if (lbl === "vidbufpic") { for (let i = 0; i < bytes.length && i < PIC.length; i++) m.poke(PIC[i], bytes[i]); continue; }
     const a = L[lbl]; if (a === undefined) throw new Error("нет метки " + lbl);
     for (let i = 0; i < bytes.length; i++) m.poke(a + off + i, bytes[i]);
   }
@@ -112,7 +134,10 @@ function run(m, L, st) {
   const regs = { a: cpu.a(), b: cpu.b(), c: cpu.c(), d: cpu.d(), e: cpu.e(), h: cpu.h(), l: cpu.l(), f: cpu.store_flags(),
                  ix: m.rd(L.z80_ix) | m.rd(L.z80_ix + 1) << 8, iy: m.rd(L.z80_iy) | m.rd(L.z80_iy + 1) << 8 };
   const mem = {};
-  for (const [lbl, off, len] of (CMP[LABEL] || [])) { let s = ""; for (let i = 0; i < len; i++) s += m.rd(L[lbl] + off + i).toString(16).padStart(2, "0"); mem[lbl] = s; }
+  for (const [lbl, off, len] of (CMP[LABEL] || [])) { let s = "";
+    if (lbl === "vidbufpic") { for (const a of PIC) s += m.rd(a).toString(16).padStart(2, "0"); }
+    else for (let i = 0; i < len; i++) s += m.rd(L[lbl] + off + i).toString(16).padStart(2, "0");
+    mem[lbl] = s; }
   // регионы под метками сравниваем как есть; IX/IY — как СМЕЩЕНИЕ от базы своей сборки
   regs.ixo = regs.ix - (L.graphic_objs_tbl || 0); regs.iyo = regs.iy;
   return { regs, mem, trace: m.trace.map(([a, v]) => a + ":" + v).join(" "), steps: n };

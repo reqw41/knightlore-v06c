@@ -2394,13 +2394,108 @@ uso_n:			ld		a, l								; следующая запись objs_here
 """
 
 
+
+# ---------------------------------------------------------------------------
+# Печать строк (display_menu / display_text_list / print_text* / loc_BE56..loc_BE72):
+# снятие ВТОРОГО набора регистров, оставшегося без работы после выброса атрибутов ZX.
+#
+# На ZX процедура вела два курсора сразу: набор 1 — указатель на таблицу атрибутов
+# (DE), набор 2 — координаты (HL), текст (DE), счётчик строк (B); плюс AF' хранил
+# атрибут текущей строки, а HL' — адрес в атрибутной памяти. Атрибутная память на
+# Векторе выброшена (PORT_RECIPE §17.3), и от всей этой машинерии остались только
+# холостые exx/ex af,af': 9 exx по 38 Б и 4 ex af,af' по 21 Б = 426 Б, которые
+# ничего не вычисляют. Проверка холостого хода:
+#   * AF' восстанавливается: ровно один ex af,af' на входе (print_text/_single_colour)
+#     и ровно один на выходе (loc_BE72); в теле цикла их ДВА подряд — это тождество;
+#   * exx в конце тела и exx в начале loc_BE5F — тоже пара подряд, тождество;
+#   * единственный не-холостой эффект — `pop hl` в loc_BE56 выполнялся во ВТОРОМ
+#     наборе (чтобы не затереть адрес буфера в главном HL). Снятое со стека значение
+#     (Y,X) равно тому, что лежит в BC после `pop bc/push bc`, поэтому `pop bc`
+#     на его месте даёт и ту же глубину стека, и то же BC перед print_8x8;
+#   * побочный след «HL' = Y,X» пропадает — но после этой переписки в программе НЕ
+#     ОСТАЁТСЯ НИ ОДНОГО exx (все прочие уже сняты: см. grep по z80_bc_alt), значит
+#     ячейки z80_bc_alt/z80_de_alt/z80_hl_alt больше никто не читает.
+# Атрибут строки (tmp_attrib) теперь не пишется и не читается вовсе, поэтому из
+# display_text_list уходит голова с exx, а из трёх вызывателей — `ld de,<цвета>`+`exx`.
+# `bit 7,a` (8 Б после трансляции: ld (il_a),a / and 0x80 / ld a,(il_a)) заменён на
+# `or a` + `jp m` (4 Б): знаковый бит A и так есть у i8080, а A остаётся целым для print_8x8.
+# ---------------------------------------------------------------------------
+N_TEXT_LIST = """display_text_list:	; HL = список координат (X,Y по 2 Б), DE = тексты подряд, B = число строк
+				push	bc
+				ld		a, (hl)								; X
+				inc		hl
+				inc		hl
+				push	hl
+				dec		hl
+				ld		h, (hl)								; H = Y
+				ld		l, a								; L = X
+				call	print_text_single_colour
+				pop		hl
+				pop		bc
+				djnz	display_text_list					; следующая строка списка
+				ld		a, (suppress_border)
+				and		a									; рисовать рамку?
+				ret		NZ
+				inc		a
+				ld		(suppress_border), a
+				call	print_border
+				jp		update_screen
+; End of function display_text_list
+"""
+
+N_PRINT_TEXT_SC = """print_text_single_colour:	; HL = Y,X; DE = текст (без байта атрибута)
+				push	hl									; сохранить Y,X
+				ld		hl, font
+				ld		(gfxbase_8x8), hl
+				pop		bc									; BC = Y,X
+				push	bc
+				call	vidbuf_calc_addr_in_hl
+				jr		loc_BE56
+; End of function print_text_single_colour
+"""
+
+N_PRINT_TEXT = """print_text_std_font:
+				push	hl
+				ld		hl, font
+				ld		(gfxbase_8x8), hl
+
+print_text:		; вход: на стеке Y,X; DE = байт атрибута ZX (пропускается), дальше текст
+				pop		bc
+				push	bc
+				call	vidbuf_calc_addr_in_hl
+				inc		de									; пропустить байт атрибута
+
+loc_BE56:		pop		bc									; снять Y,X со стека (в оригинале — pop hl во втором наборе)
+
+loc_BE5F:		ld		a, (de)								; следующий символ
+				or		a									; бит 7 = последний?
+				jp		m, loc_BE72
+				push	de
+				call	print_8x8
+				pop		de
+				inc		de
+				jr		loc_BE5F
+
+loc_BE72:		and		0x7F								; снять признак конца строки
+				push	de
+				call	print_8x8
+				pop		de
+				inc		de
+				ret
+; End of function print_text_std_font
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
     return src
 
 
-def apply(src):
+def apply(src, attrs_cut=False):
+    """attrs_cut=True — цель vec: атрибутная память ZX уже вырезана (kl_cut_zx_attributes),
+    значит второй набор регистров в печати строк остался без работы и его можно снять.
+    Для цели lockstep атрибуты на месте, и эти переписки НЕЛЬЗЯ применять: логика разойдётся с ZX."""
     src = _sub(src, r'(?m)^is_near_to:\n.*?; End of function is_near_to\r?\n', N_IS_NEAR_TO, 'is_near_to')
     src = _sub(src, r'(?m)^chk_plyr_spec_near_arch:\n.*?; End of function chk_plyr_spec_near_arch\r?\n',
                N_CHK_NEAR_ARCH, 'chk_plyr_spec_near_arch')
@@ -2448,6 +2543,20 @@ def apply(src):
                           ('do_any_objs_intersect', N_DO_ANY, 'do_any_objs_intersect'),
                           ('is_on_or_near_obj', N_ON_OR_NEAR, 'can_pickup_spec_obj')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
+    # печать строк: снятие второго набора регистров (атрибуты ZX выброшены) — только цель vec
+    if attrs_cut:
+        src = _sub(src, r'(?m)^display_text_list:[^\n]*\n.*?; End of function display_text_list\r?\n',
+                   N_TEXT_LIST, 'display_text_list')
+        src = _sub(src, r'(?m)^print_text_single_colour:[^\n]*\n.*?; End of function print_text_single_colour\r?\n',
+                   N_PRINT_TEXT_SC, 'print_text_single_colour')
+        src = _sub(src, r'(?m)^print_text_std_font:[^\n]*\n.*?; End of function print_text_std_font\r?\n',
+                   N_PRINT_TEXT, 'print_text_std_font')
+        # вызыватели display_text_list: таблица атрибутов и переключение набора больше не нужны
+        # ВНИМАНИЕ: у display_menu нельзя трогать `ld b, N` — kl_cut_controls уже переписал 8 на 4
+        # (меню урезано до 4 строк). Снимаем ровно две строки: указатель на цвета и exx.
+        for lbl in ('menu_colours', 'gameover_colours', 'complete_colours'):
+            src = _sub(src, r'(?m)^[ \t]*ld[ \t]+de,[ \t]*' + lbl + r'[^\n]*\n[ \t]*exx[^\n]*\n', '',
+                       'снятие exx у вызывателя display_text_list (' + lbl + ')')
     src = _sub(src, r'(?m)^find_special_objs_here:[^\n]*\n.*?; End of function find_special_objs_here\r?\n',
                N_FIND_SPEC_HERE, 'find_special_objs_here')
     src = _sub(src, r'(?m)^update_special_objs:[^\n]*\n.*?; End of function update_special_objs\r?\n',
