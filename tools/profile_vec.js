@@ -34,6 +34,15 @@ if(L.vec_snd_force!==undefined)memory.write(L.vec_snd_force,process.env.KL_SND==
 cpu.pc=0;cpu.sp=0xC000;cpu.iff=false;
 if(VKBD!==undefined)for(let r=0;r<8;r++)memory.write(VKBD+r,0xFF,false);
 const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
+// KLGAG=1: погасить seed_3 += mem[seed_2] (86 add a,(hl) -> 00 nop), как это делает screendiff_vec.js.
+// Без этого две сборки с разным расположением кода играют РАЗНЫЙ сценарий и «такты/итерацию»
+// сравнивать нельзя (см. PORT_RECIPE §17.1). С гашением сценарий один и тот же — сравнение честное.
+if(process.env.KLGAG){ const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
+  const s3=L.seed_3&0xff, s3h=(L.seed_3>>8)&0xff;
+  const pat=[0x3A,s3,s3h,0x86,0x85,0x84,0x32,s3,s3h]; let at=-1;
+  for(let a=0x100;a<0xF000&&at<0;a++){let ok=true;for(let i=0;i<pat.length;i++)if(rdb(a+i)!==pat[i]){ok=false;break;}if(ok)at=a;}
+  if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
+  ow(at+3,0x00,false); }
 // lockstep: виртуальная ZX-матрица vkbd (ряд, бит, активный ноль); vec: матрица Вектора через keyboard.matrix (бит = нажато)
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
 const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};

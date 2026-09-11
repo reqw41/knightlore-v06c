@@ -83,6 +83,13 @@ const RULES={
   set_pixel_adj:{regions:r=>[["o1",r.ix,32]]},
   is_object_not_ignored:{regions:r=>[["o2",r.iy,32]]},
   loc_B000:{point:true,regions:r=>[["objtbl",L.graphic_objs_tbl,40*32],["vars",L.clear_start,0x68]]},
+  // --- вход в комнату: список спецобъектов ---
+  find_special_objs_here:{regions:r=>[["ix",r.ix,32],["sot",L.special_objs_tbl,288],["here",L.special_objs_here,96]]},
+  update_special_objs:{regions:r=>[["here",L.special_objs_here,96],["sot",L.special_objs_tbl,288],["zero",0,16]]},
+  display_text_list:{regions:r=>[["buf",0xA000,0x2000]]},
+  print_text:{regions:r=>[["buf",0xA000,0x2000]]},
+  print_text_std_font:{regions:r=>[["buf",0xA000,0x2000]]},
+  print_text_single_colour:{regions:r=>[["buf",0xA000,0x2000]]},
   loc_CF62:{point:true,regions:r=>[["obj1",r.ix,32],["obj2",r.iy,32]]},
 };
 const want=LABELS.split(",");

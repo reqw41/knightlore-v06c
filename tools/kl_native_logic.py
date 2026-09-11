@@ -2240,6 +2240,160 @@ N_BOTH_DEADLY = """set_both_deadly_flags:
 ; End of function set_both_deadly_flags
 """
 
+
+# ---------------------------------------------------------------------------
+# find_special_objs_here / update_special_objs — вход в комнату и выход из неё.
+# Обе процедуры вызываются по одному разу на смену комнаты (в render_gate и локстепе
+# их почти не видно), поэтому переписка чисто ради байт: 315+133 -> 120+65.
+# Оригинал держал указатель записи в IY и вдобавок гонял ВТОРОЙ набор регистров (exx),
+# чтобы одновременно иметь IY (таблица) и DE (курсор вывода). На i8080 exx разворачивается
+# в 38 байт обмена с ячейками z80_*_alt, (iy+n) — в вызов хелпера: 5 exx + 4 (iy+n) = 315 байт.
+# Здесь курсор таблицы живёт в HL, курсор вывода в DE, второй набор не нужен вовсе.
+#
+# Конец таблицы ловится по МЛАДШЕМУ байту: шаг 9, записей 32, и 9k mod 256 при k=0..32
+# попарно различны (равенство требовало бы 9*(k1-k2)=256, а 256 на 9 не делится), поэтому
+# l == low(special_objs_tbl_end) достигается ровно один раз — на конце таблицы.
+# Регистры на выходе (A/F/BC/DE/HL) у обеих процедур мертвы: build_screen_objects сразу
+# делает call clear_scrn_buffer / call adjust_plyr_xyz_for_room_size. IY воспроизводится
+# точно (это ячейка памяти, живёт дальше): у первой = special_objs_tbl_end, у второй =
+# other_objs_here — обе величины постоянны, цикл всегда доходит до конца таблицы.
+# ---------------------------------------------------------------------------
+N_FIND_SPEC_HERE = """find_special_objs_here:	; спецобъекты текущего экрана -> special_objs_here (2 записи), хвост обнулить
+				ASSERT special_objs_tbl_end - special_objs_tbl == 288	; 32 записи по 9: конец ловится по младшему байту
+				ASSERT (special_objs_here & 255) <= 190					; +64 не переносит в старший байт
+				ld		b, (ix+8)							; текущий экран игрока (хелпер il_ix_ldb)
+				ld		c, b								; C держит экран весь цикл (zero_DE портит только A/B)
+				ld		hl, special_objs_tbl
+				ld		de, special_objs_here
+fso_1:			ld		a, (hl)								; graphic no
+				or		a									; пусто?
+				jp		z, fso_n
+				push	hl
+				ld		a, l
+				add		a, 8
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				ld		a, (hl)								; экран объекта
+				pop		hl
+				cp		c									; тот же, что у игрока?
+				jp		nz, fso_n
+				push	hl									; указатель записи — в поля 16,17
+				ld		a, (hl)
+				ld		(de), a								; 0: graphic no
+				inc		de
+				ld		a, l
+				add		a, 5
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a								; HL = запись+5 (X)
+				ld		b, 3
+fso_c:			ld		a, (hl)
+				ld		(de), a
+				inc		hl
+				inc		de
+				dec		b
+				jp		nz, fso_c							; 1..3: X, Y, Z
+				ld		a, 5
+				ld		(de), a								; 4: ширина
+				inc		de
+				ld		(de), a								; 5: глубина
+				inc		de
+				ld		a, 12
+				ld		(de), a								; 6: высота
+				inc		de
+				ld		a, 0x14
+				ld		(de), a								; 7: флаги DRAW | MOVEABLE
+				inc		de
+				ld		a, (hl)								; запись+8 = экран
+				ld		(de), a								; 8
+				inc		de
+				ld		b, 7
+				call	zero_DE								; 9..15
+				pop		hl
+				push	hl
+				ld		a, l
+				ld		(de), a
+				inc		de
+				ld		a, h
+				ld		(de), a								; 16,17: указатель записи special_objs_tbl
+				inc		de
+				ld		b, 14
+				call	zero_DE								; 18..31
+				pop		hl
+fso_n:			ld		a, l								; следующая запись таблицы
+				add		a, 9
+				ld		l, a
+				ld		a, h
+				adc		a, 0
+				ld		h, a
+				ld		a, l
+				cp		low special_objs_tbl_end
+				jp		nz, fso_1
+				ld		hl, special_objs_tbl_end			; IY после цикла — как у оригинала
+				ld		(z80_iy), hl
+fso_z:			ld		a, e								; хвост objs_here — нулями
+				cp		low other_objs_here
+				ret		z
+				ld		b, 32
+				call	zero_DE
+				jp		fso_z
+; End of function find_special_objs_here
+"""
+
+N_UPD_SPEC_OBJS = """update_special_objs:	; координаты из special_objs_here обратно в special_objs_tbl по указателю поля 16,17
+				ASSERT (special_objs_here & 255) <= 190		; +49 и +64 не переносят в старший байт
+				ld		hl, special_objs_here
+uso_1:			ld		a, (hl)								; graphic no
+				or		a									; пусто?
+				jp		z, uso_n
+				push	hl
+				ld		a, l
+				add		a, 16
+				ld		l, a
+				ld		e, (hl)
+				inc		l
+				ld		d, (hl)								; DE = указатель записи (у пузырей котла он нулевой — баг оригинала)
+				pop		hl
+				push	hl
+				ld		a, (hl)
+				ld		(de), a								; 0: graphic no
+				ld		a, e
+				add		a, 5
+				ld		e, a
+				ld		a, d
+				adc		a, 0
+				ld		d, a								; DE = запись+5
+				inc		l									; HL = база+1 (X)
+				ld		b, 3
+uso_c:			ld		a, (hl)
+				ld		(de), a
+				inc		l
+				inc		de
+				dec		b
+				jp		nz, uso_c							; 5..7: X, Y, Z
+				pop		hl
+				push	hl
+				ld		a, l
+				add		a, 8
+				ld		l, a
+				ld		a, (hl)								; экран
+				ld		(de), a								; 8
+				pop		hl
+uso_n:			ld		a, l								; следующая запись objs_here
+				add		a, 32
+				ld		l, a
+				cp		low other_objs_here					; конец таблицы (две записи)
+				jp		nz, uso_1
+				ld		hl, other_objs_here					; IY после цикла — как у оригинала
+				ld		(z80_iy), hl
+				ret
+; End of function update_special_objs
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -2294,6 +2448,10 @@ def apply(src):
                           ('do_any_objs_intersect', N_DO_ANY, 'do_any_objs_intersect'),
                           ('is_on_or_near_obj', N_ON_OR_NEAR, 'can_pickup_spec_obj')):
         src = _sub(src, r'(?m)^' + lbl + r':[^\n]*\n.*?; End of function ' + end + r'\r?\n', txt, lbl)
+    src = _sub(src, r'(?m)^find_special_objs_here:[^\n]*\n.*?; End of function find_special_objs_here\r?\n',
+               N_FIND_SPEC_HERE, 'find_special_objs_here')
+    src = _sub(src, r'(?m)^update_special_objs:[^\n]*\n.*?; End of function update_special_objs\r?\n',
+               N_UPD_SPEC_OBJS, 'update_special_objs')
     # is_object_not_ignored больше никто не вызывает — процедуру убираем
     src = _sub(src, r'(?m)^is_object_not_ignored:[^\n]*\n.*?; End of function is_object_not_ignored\r?\n', '', 'снятие is_object_not_ignored')
     # ret_from_tbl_jp: байтовый инкремент z80_ix вместо 16-битного, сравнение по младшему байту

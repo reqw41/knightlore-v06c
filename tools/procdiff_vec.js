@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+// Дифференциальный гейт на ОДНУ процедуру: холодный вызов в двух сборках (эталон и текущая)
+// на одинаковом сгенерированном состоянии; сверяются регистры, помеченные регионы памяти
+// и трасса записей в нулевую страницу (баг оригинала: запись по нулевому указателю).
+// Нужен потому, что сценарные гейты (локстеп, render_gate) вход в комнату почти не задевают:
+// find_special_objs_here вызывается 1 раз за 600 итераций, update_special_objs — ни разу.
+//   node tools/procdiff_vec.js <refRom> <refSld> <newRom> <newSld> <label> [N] [seed]
+// Регионы и генератор состояния — в GEN/CMP по имени метки (адреса берутся из ЕЁ сборки,
+// поэтому сдвиг кода и переменных между сборками сравнению не мешает).
+"use strict";
+const fs = require("fs"), vm = require("vm");
+const base = "/Users/boris/projects/vector06js";
+const [RREF, SREF, RNEW, SNEW, LABEL, NS, SEEDS] = process.argv.slice(2);
+const N = +NS || 200, SEED0 = +SEEDS || 12345;
+const SENT = 0xFFF0;                                    // адрес возврата-часовой
+
+function labels(sld) {
+  const L = {};
+  for (const l of fs.readFileSync(sld, "latin1").split("\n")) {
+    const p = l.split("|");
+    if (p.length >= 8 && p[6] === "L") { const n = p[7].split(",")[1]; if (n && !(n in L)) L[n] = +p[5]; }
+  }
+  return L;
+}
+function machine(rom) {
+  const g = {}; g.window = g;
+  const fcx = () => ({ createImageData: () => ({ data: new Uint8ClampedArray(4) }), putImageData() {}, getImageData: () => ({ data: new Uint8ClampedArray(4) }), fillRect() {}, drawImage() {} });
+  const fc = () => ({ width: 0, height: 0, style: {}, getContext: fcx });
+  g.document = { createElement: fc, getElementById: fc };
+  g.requestAnimationFrame = () => 0; g.setTimeout = () => 0; g.print = () => 0;
+  g.console = { log() {}, debug() {}, warn() {}, error() {}, info() {} };
+  const ctx = vm.createContext(g);
+  for (const f of ["i8080-js/i8080_trace.js", "i8080-js/i8080_disasm.js", "i8080-js/i8080.js", "src/fili.js", "src/ay.js",
+                   "src/fd1793.js", "src/fddimage.js", "src/i8253.js", "src/io.js", "src/keyboard.js", "src/memory.js", "src/sound.js", "src/tv.js"])
+    vm.runInContext(fs.readFileSync(base + "/" + f, "utf8"), ctx, { filename: f });
+  const memory = new ctx.Memory(), keyboard = new ctx.Keyboard(), timer = new ctx.I8253(), ay = new ctx.AY(),
+        floppy = new (ctx.Floppy().FD1793)(), io = new ctx.IO(keyboard, timer, memory, ay, floppy);
+  const cpu = new ctx.I8080(memory, io);
+  memory.init_from_array(new Uint8Array(fs.readFileSync(rom)).subarray(0, 0x10000), 0);
+  memory.detach_boot && memory.detach_boot();
+  const ow = memory.write.bind(memory);
+  const m = { cpu, memory, trace: [], on: false };
+  memory.write = function (a, w, s) { a &= 0xffff; if (m.on && a < 0x40) m.trace.push([a, w & 0xff]); return ow(a, w, s); };
+  m.rd = a => memory.bytes[memory.tobank(a & 0xffff)];
+  m.poke = (a, v) => ow(a & 0xffff, v & 0xff, false);
+  return m;
+}
+// --- генератор состояния: массив [имяМетки, смещение, байты] ---
+function rng(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) >>> 24; }
+
+const GEN = {
+  // вход в комнату: таблица спецобъектов (32 записи по 9) и текущий экран игрока
+  find_special_objs_here(r) {
+    // в таблице special_objs_here всего ДВЕ записи (третья — other_objs_here, она же признак конца):
+    // игра гарантирует не больше двух спецобъектов на экран, иначе цикл loc_C583 не остановится.
+    const scr = 200, sot = [];
+    for (let i = 0; i < 32; i++) {
+      const gfx = r() < 64 ? 0 : (r() % 40) + 1;           // четверть записей пустые
+      sot.push(gfx, r(), r(), r(), r(), r(), r(), r(), r() % 6);   // байт 8 = чужой экран
+    }
+    const k = r() % 3;                                     // 0, 1 или 2 объекта на нашем экране
+    const pick = []; while (pick.length < k) { const j = r() % 32; if (!pick.includes(j)) pick.push(j); }
+    for (const j of pick) { sot[j * 9] = (r() % 40) + 1; sot[j * 9 + 8] = scr; }
+    const here = []; for (let i = 0; i < 96; i++) here.push(r());
+    const ix = []; for (let i = 0; i < 32; i++) ix.push(r()); ix[8] = scr;
+    return { regs: { sp: 0x7DF0 }, set: [["special_objs_tbl", 0, sot], ["special_objs_here", 0, here],
+                                        ["graphic_objs_tbl", 0, ix]],
+             ptr: [["z80_ix", "graphic_objs_tbl", 0]] };
+  },
+  // выход из комнаты: перенести координаты из special_objs_here обратно в special_objs_tbl
+  update_special_objs(r) {
+    const here = []; for (let i = 0; i < 96; i++) here.push(r());
+    for (let i = 0; i < 3; i++) {
+      here[i * 32] = r() < 64 ? 0 : (r() % 40) + 1;        // graphic_no
+      here[i * 32 + 8] = r() % 6;                          // экран
+      here[i * 32 + 16] = 0; here[i * 32 + 17] = 0;        // указатель проставим ниже (по сборке)
+    }
+    const sot = []; for (let i = 0; i < 288; i++) sot.push(r());
+    const slot = [r() % 32, r() % 32, r() < 32 ? -1 : r() % 32];   // -1 = нулевой указатель (баг оригинала)
+    return { regs: { sp: 0x7DF0 }, set: [["special_objs_here", 0, here], ["special_objs_tbl", 0, sot]],
+             ptrEntry: slot };
+  },
+};
+// регистры, мёртвые на выходе (вызыватель их сразу перезадаёт) — из сравнения исключаются
+const DEAD = {
+  // build_screen_objects: сразу call clear_scrn_buffer / call adjust_plyr_xyz_for_room_size
+  find_special_objs_here: ["a", "b", "c", "d", "e", "h", "l", "f"],
+  update_special_objs: ["a", "b", "c", "d", "e", "h", "l", "f"],
+};
+const CMP = {
+  find_special_objs_here: [["special_objs_here", 0, 96], ["special_objs_tbl", 0, 288]],
+  update_special_objs: [["special_objs_tbl", 0, 288], ["special_objs_here", 0, 96]],
+};
+
+function run(m, L, st) {
+  const cpu = m.cpu;
+  for (const [lbl, off, bytes] of st.set) {
+    const a = L[lbl]; if (a === undefined) throw new Error("нет метки " + lbl);
+    for (let i = 0; i < bytes.length; i++) m.poke(a + off + i, bytes[i]);
+  }
+  if (st.ptr) for (const [cell, lbl, off] of st.ptr) { const v = L[lbl] + off; m.poke(L[cell], v & 0xff); m.poke(L[cell] + 1, v >> 8); }
+  if (st.ptrEntry) for (let i = 0; i < st.ptrEntry.length; i++) {
+    const s = st.ptrEntry[i], p = s < 0 ? 0 : L.special_objs_tbl + s * 9;
+    m.poke(L.special_objs_here + i * 32 + 16, p & 0xff); m.poke(L.special_objs_here + i * 32 + 17, p >> 8);
+  }
+  cpu.sp = st.regs.sp; m.poke(cpu.sp - 1, SENT >> 8); m.poke(cpu.sp - 2, SENT & 0xff); cpu.sp -= 2;
+  cpu.pc = L[LABEL]; cpu.iff = false;
+  m.trace = []; m.on = true;
+  let n = 0; while (cpu.pc !== SENT && n < 3000000) { cpu.instruction(); n++; }
+  m.on = false;
+  if (cpu.pc !== SENT) return null;
+  const regs = { a: cpu.a(), b: cpu.b(), c: cpu.c(), d: cpu.d(), e: cpu.e(), h: cpu.h(), l: cpu.l(), f: cpu.store_flags(),
+                 ix: m.rd(L.z80_ix) | m.rd(L.z80_ix + 1) << 8, iy: m.rd(L.z80_iy) | m.rd(L.z80_iy + 1) << 8 };
+  const mem = {};
+  for (const [lbl, off, len] of (CMP[LABEL] || [])) { let s = ""; for (let i = 0; i < len; i++) s += m.rd(L[lbl] + off + i).toString(16).padStart(2, "0"); mem[lbl] = s; }
+  // регионы под метками сравниваем как есть; IX/IY — как СМЕЩЕНИЕ от базы своей сборки
+  regs.ixo = regs.ix - (L.graphic_objs_tbl || 0); regs.iyo = regs.iy;
+  return { regs, mem, trace: m.trace.map(([a, v]) => a + ":" + v).join(" "), steps: n };
+}
+
+const Lr = labels(SREF), Ln = labels(SNEW);
+if (!(LABEL in Lr)) { console.log("метки " + LABEL + " нет в эталоне — сравнивать не с чем"); process.exit(2); }
+if (!(LABEL in Ln)) { console.log("метки " + LABEL + " нет в новой сборке"); process.exit(2); }
+const mr = machine(RREF), mn = machine(RNEW);
+// iyo нормируем: IY у обеих сборок указывает в таблицы, которые могут переехать -> считаем смещение от известных баз
+const iyBase = (L) => [["special_objs_tbl", L.special_objs_tbl], ["special_objs_here", L.special_objs_here],
+                       ["graphic_objs_tbl", L.graphic_objs_tbl]];
+const normIY = (L, v) => { let best = "abs:" + v; for (const [n, a] of iyBase(L)) if (a !== undefined && v >= a && v < a + 512) best = n + "+" + (v - a); return best; };
+
+let bad = 0, stepsR = 0, stepsN = 0;
+for (let i = 0; i < N; i++) {
+  const st1 = GEN[LABEL](rng(SEED0 + i * 7919));
+  const st2 = GEN[LABEL](rng(SEED0 + i * 7919));           // тот же seed -> то же состояние
+  const a = run(mr, Lr, st1), b = run(mn, Ln, st2);
+  if (!a || !b) { console.log(`тест ${i}: не вернулась (${!a ? "эталон" : "новая"})`); bad++; continue; }
+  stepsR += a.steps; stepsN += b.steps;
+  a.regs.iyn = normIY(Lr, a.regs.iy); b.regs.iyn = normIY(Ln, b.regs.iy);
+  const d = [];
+  const dead = new Set(DEAD[LABEL] || []);
+  for (const k of ["a", "b", "c", "d", "e", "h", "l", "f", "ixo", "iyn"])
+    if (!dead.has(k) && a.regs[k] !== b.regs[k]) d.push(`${k}: ref=${a.regs[k]} new=${b.regs[k]}`);
+  for (const k of Object.keys(a.mem)) if (a.mem[k] !== b.mem[k]) {
+    let j = 0; while (a.mem[k][j] === b.mem[k][j]) j++;
+    d.push(`${k}: расходится с байта ${j >> 1} (ref=${a.mem[k].substr(j & ~1, 2)} new=${b.mem[k].substr(j & ~1, 2)})`);
+  }
+  if (a.trace !== b.trace) d.push(`нулевая страница: ref=[${a.trace}] new=[${b.trace}]`);
+  if (d.length) { bad++; if (bad <= 3) console.log(`тест ${i}: ` + d.join("; ")); }
+}
+console.log(`${LABEL}: ${N} состояний, расхождений ${bad}; инструкций ref=${stepsR} new=${stepsN}` +
+            (stepsR ? ` (${(100 * stepsN / stepsR - 100).toFixed(1)} %)` : ""));
+process.exit(bad ? 1 : 0);
