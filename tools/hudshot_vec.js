@@ -54,10 +54,23 @@ let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter;
 let frc=0,tacc=0;
-while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
+// KLSCAN=c0,c1,r0,r1: копить по кадрам объединение и пересечение пикселей окна плоскости 0
+let scan=null; if(process.env.KLSCAN){const m=process.env.KLSCAN.split(",").map(Number);
+  scan={c0:m[0],c1:m[1],r0:m[2],r1:m[3],or:new Map(),and:new Map(),n:0};}
+const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
+function doScan(){scan.n++;for(let col=scan.c0;col<=scan.c1;col++)for(let r=scan.r0;r<=scan.r1;r++){
+  const k=col*256+r,v=rdb(0x8000+(col<<8)+r);
+  scan.or.set(k,(scan.or.get(k)||0)|v); scan.and.set(k,scan.n===1?v:(scan.and.get(k)&v));}}
+while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;if(scan)doScan();v06c.irq=true;v06c.checkInterrupt();}
   const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();}
 
+if(scan){const lines=[];
+  for(let col=scan.c0;col<=scan.c1;col++)for(let r=scan.r0;r<=scan.r1;r++){
+    const k=col*256+r,o=scan.or.get(k),a=scan.and.get(k);
+    if(o)lines.push(`${col} ${r} ${o}`);}
+  console.log(`скан ${scan.n} кадров, ненулевых байт объединения: ${lines.length}`);
+  fs.writeFileSync(process.env.KLSCANOUT||"build/scan_or.txt",lines.join("\n")+"\n");}
 // ---- палитра из vec_pal (её ISR льёт в чип) ----
 const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const pal=[];for(let i=0;i<16;i++){const w=rd(L.vec_pal+i);
