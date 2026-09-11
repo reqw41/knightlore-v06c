@@ -92,7 +92,8 @@ memory.write=function(a,w,s){a&=0xffff;
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){
     iter++;
-    if(process.env.KLLIVES)ow(L.lives,5,false);   // бессмертие: длинный прогон не должен кончаться по жизням
+    if(process.env.KLLIVES){ow(L.lives,5,false);   // бессмертие: длинный прогон не должен кончаться по жизням
+      if(rdb(L.days)>=0x50)ow(L.days,1,false);}    // и по дням: на 64-м дне игра сама уходит в game over
     const gap=TOT-lastIterCy; if(gap>maxGap&&iter>2){maxGap=gap;maxGapIter=iter;}
     lastIterCy=TOT;
     for(const [k,d] of (inputs[iter]||[]))key(k,d);
@@ -158,6 +159,10 @@ while(iter-startIter<N&&steps<3e9){
   if(cpu.last_opcode===0x76)hcyc+=c;
   tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();
+  // Итерации встали (game over, пауза, отрисовка) — отпустить клавиши: живой игрок не держит
+  // клавишу во время замершей картинки, а расписание ходьбы идёт по итерациям и само себя не
+  // расклинит. Иначе loc_BA87 «ждём отпускания клавиши» выглядит как зависание.
+  if(walkHeld&&TOT-lastIterCy>30*59904){key(walkHeld,false);walkHeld=null;walkUntil=0;}
   if(TOT-lastIterCy>STALL){
     const it0=iter;
     dumpState(`ОСТАНОВКА СЧЁТЧИКА №${stalls.length+1}`);
