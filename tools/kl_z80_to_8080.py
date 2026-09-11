@@ -668,7 +668,12 @@ VEC_SPLIT = __import__('os').environ.get('KL_VEC_SPLIT', 'spr_077')
 
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
-_IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
+_IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects',
+                    # добавлено раундом speed2 по профилю МЕСТ вызова (tools/ilhot_vec.js): верх списка
+                    # исполнений call il_* на итерацию в комнатах 39 и 163
+                    'no_delay', 'left_right_rotational', 'handle_forward', 'animate_human_legs', 'audio_B467',
+                    'calc_ghost_sprite', 'set_ghost_hflip', 'clr_ghost_hflip', 'next_fg_obj_sprite',
+                    'upd_182_183'}
 _cur_func = ['']
 
 _ix_form_cnt = {}
@@ -1189,10 +1194,13 @@ VEC_HEADER = """
 vec_kbmat:		DS		8			; матрица клавиатуры Вектора, active-high (ряд 0..7)
 vec_tmp:		DS		2
 vec_palreq:		DS		1			; 1 = загрузить палитру в ближайшем VBlank
-vec_zxrows:		DS		8			; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap
+vec_zxrows:		DB		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF	; 8 рядов ZX (active-low), строит ISR из vec_kbmat по vec_zxmap;
+									; 0xFF — согласовано с vec_kbmat = 0 и vec_kbchg = 0 (ранний выход vec_zxbuild)
+vec_kbchg:		DS		1			; != 0, если vec_scan увидел отличие матрицы от прошлого кадра
 vec_pal:		DS		16			; палитра (индекс = p0<<3|p1<<2|p2<<1|p3), строит vec_set_pal
 pace_el:		DS		1			; ограничитель темпа: кадров с начала итерации (ISR инкрементит, насыщение 255)
 pace_acc:		DS		1			; ограничитель темпа: аккумулятор Брезенхэма (дробная часть периода, 1/256 кадра)
+VEC_PSB_PAD		equ		1			; запас оценки print_sprite: столько*256 тиков (512 тактов) сверх модели цепочки
 VEC_HUD_WHITE	equ		1			; 1 = цвета HUD через плоскость 2 (плоскость 2 без кода: верхний регион с 0xE000)
 VEC_HUD_INK		equ		0xFF		; статичное перо HUD (белый): цифры жизней, фигурка, DAY, счётчик, знак солнца.
 									; Цвет HUD ЗАВИСИТ ТОЛЬКО ОТ p2: p1 — буфер рендера, под пикселем HUD он
@@ -1432,59 +1440,109 @@ vec_hudcols:		DB		0xC2, 2, 64, 16, 0xFF	; фигурка жизней: стол�
 					DB		0xDB, 1, 39, 17, 0xFF	; столбец 27, строки 39..55
 					DB		0
 
-vec_scan:		ld		a, 0x8A				; порт B на вход
+vec_scan:		; ряды матрицы Вектора -> vec_kbmat (active-high) + vec_kbchg = 0, если матрица та же.
+				; Цикл развёрнут: в нём на ряд уходило 70 тактов (счётчик, поворот маски ряда),
+				; развёртка с непосредственной маской — 64 такта И заодно считает отличие от
+				; прошлого кадра. Ряд 1 не опрашивается: в vec_kbzx все восемь его записей 0xFF
+				; (ни одна клавиша ряда 1 не отображена на ZX), а раньше его биты впустую гоняли
+				; цепочку zb_bit и гасили биты 5..7 ряда ZX 7, которые read_port всё равно срезает.
+				; ПРИМЕСЬ СТРЕЛОК УБРАНА ОТСЮДА в vec_zxbuild: раньше vec_scan дописывал в
+				; vec_kbmat+4/+6/+7 зеркало стрелок, и сравнение с прошлым кадром ловило бы
+				; собственную примесь как «изменение». Портит A, BC, HL, флаги.
+				ld		a, 0x8A				; порт B на вход
 				out		(0x00), a
 				ld		hl, vec_kbmat
-				ld		c, 0xFE				; бит i = 0 -> ряд i
-				ld		b, 8
-vs_l:			ld		a, c
+				ld		b, 0				; накопитель отличий
+vs_l:			ld		a, 0xFE				; ряд 0
 				out		(0x03), a
 				in		a, (0x02)
 				cpl
-				ld		(hl), a
-				inc		hl
-				ld		a, c
-				rlca
 				ld		c, a
-				dec		b
-				jp		nz, vs_l
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				inc		hl					; ряд 1 Вектора не отображён ни на одну клавишу ZX
+										; (vec_kbzx 8..15 = 0xFF) — не опрашиваем его вовсе
+				ld		a, 0xFB				; ряд 2
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xF7				; ряд 3
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xEF				; ряд 4
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xDF				; ряд 5
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0xBF				; ряд 6
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
+				ld		a, 0x7F				; ряд 7
+				out		(0x03), a
+				in		a, (0x02)
+				cpl
+				ld		c, a
+				xor		(hl)				; отличие от прошлого кадра
+				or		b
+				ld		b, a
+				ld		(hl), c
+				inc		hl
 				ld		a, 0x88
 				out		(0x00), a
+				ld		a, b
+				ld		(vec_kbchg), a
 				ld		a, 0xFF
 				out		(0x03), a			; вернуть скролл
 				xor		a
 				out		(0x02), a			; вернуть бордюр/режим
-				; стрелки (ряд 0: DN=7 RT=6 UP=5 LT=4) -> Z / X / A / Q
-				ld		a, (vec_kbmat+0)
-				ld		b, a
-				and		0x10				; LT -> Z (ряд 7 бит 2)
-				jp		z, vs_1
-				ld		a, (vec_kbmat+7)
-				or		0x04
-				ld		(vec_kbmat+7), a
-vs_1:			ld		a, b
-				and		0x40				; RT -> X (ряд 7 бит 0)
-				jp		z, vs_2
-				ld		a, (vec_kbmat+7)
-				or		0x01
-				ld		(vec_kbmat+7), a
-vs_2:			ld		a, b
-				and		0x20				; UP -> A (ряд 4 бит 1)
-				jp		z, vs_3
-				ld		a, (vec_kbmat+4)
-				or		0x02
-				ld		(vec_kbmat+4), a
-vs_3:			ld		a, b
-				and		0x80				; DN -> Q (ряд 6 бит 1)
-				ret		z
-				ld		a, (vec_kbmat+6)
-				or		0x02
-				ld		(vec_kbmat+6), a
 				ret
 
 ; vec_zxbuild: vec_kbmat (active-high) -> vec_zxrows: 8 байт рядов ZX, бит i = 0 если клавиша i ряда нажата.
-; Раз в кадр из ISR (~1.4К тактов); read_port потом только AND'ит готовые байты.
-vec_zxbuild:	ld		hl, vec_zxrows
+; Раз в кадр из ISR; read_port потом только AND'ит готовые байты. Если матрица не изменилась с прошлого
+; кадра (vec_kbchg = 0) — ряды ZX уже верны, выходим сразу: полный обход стоит ~900 тактов, выход 22.
+; Начальное состояние согласовано статически: vec_kbmat = 0 (DS), vec_zxrows = 0xFF (DB), vec_kbchg = 0.
+vec_zxbuild:	ld		a, (vec_kbchg)
+				or		a
+				ret		z
+				ld		hl, vec_zxrows
 				ld		a, 0xFF
 				ld		b, 8
 zb_clr:			ld		(hl), a
@@ -1532,13 +1590,115 @@ zb_skip:		inc		de
 				ld		a, c
 				or		a
 				jp		nz, zb_bit			; остались нажатые биты
-				ld		a, e				; добрать до конца 8 записей ряда (таблица ALIGN 8)
-				or		7
-				ld		e, a
-				inc		de				; 16-битный inc: перенос в D не теряется
+				dec		de					; добрать до конца 8 записей ряда (таблица ALIGN 8).
+				ld		a, e				; DE = база+k, k = 1..8 (k-1 = номер старшего нажатого бита).
+				or		7					; ДЕКРЕМЕНТ ОБЯЗАТЕЛЕН: без него при k = 8 (нажат бит 7 ряда)
+				ld		e, a				; «or 7 : inc de» проскакивало целую восьмёрку, и ВСЕ следующие
+				inc		de					; ряды читались из чужих записей, а ряд 7 — вообще за таблицей.
+									; Ловилось на стрелке ВНИЗ (ряд 0 бит 7) и на клавишах G, O, W, '7'.
+									; 16-битный inc: перенос в D не теряется.
 zb_next:		inc		hl
 				dec		b
 				jp		nz, zb_row
+				; стрелки ряда 0 Вектора -> Z / X / A / Q прямо в рядах ZX (раньше их подмешивал
+				; vec_scan в vec_kbmat; см. комментарий там). Таблица: маска стрелки в ряду 0,
+				; младший байт адреса ряда ZX, маска гашения бита клавиши.
+				ld		a, (vec_kbmat+0)
+				ld		c, a
+				ld		de, vec_arrzx
+				ld		b, 4
+zb_ar:			ld		a, (de)
+				and		c
+				inc		de
+				ld		a, (de)				; младший байт адреса ряда ZX (LDAX/INX флаги не трогают)
+				inc		de
+				jp		z, zb_arn
+				ld		l, a
+				ld		h, high vec_zxrows
+				ld		a, (de)
+				and		(hl)
+				ld		(hl), a
+zb_arn:			inc		de
+				dec		b
+				jp		nz, zb_ar
+				jp		vec_rpbuild			; ряды готовы — пересчитать готовые ответы read_port
+vec_arrzx:		DB		0x10, low (vec_zxrows+0), 0xFD	; LT -> Z  (ряд ZX 0, бит 1)
+				DB		0x40, low (vec_zxrows+0), 0xFB	; RT -> X  (ряд ZX 0, бит 2)
+				DB		0x20, low (vec_zxrows+1), 0xFE	; UP -> A  (ряд ZX 1, бит 0)
+				DB		0x80, low (vec_zxrows+2), 0xFE	; DN -> Q  (ряд ZX 2, бит 0)
+
+; vec_rpbuild: ряды ZX -> vec_rptab, готовые ответы read_port для масок, которыми игра реально
+; пользуется. Значение = cpl(AND выбранных рядов) and 0x1F, то есть всегда <= 0x1F; 0xFF в таблице
+; означает «маска не считана» и отправляет read_port на общий цикл — поэтому неучтённая маска
+; остаётся ПРАВИЛЬНОЙ, просто медленной. Список снят замером (трасса A на входе read_port):
+; в игре живут семь масок (0xFE 0x7F 0x7E 0xBD 0xDB 0xE7 0x99), ещё пять — в меню и паузе.
+; Зовётся только из vec_zxbuild, то есть в кадр, когда матрица изменилась. Портит A, BC, DE, HL.
+vec_rpbuild:	ld		a, (vec_zxrows+0)
+				ld		b, a				; B = ряд 0
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFE), a
+				ld		a, (vec_zxrows+7)
+				ld		c, a				; C = ряд 7
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x7F), a
+				ld		a, b
+				and		c
+				ld		b, a				; B = ряд0 & ряд7
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x7E), a
+				ld		a, (vec_zxrows+1)
+				ld		c, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFD), a
+				ld		a, (vec_zxrows+6)
+				and		c
+				ld		c, a				; C = ряд1 & ряд6
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xBD), a
+				ld		a, (vec_zxrows+2)
+				ld		d, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFB), a
+				ld		a, (vec_zxrows+5)
+				and		d
+				ld		d, a				; D = ряд2 & ряд5
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xDB), a
+				ld		a, c
+				and		d
+				ld		e, a				; E = ряды 1,2,5,6
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x99), a
+				ld		a, (vec_zxrows+3)
+				ld		c, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xF7), a
+				ld		a, (vec_zxrows+4)
+				ld		d, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xEF), a
+				ld		a, c
+				and		d
+				ld		c, a				; C = ряд3 & ряд4
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xE7), a
+				ld		a, b
+				and		c
+				and		e					; все восемь рядов
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x00), a
 				ret
 __VEC_KBZX__
 ; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
@@ -1556,8 +1716,29 @@ vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4
 """
 
 
+VEC_RPTAB = """\t\t\t\t; Готовые ответы read_port по маске рядов (см. vec_rpbuild). 0xFF = «не считано».
+\t\t\t\t; Лежит в конце нижнего региона: выравнивание на страницу нужно для ld h, high vec_rptab,
+\t\t\t\t; а добивку ALIGN съедает любой код, который добавят перед таблицей.
+\t\t\t\tALIGN 256
+vec_rptab:\t\tDS\t\t256, 0xFF
+"""
+
 VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале.
-				; Ряды ZX (active-low) готовит ISR (vec_zxbuild) раз в кадр; здесь только AND выбранных. ~300 тактов.
+				; Ряды ZX (active-low) готовит ISR (vec_zxbuild) раз в кадр. Ответы для масок, которыми игра
+				; пользуется, там же посчитаны вперёд (vec_rpbuild): чтение таблицы 70 тактов против ~500
+				; у общего цикла. Ответ всегда <= 0x1F, поэтому 0xFF однозначно значит «не считано» —
+				; такая маска уходит на общий цикл и остаётся правильной, просто медленной.
+				push	hl
+				ld		l, a
+				ld		h, high vec_rptab
+				ld		a, (hl)
+				inc		a
+				jp		z, rp_slow
+				dec		a
+				pop		hl
+				ret
+rp_slow:		ld		a, l				; маска обратно
+				pop		hl
 				push	hl
 				push	bc
 				push	de
@@ -1658,44 +1839,69 @@ vp_done:		ld		(hl), 0				; отсчёт с этого кадра (сразу п�
 ;   выровненный путь  52*w + 84 такта  = 26w + 42 тика на строку;
 ;   сдвинутый путь   124*w - 36 тактов = 62w - 18 тиков на строку.
 ; Оценка обязана быть СВЕРХУ, но не втрое: чем она больше, тем чаще vec_di_budget уводит в
-; ei/halt, а halt — чистый простой (в комнате 31 он доходил до 9 % всех тактов). Берём
-;   выровненный  32h*(w+2) = 32w + 64 тика/строку (>= 26w+42 при любом w >= 1);
-;   сдвинутый    64h*w     = 64w      тиков/строку (>= 62w-18 при любом w >= 1).
-; Один общий множитель 64 (как было) для выровненного пути завышал оценку на 60-140 %.
+; ei/halt, а halt — чистый простой (в комнате 31 он доходил до 9 % всех тактов). Берём РОВНО
+; модель строки: шаг 26h и старт 68h (выровненный), шаг 62h и старт 44h (сдвинутый) — то есть
+; оценка цепочки совпадает с её длительностью такт в такт, а запас сверху даёт единственная
+; добавка VEC_PSB_PAD (обвязка блока между di и ei: diprol 112 тактов + возврат SP/ei).
+; Прежние множители 32h*(w+2) и 64h*w завышали оценку цепочки на h*(6w+22) и h*(2w+18) тиков.
 ; Путь берём из иммедиата ps_shpg+1 (страница таблицы сдвига, 0 = выровненный: выровненная
 ; цепочка H не читает, поэтому заголовок кладёт туда 0), ширину — из уже записанного патча
 ; отката строки (loc_D800+1 = w-1), высоту — из kl_lines.
 ; Занятыми на входе остаются BC (адрес в буфере) и DE (данные спрайта) — DE сохраняем.
-vec_ps_budget:	push	de
+vec_ps_budget:	push	de					; DE = данные спрайта
+				push	bc					; BC = адрес в буфере
 				ld		a, (kl_lines)
 				ld		h, 0
-				ld		l, a
-				add		hl, hl
-				add		hl, hl
-				add		hl, hl
+				ld		l, a				; HL = h
+				add		hl, hl				; 2h
+				ld		b, h
+				ld		c, l				; BC = 2h
+				add		hl, hl				; 4h
+				add		hl, hl				; 8h
+				ld		d, h
+				ld		e, l				; DE = 8h
 				add		hl, hl				; 16h
-				add		hl, hl				; 32h
 				ld		a, (ps_shpg+1)		; страница таблицы сдвига; 0 = выровненный путь
 				or		a
-				jp		z, vpb_al
-				add		hl, hl				; сдвинутый: шаг 64h, множитель w-1 -> 64*w*h
+				jp		nz, vpb_sh
+; ВЫРОВНЕННЫЙ: шаг 26h = 16h+8h+2h, старт (w=1) 68h = 2*26h + 16h
+				push	hl					; 16h
+				add		hl, de				; 24h
+				add		hl, bc				; 26h = шаг
 				ld		d, h
 				ld		e, l
+				add		hl, hl				; 52h
+				pop		bc					; 16h
+				add		hl, bc				; 68h = старт
 				jp		vpb_go
-vpb_al:			ld		d, h				; выровненный: шаг 32h,
-				ld		e, l
-				add		hl, de				; старт 3*32h, множитель w-1 -> 32h*(w+2)
-				add		hl, de
+; СДВИНУТЫЙ: шаг 62h = 64h - 2h, старт (w=1) 44h = 32h+8h+2h+2h
+vpb_sh:			push	hl					; 16h
+				add		hl, hl				; 32h
+				add		hl, de				; 40h
+				add		hl, bc				; 42h
+				add		hl, bc				; 44h = старт
+				ex		de, hl				; DE = старт
+				pop		hl					; 16h
+				add		hl, hl				; 32h
+				add		hl, hl				; 64h
+				ld		a, l				; 62h = 64h - 2h
+				sub		c
+				ld		l, a
+				ld		a, h
+				sbc		a, b
+				ld		h, a				; HL = шаг
+				ex		de, hl				; HL = старт, DE = шаг
 vpb_go:			ld		a, (loc_D800+1)		; w-1
 vpb_m:			or		a
 				jp		z, vpb_done
 				dec		a
 				add		hl, de
 				jp		vpb_m
-vpb_done:		ld		a, h				; DE = оценка + 512 (обвязка входа/выхода)
-				add		a, 2
+vpb_done:		ld		a, h				; DE = оценка + обвязка блока (VEC_PSB_PAD*256 тиков)
+				add		a, VEC_PSB_PAD
 				ld		d, a
 				ld		e, l
+				pop		bc
 				call	vec_di_budget
 				pop		de
 				ret
@@ -2585,7 +2791,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (128 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + VEC_RPTAB + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (128 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"

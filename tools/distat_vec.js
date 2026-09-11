@@ -53,19 +53,20 @@ function runRoom(room){
   for(let f=0;f<60;f++)v06c.oneInterrupt(true); keyboard.matrix[2]|=1;
   let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
   if(phase!=="game")return null;
-  const start=iter; let frc=0,steps=0,tacc=0,tot=0,diAt=-1,diT=0,frames=0,lost=0,lostAt=new Map(),pendEst=0,pendHalt=0;
+  const start=iter; let curEst=0,frc=0,steps=0,tacc=0,tot=0,diAt=-1,diT=0,frames=0,lost=0,lostAt=new Map(),pendEst=0,pendHalt=0;
   while(iter-start<N&&steps<8e7){
     if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(diAt>=0)lostAt.set(diAt,(lostAt.get(diAt)||0)+1);}v06c.irq=true;v06c.checkInterrupt();}
     const pc=cpu.pc, op=rd(pc);
     if(pc===VDB){pendEst=(cpu.regs[2]<<8)|cpu.regs[3];}                  // оценка блока в тиках ВИ53
     if(op===0xF3&&cpu.iff){diAt=pc;diT=tot;
-      const e=est.get(pc)||{n:0,sum:0,sum2:0,halt:0};e.n++;e.sum+=pendEst;e.sum2+=pendEst*pendEst;e.halt+=pendHalt;est.set(pc,e);pendHalt=0;}
+      const e=est.get(pc)||{n:0,sum:0,sum2:0,halt:0};e.n++;e.sum+=pendEst;e.sum2+=pendEst*pendEst;e.halt+=pendHalt;est.set(pc,e);pendHalt=0;curEst=pendEst;}
     if(cpu.last_opcode===0x76)pendHalt+=cpu.vcycles;          // halt перед di = ожидание кадра
     const c=(cpu.instruction(),cpu.vcycles);steps++;tot+=c;frc+=c;
     tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
     if(cpu.last_opcode===0xFB&&diAt>=0){                     // ei — блок закрыт
-      const d=tot-diT, s=stat.get(diAt)||{n:0,max:0,sum:0};
-      s.n++;s.sum+=d;if(d>s.max)s.max=d;stat.set(diAt,s);diAt=-1;}
+      const d=tot-diT, s=stat.get(diAt)||{n:0,max:0,sum:0,mrg:1e9,msum:0,est:0};
+      s.n++;s.sum+=d;if(d>s.max)s.max=d;
+      const mg=2*curEst-d;if(mg<s.mrg)s.mrg=mg;s.msum+=mg;s.est+=2*curEst;stat.set(diAt,s);diAt=-1;}
     if(cpu.last_opcode===0xd3)io.commit();
   }
   return {iters:iter-start,frames,lost,lostAt};
@@ -81,6 +82,6 @@ console.log("блок                вызовов  средн.оценка  ha
 for(const [a,e] of est){const mean=e.sum/e.n, mod=e.sum2/e.n/(2*FRAME)*2;  // *2: тик -> такт
   const g=n=>((mod*(1-1/n))-(n-1)*344).toFixed(0);
   console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(20)} ${String(e.n).padStart(7)} ${mean.toFixed(0).padStart(13)} ${(e.halt/e.n).toFixed(0).padStart(17)} ${mod.toFixed(0).padStart(15)}   ${g(2)} / ${g(3)} / ${g(4)}`);}
-console.log("\nблок (адрес di)        вызовов   макс.тактов  макс.тиков ВИ53   средн.тактов");
+console.log("\nблок (адрес di)        вызовов   макс.тактов  макс.тиков ВИ53   средн.тактов  запас оценки: мин  средн.  средн.оценка/факт");
 for(const [a,s] of [...stat].sort((x,y)=>y[1].max-x[1].max))
-  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(28)} ${String(s.n).padStart(8)} ${String(s.max).padStart(12)} ${String(Math.ceil(s.max/2)).padStart(14)} ${(s.sum/s.n).toFixed(0).padStart(14)}`);
+  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(28)} ${String(s.n).padStart(8)} ${String(s.max).padStart(12)} ${String(Math.ceil(s.max/2)).padStart(14)} ${(s.sum/s.n).toFixed(0).padStart(14)}  ${String(s.mrg).padStart(9)} ${(s.msum/s.n).toFixed(0).padStart(7)}  ${(s.est/s.sum).toFixed(3).padStart(8)}`);
