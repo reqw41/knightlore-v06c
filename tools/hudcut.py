@@ -5,6 +5,8 @@ import sys, collections
 p0={}; p2={}
 for l in open(sys.argv[1]):
     p=l.rstrip('\n').split()
+    if not p or p[0]=='pal': continue        # первая строка дампа — палитра, не строка плоскости
+    if p[1] not in ('p0','p2'): continue     # дамп несёт и p1/p3 — они на цвет не влияют
     (p0 if p[1]=='p0' else p2)[int(p[0])]=p[2]
 pix={(x,r) for r,s in p0.items() for x,c in enumerate(s) if c=='#'}
 white=lambda x,y: p2[y][x]=='#'
