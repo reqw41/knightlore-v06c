@@ -83,8 +83,9 @@ function walkStep(it){
 
 const STALL=+process.env.KLSTALL||20000000;
 const DAY=+process.env.KLDAY||0;
+const ARCH=+process.env.KLARCH||0;
 let FR=0,TOT=0,phase="menu",iter=0,steps=0,lastIterCy=0,maxGap=0,maxGapIter=0;
-let lost=0,frames=0,roomSeen={},lastRoom=-1,roomChanges=0,dayForced=0;
+let lost=0,frames=0,roomSeen={},lastRoom=-1,roomChanges=0,dayForced=0,archForced=0;
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}
@@ -98,6 +99,21 @@ memory.write=function(a,w,s){a&=0xffff;
     walkStep(iter);
     if(DAY&&iter%DAY===0){ // подогнать солнце к переключению дня/ночи (превращение)
       ow(L.sun_moon_scratchpad+26,224,false); dayForced++; }
+    // Комнату меняют ТОЛЬКО через арку: handle_exit_screen требует бит 0 (ix+7) «рядом с аркой»
+    // и нулевой старший ниббл (ix+12) «входим в комнату». Случайная ходьба попадает в арку редко,
+    // поэтому в стенде флаг взводится принудительно — сам переход дальше делает игра, по своим
+    // проверкам границ комнаты и направления героя.
+    // Условие выхода — координата у края комнаты в ТУ сторону, куда смотрит герой
+    // (screen_west X=0, screen_east X=255, screen_north Y=255, screen_south Y=0), поэтому
+    // край подставляется по очереди на все четыре стороны: сработает та, что совпала с лицом.
+    if(ARCH&&iter%ARCH===0){
+      ow(L.graphic_objs_tbl+7,rdb(L.graphic_objs_tbl+7)|1,false);
+      ow(L.graphic_objs_tbl+12,rdb(L.graphic_objs_tbl+12)&0x0F,false);
+      const d=(archForced++)&3;
+      if(d===0)ow(L.graphic_objs_tbl+1,0x00,false);
+      else if(d===1)ow(L.graphic_objs_tbl+1,0xFF,false);
+      else if(d===2)ow(L.graphic_objs_tbl+2,0xFF,false);
+      else ow(L.graphic_objs_tbl+2,0x00,false); }
     const rm=rdb(L.graphic_objs_tbl+8);
     if(rm!==lastRoom){if(lastRoom>=0){roomChanges++;if(process.env.KLTRACE)console.log(`  итер ${iter}: комната ${lastRoom} -> ${rm}`);}lastRoom=rm;roomSeen[rm]=(roomSeen[rm]||0)+1;}
   }
@@ -154,7 +170,7 @@ const iters=iter-startIter;
 console.log(`\nитого: итераций ${iters}, шагов ${steps}, тактов ${TOT}, кадров ${frames}`);
 console.log(`обратный ход на di: ${lost} (${(100*lost/Math.max(1,frames)).toFixed(1)} %), halt ${(100*hcyc/TOT).toFixed(1)} %`);
 console.log(`смен комнат ${roomChanges}, комнат посещено ${Object.keys(roomSeen).length}: ${Object.keys(roomSeen).join(",")}`);
-console.log(`принудительных смен дня/ночи ${dayForced}; дней days=${rdb(L.days)}`);
+console.log(`принудительных смен дня/ночи ${dayForced}, взводов «рядом с аркой» ${archForced}; дней days=${rdb(L.days)}`);
 console.log(`самый длинный промежуток между итерациями ${maxGap} тактов (${(maxGap/59904).toFixed(1)} кадра) на итерации ${maxGapIter}`);
 console.log(`смертей ${deaths}${menuHit?", дошло до меню":""}`);
 if(stalls.length)for(const s of stalls)console.log(`  остановка на итерации ${s.iter}: PC ${s.pc.toString(16)} (${s.lbl}), счётчик ${s.resumed?"пошёл дальше":"НЕ ВОЗОБНОВИЛСЯ"}`);
