@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Снимок экрана Вектора (4 плоскости + палитра vec_pal) в PNG. Ядро и разгон — как в tools/profile_vec.js.
 //   node tools/hudshot_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld <итераций> [out.png]
-// Ключи: KLROOM=<n> комната, KLGAG=1 погасить seed_3 (детерминизм), KLSCALE=<n> масштаб (2),
+// Ключи: KLROOM=<n> комната, KLGAG=1 погасить seed_3 (детерминизм), KLLIVES=1 бессмертие, KLSCALE=<n> масштаб (2),
 //        KLCROP=y0,y1 вырезать экранные строки [y0..y1] (0 = верх кадра), KLPLANE=0..3 показать одну плоскость ч/б,
 //        KLMENU=1|2|3 нажать клавишу выбора режима в меню (вместе с KLFRAMES),
 //        KLJP=метка[@кадров] после прогона перейти на метку (снимок game over и т.п.),
@@ -56,6 +56,8 @@ memory.write=function(a,w,s){a&=0xffff;
   if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;
+    // KLLIVES=1 — бессмертие: комнату с ловушкой иначе не досмотреть (жизни кончаются за 200 итераций)
+    if(process.env.KLLIVES)ow(L.lives,5,false);
     // KLPOKE=метка+смещение=значение@итерация[;...] — вмешательство в игру для проверки веток
     if(pokes.length)for(const q of pokes)if(q.iter===iter-startIter0.v){ow(q.addr,q.val,false);}
   }
