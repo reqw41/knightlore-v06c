@@ -9,7 +9,7 @@
 "use strict";
 const fs=require("fs"),vm=require("vm"),zlib=require("zlib");
 const base="/Users/boris/projects/vector06js";
-const [ROM,SLD,NS,OUT]=process.argv.slice(2); const N=+NS||300;
+const [ROM,SLD,NS,OUT]=process.argv.slice(2); let N=+NS||300;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}}
 const SEED2HI=L.seed_2+1, ROOM=L.curr_room_attrib, VKBD=L.vkbd;
@@ -49,11 +49,15 @@ memory.write=function(a,w,s){a&=0xffff;
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
   if(a===SEED2HI&&phase==="game"){iter++;}
   return ow(a,w,s);};
-for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
+for(let f=0;f<60;f++)v06c.oneInterrupt(true);
+// KLFRAMES=n: снимок через n кадров от сброса, не дожидаясь комнаты (меню, заставка)
+if(process.env.KLFRAMES){for(let f=60;f<+process.env.KLFRAMES;f++)v06c.oneInterrupt(true);}
+else{
+key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
-if(phase!=="game")throw new Error("не дошли до комнаты");
+if(phase!=="game")throw new Error("не дошли до комнаты");}
 const startIter=iter;
-let frc=0,tacc=0;
+let frc=0,tacc=0; if(process.env.KLFRAMES)N=0;
 // KLSCAN=c0,c1,r0,r1: копить по кадрам объединение и пересечение пикселей окна плоскости 0
 let scan=null; if(process.env.KLSCAN){const m=process.env.KLSCAN.split(",").map(Number);
   scan={c0:m[0],c1:m[1],r0:m[2],r1:m[3],or:new Map(),and:new Map(),n:0};}
