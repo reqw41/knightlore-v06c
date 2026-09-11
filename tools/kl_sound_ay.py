@@ -88,12 +88,6 @@ msx_sfx:		DS		12			; 3 слота по 4 байта: id, тиков, парам�
 msx_ch:			DS		21			; 3 канала по 7: ptr(2), dur(2), режим громкости(1), начало потока(2)
 
 ; ---- выбор источника звука и переменные ВИ53 ----
-vec_snd_txt:	DB		0x47			; атрибут (на Векторе ч/б), дальше «SOUND  A AY  T VI53», бит 7 = конец
-				DB		0x1C, 0x18, 0x1E, 0x17, 0x0D, 0x26, 0x26, 0x0A, 0x26, 0x0A, 0x22
-				DB		0x26, 0x26, 0x1D, 0x26, 0x1F, 0x12, 0x05, 0x83
-vec_snd_force:	DB		0			; стенд: 0 = проба+вопрос, 1 = только AY, 2 = только ВИ53 (поке до старта)
-vec_snd_mode:	DS		1			; 0 = писать в AY напрямую, 1 = зеркало + ВИ53 из ISR
-vec_snd_ask:	DS		1			; 1 = задать вопрос об источнике на стартовом экране
 msx_vact:		DS		3			; голос канала AY активен в этом кадре
 msx_vdiv:		DS		6			; делитель ВИ53 для канала AY (lo, hi)
 msx_viw:		DS		3			; кому какой счётчик в этом кадре (0xFF = молчит)
@@ -120,10 +114,8 @@ DRIVER = """
 ; Весь драйвер MSX работает НЕ ТРОНУТЫМ и пишет в зеркало регистров AY; звучит только то,
 ; что раз в кадр перенесла в ВИ53 процедура msx_viflush (см. блок «ВИ53» ниже).
 
-msx_wr:			; C = регистр AY, B = значение
-				ld		a, (vec_snd_mode)
-				or		a
-				jp		nz, mwr_vi
+msx_wr:			; C = регистр AY, B = значение. Источник звука только один — ВИ53, ветка AY снята.
+				jp		mwr_vi
 				ld		a, c				; режим 0: прямо в AY (0x15 — номер регистра, 0x14 — данные)
 				out		(0x15), a
 				ld		a, b
@@ -170,9 +162,6 @@ msx_wlist:		; HL = список пар (регистр, значение), те�
 ; полной длины на максимуме), шум (заменён падающим тоном из периода шума R6).
 
 msx_viflush:	; из ISR раз в кадр, ПОСЛЕ msx_mtick
-				ld		a, (vec_snd_mode)
-				or		a
-				ret		z					; режим AY — таймер не наш
 				ld		a, (msx_play)
 				ld		hl, msx_vic0
 				cp		(hl)
@@ -401,72 +390,6 @@ mve_ctrl:		ld		a, c				; управляющее слово «режим 3, LSB+M
 				add		a, 0x36
 				out		(0x08), a
 				ret
-
-msx_snd_probe:	; выбор источника звука на старте. vec_snd_force: 0 = проба и вопрос,
-				; 1 = принудительно AY, 2 = принудительно ВИ53 (для стендов — поке до старта).
-				ld		a, (vec_snd_force)
-				or		a
-				jp		z, msp_probe
-				dec		a
-				ld		(vec_snd_mode), a
-				xor		a
-				ld		(vec_snd_ask), a
-				ret
-msp_probe:		; проба AY: пишем R1 (он 4-битный) и читаем назад с ОБОИХ портов — на MiSTer
-				; читается только 0x15, в vector06js только 0x14; два разных значения подряд
-				; отсекают «залипший» ответ шины.
-				ld		b, 0x0A
-				call	msp_try
-				jp		nz, msp_no
-				ld		b, 0x05
-				call	msp_try
-				jp		nz, msp_no
-				ld		a, 1				; AY отозвался — спросим игрока, стартуем с AY
-				ld		(vec_snd_ask), a
-				xor		a
-				ld		(vec_snd_mode), a
-				ret
-msp_no:			xor		a
-				ld		(vec_snd_ask), a
-				ld		a, 1				; AY нет — молча ВИ53
-				ld		(vec_snd_mode), a
-				ret
-msp_try:		ld		a, 1				; выбрать R1
-				out		(0x15), a
-				ld		a, b
-				out		(0x14), a
-				in		a, (0x15)
-				cp		b
-				ret		z
-				in		a, (0x14)
-				cp		b
-				ret
-
-vec_snd_menu:	; стартовый экран: «A — AY, T — таймер ВИ53». Только если AY отозвался.
-				ld		a, (vec_snd_ask)
-				or		a
-				ret		z
-				xor		a
-				ld		(vec_snd_ask), a	; спрашиваем один раз за загрузку
-				call	clear_scrn_buffer
-				ld		hl, 0x5F30			; Y = 95, X = 48
-				ld		de, vec_snd_txt
-				call	print_text_std_font
-				call	update_screen
-vsm_w:			ld		a, 0xFD				; ряд ZX 1: A S D F G
-				call	read_port
-				and		0x01
-				jp		nz, vsm_ay
-				ld		a, 0xFB				; ряд ZX 2: Q W E R T
-				call	read_port
-				and		0x10
-				jp		z, vsm_w
-				ld		a, 1				; T -> ВИ53
-				jp		vsm_set
-vsm_ay:			xor		a					; A -> AY
-vsm_set:		ld		(vec_snd_mode), a
-				call	msx_silence			; погасить оба источника перед меню
-				jp		clear_scrn_buffer
 
 msx_snd_init:	; из vec_boot: слоты пусты, мелодии нет, звук молчит
 				ld		a, 0xD3				; заготовка «out (порт), a : ret» — порт счётчика ВИ53 правится на лету
@@ -1215,13 +1138,7 @@ def apply(src):
     assert old in src, 'kl_sound_ay: update_sprite_loop'
     src = src.replace(old, old + "\t\t\t\tcall    msx_sfx_tick                            ; тик эффектов: 1 на объект\n", 1)
 
-    # 7. вопрос об источнике звука — перед меню (рисуется и стирается до display_menu)
-    old = "\t\t\t\tcall    clear_scrn                              ; colour is bright yellow on black\n\t\t\t\tcall    do_menu_selection\n"
-    assert src.count(old) == 1, 'kl_sound_ay: сайт вопроса об источнике звука'
-    src = src.replace(old, "\t\t\t\tcall    clear_scrn                              ; colour is bright yellow on black\n"
-                           "\t\t\t\tcall    vec_snd_menu                            ; AY или ВИ53 (только если AY отозвался)\n"
-                           "\t\t\t\tcall    do_menu_selection\n", 1)
-    rep['сайт: вопрос AY/ВИ53'] = 0
+    # 7. вопроса об источнике звука больше нет: единственный источник — ВИ53
 
     # 8. конец игрового кадра — глушение AY (MSX 0x4136)
     old = "loc_B000:\n\t\t\t\tld      hl, (seed_2)\n"
