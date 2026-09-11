@@ -1616,11 +1616,85 @@ zb_ar:			ld		a, (de)
 zb_arn:			inc		de
 				dec		b
 				jp		nz, zb_ar
-				ret
+				jp		vec_rpbuild			; ряды готовы — пересчитать готовые ответы read_port
 vec_arrzx:		DB		0x10, low (vec_zxrows+0), 0xFD	; LT -> Z  (ряд ZX 0, бит 1)
 				DB		0x40, low (vec_zxrows+0), 0xFB	; RT -> X  (ряд ZX 0, бит 2)
 				DB		0x20, low (vec_zxrows+1), 0xFE	; UP -> A  (ряд ZX 1, бит 0)
 				DB		0x80, low (vec_zxrows+2), 0xFE	; DN -> Q  (ряд ZX 2, бит 0)
+
+; vec_rpbuild: ряды ZX -> vec_rptab, готовые ответы read_port для масок, которыми игра реально
+; пользуется. Значение = cpl(AND выбранных рядов) and 0x1F, то есть всегда <= 0x1F; 0xFF в таблице
+; означает «маска не считана» и отправляет read_port на общий цикл — поэтому неучтённая маска
+; остаётся ПРАВИЛЬНОЙ, просто медленной. Список снят замером (трасса A на входе read_port):
+; в игре живут семь масок (0xFE 0x7F 0x7E 0xBD 0xDB 0xE7 0x99), ещё пять — в меню и паузе.
+; Зовётся только из vec_zxbuild, то есть в кадр, когда матрица изменилась. Портит A, BC, DE, HL.
+vec_rpbuild:	ld		a, (vec_zxrows+0)
+				ld		b, a				; B = ряд 0
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFE), a
+				ld		a, (vec_zxrows+7)
+				ld		c, a				; C = ряд 7
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x7F), a
+				ld		a, b
+				and		c
+				ld		b, a				; B = ряд0 & ряд7
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x7E), a
+				ld		a, (vec_zxrows+1)
+				ld		c, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFD), a
+				ld		a, (vec_zxrows+6)
+				and		c
+				ld		c, a				; C = ряд1 & ряд6
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xBD), a
+				ld		a, (vec_zxrows+2)
+				ld		d, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xFB), a
+				ld		a, (vec_zxrows+5)
+				and		d
+				ld		d, a				; D = ряд2 & ряд5
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xDB), a
+				ld		a, c
+				and		d
+				ld		e, a				; E = ряды 1,2,5,6
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x99), a
+				ld		a, (vec_zxrows+3)
+				ld		c, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xF7), a
+				ld		a, (vec_zxrows+4)
+				ld		d, a
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xEF), a
+				ld		a, c
+				and		d
+				ld		c, a				; C = ряд3 & ряд4
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0xE7), a
+				ld		a, b
+				and		c
+				and		e					; все восемь рядов
+				cpl
+				and		0x1F
+				ld		(vec_rptab+0x00), a
+				ret
 __VEC_KBZX__
 ; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
 ; ZX ряды: 0 SHIFT Z X C V | 1 A S D F G | 2 Q W E R T | 3 1 2 3 4 5 | 4 0 9 8 7 6 | 5 P O I U Y | 6 ENTER L K J H | 7 SPACE SYM M N B
@@ -1637,8 +1711,29 @@ vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4
 """
 
 
+VEC_RPTAB = """\t\t\t\t; Готовые ответы read_port по маске рядов (см. vec_rpbuild). 0xFF = «не считано».
+\t\t\t\t; Лежит в конце нижнего региона: выравнивание на страницу нужно для ld h, high vec_rptab,
+\t\t\t\t; а добивку ALIGN съедает любой код, который добавят перед таблицей.
+\t\t\t\tALIGN 256
+vec_rptab:\t\tDS\t\t256, 0xFF
+"""
+
 VEC_READ_PORT = """read_port:		; A = маска рядов ZX (бит i=0 -> ряд i опрошен) -> A = cpl(AND рядов) and 0x1F, как в оригинале.
-				; Ряды ZX (active-low) готовит ISR (vec_zxbuild) раз в кадр; здесь только AND выбранных. ~300 тактов.
+				; Ряды ZX (active-low) готовит ISR (vec_zxbuild) раз в кадр. Ответы для масок, которыми игра
+				; пользуется, там же посчитаны вперёд (vec_rpbuild): чтение таблицы 70 тактов против ~500
+				; у общего цикла. Ответ всегда <= 0x1F, поэтому 0xFF однозначно значит «не считано» —
+				; такая маска уходит на общий цикл и остаётся правильной, просто медленной.
+				push	hl
+				ld		l, a
+				ld		h, high vec_rptab
+				ld		a, (hl)
+				inc		a
+				jp		z, rp_slow
+				dec		a
+				pop		hl
+				ret
+rp_slow:		ld		a, l				; маска обратно
+				pop		hl
 				push	hl
 				push	bc
 				push	de
@@ -2666,7 +2761,7 @@ def main():
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
-        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (128 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
+        src, n = re.subn(r'(^\t+ORG %#06x\t+; верхний регион)' % VEC_UPPER, lambda m: helpers + VEC_RPTAB + "\t\t\t\tASSERT $ <= %#06x\t\t; нижний регион: до стека (128 Б) и переменных на %#06x\n" % (VEC_CODE_TOP, VEC_VARS) + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "место для IX-хелперов (vec)"
         src, n = re.subn(r'(^\t+ORG\s+0xF100\nreverse_bits_table:)', lambda m: "\t\t\t\tASSERT $ <= 0xF100\t\t; верхний регион: до таблиц сдвига\n" + m.group(1), src, count=1, flags=re.M)
         assert n == 1, "ASSERT верхнего региона"

@@ -38,7 +38,17 @@ function shot(name,mat){
   // биты 5..7 рядов read_port срезает (and 0x1F) — сравниваем только значащую пятёрку
   let s="";for(let r=0;r<8;r++)s+=(rd(L.vec_zxrows+r)&0x1F).toString(16).padStart(2,"0")+" ";
   out.push(`${name}: ${s.trim()}`);
+  // vec_rptab: готовые ответы read_port. Проверяем ВСЕ 256 масок: значение обязано быть либо
+  // 0xFF («не считано» -> read_port уходит на общий цикл), либо ровно cpl(AND рядов) and 0x1F.
+  if(L.vec_rptab!==undefined){
+    for(let m=0;m<256;m++){
+      let and=0xFF;for(let r=0;r<8;r++)if(!((m>>r)&1))and&=rd(L.vec_zxrows+r);
+      const exp=(~and)&0x1F, got=rd(L.vec_rptab+m);
+      if(got!==0xFF&&got!==exp)bad.push(`${name}: маска 0x${m.toString(16)} таблица ${got.toString(16)} != ${exp.toString(16)}`);
+    }
+  }
 }
+const bad=[];
 const zero=[0,0,0,0,0,0,0,0];
 shot("пусто",zero);
 for(let r=0;r<8;r++)for(let b=0;b<8;b++){const m=zero.slice();m[r]=1<<b;shot(`ряд${r}бит${b}`,m);}
@@ -50,4 +60,7 @@ const combos=[[0x10,0,0,0,0,0,0,0x04],[0x50,0,0,0,0,0,0,0],[0xF0,0,0,0,0,0,0,0],
 combos.forEach((c,i)=>shot("сочет"+i,c));
 shot("пусто2",zero);
 fs.writeFileSync(`build/kb_${TAG}.txt`,out.join("\n")+"\n");
-console.log(`состояний ${out.length} -> build/kb_${TAG}.txt`);
+const nrp=L.vec_rptab===undefined?0:out.length*256;
+const nfill=L.vec_rptab===undefined?0:[...Array(256)].filter((_,m)=>rd(L.vec_rptab+m)!==0xFF).length;console.log(`заполнено записей vec_rptab в конце прогона: ${nfill}`);
+console.log(`состояний ${out.length} -> build/kb_${TAG}.txt; проверок vec_rptab ${nrp}, расхождений ${bad.length}`);
+if(bad.length){console.log(bad.slice(0,10).join("\n"));process.exit(1);}
