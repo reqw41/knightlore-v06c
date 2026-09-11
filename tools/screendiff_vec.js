@@ -48,16 +48,26 @@ const ow=memory.write.bind(memory); const poke=(a,v)=>ow(a&0xffff,v&0xff,false);
   memory.write(at+3,0x00,false);
   if(process.env.KLDBG)console.log("seed_3-подмешивание погашено на",at.toString(16)); }
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
-const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
+// Раскладка 1 Вектора (kl_in_t1): O/P поворот, Q вперёд, A прыжок, цифры взять.
+// Имена клавиш в сценариях — ZX-логические (z/x поворот, a вперёд, q прыжок).
+// Ряды Вектора: 0 ВК/стрелки, 2 цифры 0..7, 4 @ABCDEFG, 5 HIJKLMNO, 6 PQRSTUVW, 7 XYZ[\]^ПРБ.
+const VKEYS={z:[5,0x80],x:[6,0x01],a:[6,0x02],q:[4,0x02],"0":[2,0x01],space:[7,0x80]};
 // Ввод должен быть НЕЗАВИСИМ от тактов: иначе две сборки с разной скоростью читают клавиши в разные кадры
-// и расходятся законно. Поэтому у цели vec глушим vec_zxbuild (ret) и кладём ряды ZX прямо в vec_zxrows
-// на границе итерации — ровно как на локстепе. KLKB=hw возвращает честный путь через матрицу Вектора.
+// и расходятся законно. Поэтому у цели vec глушим vec_scan и vec_zxbuild (ret) и кладём на границе
+// итерации И ряды ZX в vec_zxrows (меню, «любая клавиша», пауза через read_port), И матрицу Вектора
+// в vec_kbmat — игрока читает kl_vec_input именно оттуда, а не из рядов ZX.
+// KLKB=hw возвращает честный путь через матрицу Вектора и скан в ISR.
 const HWKB=process.env.KLKB==="hw";
 const ZXROWS=(!HWKB&&VKBD===undefined&&L.vec_zxbuild!==undefined)?L.vec_zxrows:undefined;
+const KBMAT=(ZXROWS!==undefined&&L.vec_scan!==undefined)?L.vec_kbmat:undefined;
+const kbm=new Uint8Array(8);
 if(ZXROWS!==undefined){memory.write(L.vec_zxbuild,0xC9,false);     // ret: ISR больше не трогает ряды
   for(let r=0;r<8;r++)memory.write(ZXROWS+r,0xFF,false);}          // ряды ZX: ничего не нажато
+if(KBMAT!==undefined){memory.write(L.vec_scan,0xC9,false);         // ret: ISR больше не трогает матрицу
+  for(let r=0;r<8;r++)memory.write(KBMAT+r,0x00,false);}           // матрица Вектора: ничего не нажато
 function key(k,down){
   if(VKBD===undefined&&ZXROWS===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
+  if(KBMAT!==undefined){const [vr,vb]=VKEYS[k];if(down)kbm[vr]|=vb;else kbm[vr]&=~vb;poke(KBMAT+vr,kbm[vr]);}
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke((VKBD!==undefined?VKBD:ZXROWS)+r,rows[r]);}
 const inputs={}; if(INPUTS&&fs.existsSync(INPUTS))for(const l of fs.readFileSync(INPUTS,"utf8").split("\n")){const m=l.trim().match(/^(\d+)\s+(\S+)\s+(down|up)/i);if(m)(inputs[+m[1]+1]=inputs[+m[1]+1]||[]).push([m[2].toLowerCase(),m[3].toLowerCase()==="down"]);}
 // FNV-1a 32 по региону памяти
