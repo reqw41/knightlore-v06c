@@ -668,7 +668,12 @@ VEC_SPLIT = __import__('os').environ.get('KL_VEC_SPLIT', 'spr_077')
 
 _ix_used = set()
 # горячие процедуры (по профилю): встроенное разворачивание ради темпа, остальные — компактно
-_IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects'}
+_IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object_not_ignored', 'adj_2_4_hflip', 'chk_plyr_spec_near_arch', 'upd_2_4', 'add_dXYZ', 'render_dynamic_objects',
+                    # добавлено раундом speed2 по профилю МЕСТ вызова (tools/ilhot_vec.js): верх списка
+                    # исполнений call il_* на итерацию в комнатах 39 и 163
+                    'no_delay', 'left_right_rotational', 'handle_forward', 'animate_human_legs', 'audio_B467',
+                    'calc_ghost_sprite', 'set_ghost_hflip', 'clr_ghost_hflip', 'next_fg_obj_sprite',
+                    'upd_182_183'}
 _cur_func = ['']
 
 _ix_form_cnt = {}
