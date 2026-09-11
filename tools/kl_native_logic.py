@@ -9,6 +9,7 @@ kl_wh:			DS		1			; wipe_next_object: высота стирания (уходит
 kl_scan:		DS		2			; calc_display_order_and_render: первая ещё не отрисованная запись objects_to_draw
 kl_cpcnt:		DS		1			; loc_D653/.copy_loop: счётчик копий (стек занят параметрами blit_to_screen)
 kl_seed0:		DS		1			; START: байт-затравка seed_1, переживающий clr_mem
+kl_nobj:		DB		40			; сколько записей graphic_objs_tbl реально занято (см. zero_end_of_graphic_objs_tbl)
 """
 
 # ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ sd_4:			ld		hl, sd_il+1
 				ld		(sd_ih+1), a						; объединённая высота -> иммедиат
 				ld		hl, graphic_objs_tbl
 				ld		de, 32								; шаг объекта живёт в DE весь цикл
-				ld		b, 40
+sd_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
 sd_loop:		ld		a, (hl)								; graphic no
 				or		a
 				jp		z, sd_next
@@ -642,15 +643,96 @@ def _loop_tail(pre, nx, nx7, done):
             "\t\t\t\tret\n") % (nx7, nx, pre, done)
 
 
+# ---------------------------------------------------------------------------
+# ПЕРВАЯ ОСЬ ВСТРОЕНА В ПРОХОД, а проверка «не игнорировать» СДВИНУТА ЗА НЕЁ.
+#
+# Замер комнаты 39: из 40 объектов 25 живых, из них первую ось проходят единицы
+# (doi_x зовётся 95 раз за итерацию — ровно столько, сколько живых проходов adj_dY,
+# то есть ВТОРАЯ ось почти никогда не достигается). Значит цена прохода = цена
+# первой оси, и её надо резать:
+#   * call/ret (27) и ld a,l/sub 7/ld l,a возврата к базе (15) убраны — тест
+#     вкомпилирован в цикл;
+#   * указатель идёт +0 -> +S (размер) -> +K (координата) -> +0 монотонно
+#     (dec l по 5 тактов вместо ld a,l/add/ld l,a по 15);
+#   * бит «ignore» читается ТОЛЬКО у тех, кто прошёл первую ось. Порядок проверок
+#     менять можно: is_object_not_ignored не имеет побочных эффектов, а объект,
+#     отсеянный любой из двух проверок, одинаково уходит на следующий.
+# Проход «живой, отсеян по первой оси»: 235 -> 154 (adj_dX) / 149 (adj_dY, adj_dZ).
+# Пустой объект — 46 тактов, как было.
+#
+# Иммедиаты первой оси — СВОИ КОПИИ (adx_s/adx_d, ady_s/ady_w, adz_s/adz_w): их
+# заполняет пролог цикла из иммедиатов doi_prep (26 тактов на копию, 2 копии на вызов).
+# Копии, а не общие ячейки: ветка попадания цикла правит СВОЙ doi{x,y,z}_s на дельту,
+# а первая ось у каждого цикла — чужая ось, которая внутри цикла не меняется.
+# ---------------------------------------------------------------------------
+def _axis_inline(pre, S, K, sz, co):
+    """Первая ось прохода: |co1 - (obj2+K)| - (sz1 + (obj2+S)), S = K+3."""
+    assert S == K + 3
+    return (
+        "%s_lp:\t\t\tld\t\ta, (hl)\t\t\t\t\t\t\t\t; graphic no\n"
+        "\t\t\t\tand\t\ta\n"
+        "\t\t\t\tjp\t\tz, %s_nx\n"
+        "\t\t\t\tld\t\ta, l\n"
+        "\t\t\t\tadd\t\ta, %d\n"
+        "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; obj2+%d (%s2)\n"
+        "%s:\t\t\tld\t\ta, 0\t\t\t\t\t\t\t\t; %s1\n"
+        "\t\t\t\tadd\t\ta, (hl)\n"
+        "\t\t\t\tld\t\t(%s_e+1), a\t\t\t\t\t\t; %s1+%s2\n"
+        "\t\t\t\tdec\t\tl\n"
+        "\t\t\t\tdec\t\tl\n"
+        "\t\t\t\tdec\t\tl\t\t\t\t\t\t\t\t; obj2+%d (%s2)\n"
+        "%s_s:\t\t\tld\t\ta, 0\t\t\t\t\t\t\t\t; %s1 + d\n"
+        "\t\t\t\tsub\t\t(hl)\n"
+        "\t\t\t\tjp\t\tp, %s_a\n"
+        "\t\t\t\tcpl\n"
+        "\t\t\t\tinc\t\ta\t\t\t\t\t\t\t\t\t; abs()\n"
+        "%s_a:\n"
+        "%s_e:\t\t\tsub\t\t0\n"
+        "\t\t\t\tjp\t\tnc, %s_nk\t\t\t\t\t\t\t; нет пересечения по первой оси\n"
+        "\t\t\t\tld\t\ta, l\n"
+        "\t\t\t\tadd\t\ta, %d\n"
+        "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; obj2+7 (флаги)\n"
+        "\t\t\t\tld\t\ta, (hl)\n"
+        "\t\t\t\tand\t\t2\t\t\t\t\t\t\t\t\t; ignore?\n"
+        "\t\t\t\tjp\t\tnz, %s_nx7\n"
+        "\t\t\t\tld\t\ta, l\n"
+        "\t\t\t\tsub\t\t7\n"
+        "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; -> база объекта 2\n"
+    ) % (pre, pre, S, S, sz, pre + '_z', sz, pre, sz, sz, K, co,
+         pre, co, pre, pre, pre, pre, 7 - K, pre)
+
+
+def _axis_tail(pre, K, nx, nx7, done):
+    # nx7 (объект «ignore», HL на +7) снимает 7-K и ПРОВАЛИВАЕТСЯ в nk, который снимает
+    # оставшиеся K: общий хвост, лишнего jp нет.
+    return ("%s:\t\t\tld\t\ta, l\n"
+            "\t\t\t\tsub\t\t%d\n"
+            "\t\t\t\tld\t\tl, a\t\t\t\t\t\t\t\t; +7 -> +%d\n"
+            "%s_nk:\t\t\t" + "dec\t\tl\n\t\t\t\t" * K + "; -> база объекта 2\n"
+            "%s:\t\t\tadd\t\thl, de\t\t\t\t\t\t\t\t; следующий объект\n"
+            "\t\t\t\tdec\t\tb\n"
+            "\t\t\t\tjp\t\tnz, %s_lp\n"
+            "\t\t\t\tld\t\thl, graphic_objs_tbl+1280\n"
+            "\t\t\t\tld\t\t(z80_iy), hl\t\t\t\t\t\t; IY после цикла — как у оригинала\n"
+            "%s:\t\t\tpop\t\thl\t\t\t\t\t\t\t\t\t; dY/dZ\n"
+            "\t\t\t\tret\n") % (nx7, 7 - K, K, pre, nx, pre, done)
+
+
+def _axis_prep(pre, src_s, src_sz):
+    return ("\t\t\t\tld\t\ta, (%s+1)\n"
+            "\t\t\t\tld\t\t(%s_s+1), a\t\t\t\t\t\t; координата+d первой оси — в свой иммедиат\n"
+            "\t\t\t\tld\t\ta, (%s+1)\n"
+            "\t\t\t\tld\t\t(%s_z+1), a\t\t\t\t\t\t; размер объекта 1 по первой оси\n"
+            ) % (src_s, pre, src_sz, pre)
+
+
 N_ADJ_DX_LOOP = """adj_dX_for_obj_intersect:	; C = dX (правится), HL = dY/dZ; прижать dX к другим объектам
 				call	doi_prep
-				push	hl									; dY/dZ — на стек, HL под указатель
+""" + _axis_prep('adx', 'doiy_s', 'doiy_d') + """				push	hl									; dY/dZ — на стек, HL под указатель
 				ld		hl, graphic_objs_tbl
 				ld		de, 32
-				ld		b, 40								; max objects
-""" + _loop_head('adx', 'adx_nx', 'adx_nx7') + """				call    do_objs_intersect_on_y
-				jp		nc, adx_nx
-				call    do_objs_intersect_on_z
+adx_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
+""" + _axis_inline('adx', 5, 2, 'D', 'Y') + """				call    do_objs_intersect_on_z
 				jp		nc, adx_nx
 
 adx_rt:			call    do_objs_intersect_on_x
@@ -685,18 +767,16 @@ loc_CBD9:		ld		a, c
 				ld		de, 32								; вернуть шаг (флаги целы)
 				jp		z, adx_done
 				jp		adx_rt
-""" + _loop_tail('adx', 'adx_nx', 'adx_nx7', 'adx_done') + """; End of function adj_dX_for_obj_intersect
+""" + _axis_tail('adx', 2, 'adx_nx', 'adx_nx7', 'adx_done') + """; End of function adj_dX_for_obj_intersect
 """
 
 N_ADJ_DY_LOOP = """adj_dY_for_obj_intersect:	; L = dY (правится), C = dX, H = dZ; прижать dY к другим объектам
 				call	doi_prep
-				push	hl									; dY/dZ — на стек, HL под указатель
+""" + _axis_prep('ady', 'doix_s', 'doix_w') + """				push	hl									; dY/dZ — на стек, HL под указатель
 				ld		hl, graphic_objs_tbl
 				ld		de, 32
-				ld		b, 40								; max objects
-""" + _loop_head('ady', 'ady_nx', 'ady_nx7') + """				call    do_objs_intersect_on_x
-				jp		nc, ady_nx
-				call    do_objs_intersect_on_z
+ady_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
+""" + _axis_inline('ady', 4, 1, 'W', 'X') + """				call    do_objs_intersect_on_z
 				jp		nc, ady_nx
 
 ady_rt:			call    do_objs_intersect_on_y
@@ -733,18 +813,16 @@ loc_CC28:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
 				ld		de, 32
 				jp		z, ady_done
 				jp		ady_rt
-""" + _loop_tail('ady', 'ady_nx', 'ady_nx7', 'ady_done') + """; End of function adj_dY_for_obj_intersect
+""" + _axis_tail('ady', 1, 'ady_nx', 'ady_nx7', 'ady_done') + """; End of function adj_dY_for_obj_intersect
 """
 
 N_ADJ_DZ_LOOP = """adj_dZ_for_obj_intersect:	; H = dZ (правится), C = dX, L = dY; прижать dZ к другим объектам
 				call	doi_prep
-				push	hl									; dY/dZ — на стек, HL под указатель
+""" + _axis_prep('adz', 'doix_s', 'doix_w') + """				push	hl									; dY/dZ — на стек, HL под указатель
 				ld		hl, graphic_objs_tbl
 				ld		de, 32
-				ld		b, 40								; max objects
-""" + _loop_head('adz', 'adz_nx', 'adz_nx7') + """				call    do_objs_intersect_on_x
-				jp		nc, adz_nx
-				call    do_objs_intersect_on_y
+adz_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
+""" + _axis_inline('adz', 4, 1, 'W', 'X') + """				call    do_objs_intersect_on_y
 				jp		nc, adz_nx
 
 adz_rt:			call    do_objs_intersect_on_z
@@ -792,7 +870,7 @@ loc_CC8D:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
 				ld		de, 32
 				jp		z, adz_done
 				jp		adz_rt
-""" + _loop_tail('adz', 'adz_nx', 'adz_nx7', 'adz_done') + """; End of function adj_dZ_for_obj_intersect
+""" + _axis_tail('adz', 1, 'adz_nx', 'adz_nx7', 'adz_done') + """; End of function adj_dZ_for_obj_intersect
 """
 
 # do_any_objs_intersect: тот же цикл, но HL уже сохранён прологом (push hl), а IY —
@@ -809,7 +887,7 @@ N_DO_ANY = """do_any_objs_intersect:
 				call	doi_prep
 				ld		hl, graphic_objs_tbl
 				ld		de, 32
-				ld      b, 40                                  ; max objects
+dai_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
 """ + _loop_head('dai', 'dai_nx', 'dai_nx7') + """				call    do_objs_intersect_on_x
 				jp		nc, dai_nx
 				call    do_objs_intersect_on_y
@@ -1658,11 +1736,56 @@ N_HANDLE_EXIT = """handle_exit_screen:
 # сдвигом L на +7 без adc и без push/pop, а возврат к базе слит с шагом +32 (+25).
 # 118 -> 62 такта на пустой объект, 101-117 на непустой.
 # ---------------------------------------------------------------------------
+N_ZERO_END = """zero_end_of_graphic_objs_tbl:	; DE = первый свободный слот таблицы объектов
+				; Загрузчик комнаты (retrieve_screen) кладёт объекты В ПОДРЯД, начиная с
+				; other_objs_here, и здесь обнуляет ВЕСЬ хвост до font. Значит DE в этой точке —
+				; граница «занято / пусто», и она же верхняя граница всех живых объектов до
+				; следующей загрузки: позже graphic_no пишется только в СВОЙ объект диспетчера
+				; (ix) и в спецобъекты 2/3, то есть в слоты ниже границы.
+				push	de
+				ld		hl, graphic_objs_tbl
+				ld		b, 0
+				ld		c, 40								; страховка: не найдём DE — останется 40
+zeg_cnt:		ld		a, l
+				cp		e
+				jp		nz, zeg_nx
+				ld		a, h
+				cp		d
+				jp		z, zeg_got
+zeg_nx:			ld		a, l
+				add		a, 32
+				ld		l, a
+				jp		nc, zeg_n2
+				inc		h
+zeg_n2:			inc		b
+				dec		c
+				jp		nz, zeg_cnt
+				ld		b, 40								; страховка: DE не нашлось — сканировать всё
+zeg_got:		ld		a, b
+				ld		(kl_nobj), a						; для отладки/проверки инварианта
+				ld		(sd_nb+1), a
+				ld		(adx_nb+1), a
+				ld		(ady_nb+1), a
+				ld		(adz_nb+1), a
+				ld		(dai_nb+1), a
+				ld		(lo_nb+1), a
+				pop		de
+
+zeg_lp:			ld      hl, clear_end					; конец таблицы объектов (в оригинале метка font)
+				and     a
+				sbc     hl, de                                  ; done?
+				ret     Z                                       ; yes, exit
+				ld      b, 32                                  ; 32 bytes to clear
+				call    zero_DE
+				jp      zeg_lp
+"""
+
+
 N_LIST_OBJS = """list_objects_to_draw:	; индексы объектов с graphic_no != 0 и DRAW (бит 4 поля 7) -> objects_to_draw, терминатор 0xFF
 				ld		hl, graphic_objs_tbl
 				ld		de, objects_to_draw
 				ld		c, 0
-				ld		b, 40
+lo_nb:			ld		b, 40								; иммедиат: занятые записи таблицы (правит zeg_got)
 lo_1:			ld		a, (hl)
 				or		a
 				jp		z, lo_2
@@ -1930,6 +2053,7 @@ N_GET_PTR_OBJ = """get_ptr_object:
 # render_list/rendered_objs_cnt/render_obj_1 — как в оригинале.
 # ---------------------------------------------------------------------------
 N_DISPLAY_ORDER = """KL_GPO_K		equ		(graphic_objs_tbl >> 5) & 7	; get_ptr_object: старшие биты младшего байта базы уходят в индекс
+
 KL_GPO_PG		equ		(graphic_objs_tbl - 32*KL_GPO_K - (graphic_objs_tbl & 31)) >> 8
 calc_display_order_and_render:
 				ASSERT (graphic_objs_tbl & 31) <= 25		; иначе l+6 переносит и чтение полей объекта 2 ломается
@@ -1968,20 +2092,13 @@ loc_CEDB:		ld		a, (de)								; следующий graphic no
 				jp		loc_CEDB							; уже отрисован
 ov_i1:			cp		0									; тот же объект? (иммедиат = индекс объекта 1)
 				jp		z, loc_CEDB
-				add		a, KL_GPO_K							; get_ptr_object по месту (индекс уже без бита 7)
-				rrca
-				rrca
-				rrca
+				add		a, a								; индекс -> адрес объекта 2 + 2 по таблице
 				ld		l, a
-				and		0x1F
-				add		a, KL_GPO_PG
-				ld		h, a
-				ld		a, l
-				and		0xE0
-				add		a, graphic_objs_tbl & 31
-				ld		l, a								; HL = объект 2
+				ld		h, KL_OPTR_PG
+				ld		a, (hl)
 				inc		l
-				inc		l									; +2 = Y2
+				ld		h, (hl)
+				ld		l, a								; HL = объект 2 + 2 (поле Y)
 				ld		a, (hl)
 				ld		b, a
 				inc		l
@@ -2190,6 +2307,22 @@ render_done:	pop		hl									; восстановить IY, IX вызывате�
 				pop		hl
 				ld		(z80_ix), hl
 				ret
+				ALIGN	256
+kl_optr:	; индекс объекта (0..39) -> адрес его поля +2 (Y). Таблица СТАТИЧЕСКАЯ: адрес объекта
+			; = graphic_objs_tbl + 32*i, ничего поддерживать не нужно. Выравнивание на страницу
+			; экономит add a,low kl_optr (7 тактов) на каждой паре объектов внутренного цикла.
+				DW		graphic_objs_tbl+2+32*0, graphic_objs_tbl+2+32*1, graphic_objs_tbl+2+32*2, graphic_objs_tbl+2+32*3
+				DW		graphic_objs_tbl+2+32*4, graphic_objs_tbl+2+32*5, graphic_objs_tbl+2+32*6, graphic_objs_tbl+2+32*7
+				DW		graphic_objs_tbl+2+32*8, graphic_objs_tbl+2+32*9, graphic_objs_tbl+2+32*10, graphic_objs_tbl+2+32*11
+				DW		graphic_objs_tbl+2+32*12, graphic_objs_tbl+2+32*13, graphic_objs_tbl+2+32*14, graphic_objs_tbl+2+32*15
+				DW		graphic_objs_tbl+2+32*16, graphic_objs_tbl+2+32*17, graphic_objs_tbl+2+32*18, graphic_objs_tbl+2+32*19
+				DW		graphic_objs_tbl+2+32*20, graphic_objs_tbl+2+32*21, graphic_objs_tbl+2+32*22, graphic_objs_tbl+2+32*23
+				DW		graphic_objs_tbl+2+32*24, graphic_objs_tbl+2+32*25, graphic_objs_tbl+2+32*26, graphic_objs_tbl+2+32*27
+				DW		graphic_objs_tbl+2+32*28, graphic_objs_tbl+2+32*29, graphic_objs_tbl+2+32*30, graphic_objs_tbl+2+32*31
+				DW		graphic_objs_tbl+2+32*32, graphic_objs_tbl+2+32*33, graphic_objs_tbl+2+32*34, graphic_objs_tbl+2+32*35
+				DW		graphic_objs_tbl+2+32*36, graphic_objs_tbl+2+32*37, graphic_objs_tbl+2+32*38, graphic_objs_tbl+2+32*39
+KL_OPTR_PG		equ		kl_optr >> 8
+				ASSERT	(kl_optr & 0xFF) == 0
 ; End of function calc_display_order_and_render
 """
 
@@ -2663,6 +2796,8 @@ def apply(src, attrs_cut=False):
                N_HANDLE_EXIT, 'handle_exit_screen')
     src = _sub(src, r'(?m)^list_objects_to_draw:[^\n]*\n.*?; End of function list_objects_to_draw\r?\n',
                N_LIST_OBJS, 'list_objects_to_draw')
+    src = _sub(src, r'(?m)^zero_end_of_graphic_objs_tbl:[^\n]*\n.*?^[ \t]*jr[ \t]+zero_end_of_graphic_objs_tbl[^\n]*\n',
+               N_ZERO_END, 'zero_end_of_graphic_objs_tbl (счётчик занятых записей)')
     src = _sub(src, r'(?m)^wipe_next_object:[^\n]*\n.*?(?=^loc_D653:)', N_WIPE, 'wipe_next_object')
     src = _sub(src, r'(?m)^set_pixel_adj:[^\n]*\n.*?; End of function set_pixel_adj\r?\n', N_SET_PIXEL_ADJ, 'set_pixel_adj')
     src = _sub(src, r'(?m)^calc_pixel_XY_and_render:\n.*?; End of function calc_pixel_XY_and_render\r?\n',

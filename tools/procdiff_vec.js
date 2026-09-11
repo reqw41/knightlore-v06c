@@ -114,6 +114,13 @@ const GEN = {
     return { regs: {}, set: [["graphic_objs_tbl", 0, objtbl(r)]],
              ptr: [["z80_ix", "graphic_objs_tbl", 32 * (r() % 40)], ["z80_iy", "graphic_objs_tbl", 0]] };
   },
+  // ХВОСТ ЗАГРУЗКИ КОМНАТЫ: DE = первый свободный слот таблицы объектов; процедура обязана
+  // обнулить ровно хвост от DE до конца таблицы (и в новой сборке ещё посчитать занятые).
+  // Сценарные гейты сюда почти не заходят: вход в комнату — 1-2 раза за прогон.
+  zero_end_of_graphic_objs_tbl(r) {
+    return { regs: { deLabel: ["graphic_objs_tbl", 32 * (r() % 41)] },
+             set: [["graphic_objs_tbl", 0, objtbl(r)]] };
+  },
   // выход из комнаты: перенести координаты из special_objs_here обратно в special_objs_tbl
   update_special_objs(r) {
     const here = []; for (let i = 0; i < 96; i++) here.push(r());
@@ -133,6 +140,9 @@ const DEAD = {
   // build_screen_objects: сразу call clear_scrn_buffer / call adjust_plyr_xyz_for_room_size
   find_special_objs_here: ["a", "b", "c", "d", "e", "h", "l", "f"],
   update_special_objs: ["a", "b", "c", "d", "e", "h", "l", "f"],
+  // retrieve_screen возвращается в build_screen_objects, который сразу делает
+  // call find_special_objs_here — все рабочие регистры там перезадаются
+  zero_end_of_graphic_objs_tbl: ["a", "b", "c", "h", "l", "f"],
   // вызыватели (menu_loop, game_over, display_status_info) сразу перезадают всё
   display_menu: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
   display_day: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
@@ -151,6 +161,7 @@ const CMP = {
   loc_C0DD: [["graphic_objs_tbl", 0, 40 * 32]],
   set_wipe_and_draw_IY: [["graphic_objs_tbl", 0, 40 * 32]],
   prepare_final_animation: [["graphic_objs_tbl", 0, 40 * 32], ["special_objs_here", 0, 96]],
+  zero_end_of_graphic_objs_tbl: [["graphic_objs_tbl", 0, 40 * 32]],
   find_special_objs_here: [["special_objs_here", 0, 96], ["special_objs_tbl", 0, 288]],
   update_special_objs: [["special_objs_tbl", 0, 288], ["special_objs_here", 0, 96]],
 };
@@ -183,6 +194,7 @@ function run(m, L, st) {
   // объекты 23-24 таблицы (0x7AE8..0x7FE8) и гейт показывал ложное расхождение.
   cpu.sp = st.regs.sp || L.clear_start; m.poke(cpu.sp - 1, SENT >> 8); m.poke(cpu.sp - 2, SENT & 0xff); cpu.sp -= 2;
   if (st.regs.hlLabel) { const v = L[st.regs.hlLabel[0]] + st.regs.hlLabel[1]; cpu.set_h(v >> 8); cpu.set_l(v & 0xff); }
+  if (st.regs.deLabel) { const v = L[st.regs.deLabel[0]] + st.regs.deLabel[1]; cpu.set_d(v >> 8); cpu.set_e(v & 0xff); }
   if (st.push) for (const w of st.push) { m.poke(cpu.sp - 1, w >> 8); m.poke(cpu.sp - 2, w & 0xff); cpu.sp -= 2; }
   cpu.pc = L[LABEL]; cpu.iff = false;
   m.trace = []; m.on = true;
