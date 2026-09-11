@@ -82,72 +82,11 @@ function runRoom(room){
   return st;
 }
 
-function simCache(seq,nslots,memLimit){
-  // LRU по ключу «адрес+ориентация»; слот занимает 2+2*w*h байт; общий пул memLimit байт
-  let hit=0,miss=0,copied=0;
-  const slots=[]; // {key,sz}
-  for(const [de,want,w,h] of seq){
-    const key=de+":"+want; const sz=2+2*w*h;
-    const i=slots.findIndex(s=>s.key===key);
-    if(i>=0){hit++;const s=slots.splice(i,1)[0];slots.push(s);continue;}
-    miss++;copied+=sz;
-    slots.push({key,sz});
-    while(slots.length>nslots||slots.reduce((a,s)=>a+s.sz,0)>memLimit){if(slots.length<=1)break;slots.shift();}
-  }
-  return {hit,miss,copied};
-}
 
 // ГИБРИД: мастер по-прежнему разворачивается НА МЕСТЕ (быстрый путь have==want сохранён),
 // кэш только для случая have!=want; промах = сегодняшняя цена + копия; пул без вытеснения.
-function simHybrid(seqAll,nslots,memLimit){
-  const master={}; const cache=new Set(); let used=0;
-  let fast=0,hit=0,miss=0,copied=0,flipped=0,notfit=0;
-  for(const [de,want,w,h,orig] of seqAll){
-    if(!(de in master))master[de]=orig;
-    if(master[de]===want){fast++;continue;}
-    const key=de+":"+want;
-    if(cache.has(key)){hit++;continue;}
-    miss++;flipped+=2*w*h;
-    master[de]=want;
-    const sz=2+2*w*h;
-    if(cache.size<nslots&&used+sz<=memLimit){cache.add(key);used+=sz;copied+=sz;}else notfit++;
-  }
-  return {fast,hit,miss,copied,flipped,notfit,used};
-}
 
-// ГИБРИД + LRU-вытеснение (пул как список, при нехватке выкидываем самый старый по обращению)
-function simHybridLRU(seqAll,nslots,memLimit,minSz,maxSz){
-  const master={}; let slots=[]; // {key,sz}
-  let fast=0,hit=0,miss=0,copied=0,skip=0;
-  for(const [de,want,w,h,orig] of seqAll){
-    if(!(de in master))master[de]=orig;
-    if(master[de]===want){fast++;continue;}
-    const key=de+":"+want, sz=2+2*w*h;
-    const i=slots.findIndex(x=>x.key===key);
-    if(i>=0){hit++;const x=slots.splice(i,1)[0];slots.push(x);continue;}
-    miss++; master[de]=want;
-    if(sz>maxSz){skip++;continue;}
-    slots.push({key,sz});copied+=sz;
-    while(slots.length>nslots||slots.reduce((a,x)=>a+x.sz,0)>memLimit){if(slots.length<=1){slots=[];break;}slots.shift();}
-  }
-  return {fast,hit,miss,copied,skip,used:slots.reduce((a,x)=>a+x.sz,0)};
-}
 
-// ГИБРИД + кольцевая замена (round-robin), фиксированные слоты по maxSz байт — то, что реально в asm
-function simHybridRR(seqAll,nslots,maxSz){
-  const master={}; const tag=new Array(nslots).fill(null); let rr=0;
-  let fast=0,hit=0,miss=0,skip=0;
-  for(const [de,want,w,h,orig] of seqAll){
-    if(!(de in master))master[de]=orig;
-    if(master[de]===want){fast++;continue;}
-    const key=de+":"+want, sz=2+2*w*h;
-    if(tag.includes(key)){hit++;continue;}
-    miss++; master[de]=want;
-    if(sz>maxSz){skip++;continue;}
-    tag[rr]=key; rr=(rr+1)%nslots;
-  }
-  return {fast,hit,miss,skip};
-}
 
 // ЧИСТЫЙ кэш: мастер мелких спрайтов НЕ трогаем — копию разворачиваем в слоте.
 // Крупные (>maxSz) по-прежнему разворачиваются на месте (мастер меняет ориентацию).
@@ -167,18 +106,6 @@ function simPure(seqAll,nslots,maxSz,lru){
   return {fast,hit,flip,big};
 }
 
-function simBump(seq,nslots,memLimit){
-  // bump-аллокатор: не влезло — полный сброс каталога и пула
-  let hit=0,miss=0,copied=0,used=0,slots=[];
-  for(const [de,want,w,h] of seq){
-    const key=de+":"+want, sz=2+2*w*h;
-    if(slots.some(s=>s===key)){hit++;continue;}
-    miss++;copied+=sz;
-    if(used+sz>memLimit||slots.length>=nslots){slots=[];used=0;}
-    slots.push(key);used+=sz;
-  }
-  return {hit,miss,copied};
-}
 
 const rooms=(ROOMS||"start,39,163,133,31,3").split(",").map(s=>s.trim()==="start"?null:+s.trim());
 for(const r of rooms){
@@ -202,19 +129,5 @@ for(const r of rooms){
   for(const [ns,mx,lru] of [[3,126,0],[4,126,0],[5,126,0],[6,126,0],[4,126,1],[5,126,1]]){
     const r=simPure(s.seqAll,ns,mx,lru);
     console.log(`  ЧИСТЫЙ ${ns} слотов по ${mx}Б (=${ns*128}Б)${lru?" LRU":" кольцо"}: разворотов ${r.flip} (${(r.flip/s.iters).toFixed(2)}/итер, ${(100*r.flip/(s.work||1)).toFixed(0)}% от сегодняшних ${s.work}), из них крупных ${r.big}; попаданий ${(r.hit/s.iters).toFixed(2)}/итер, быстрых ${(r.fast/s.iters).toFixed(1)}/итер`);
-  }
-  for(const [ns,mx] of [[4,126],[5,126],[6,126],[8,126]]){
-    const r=simHybridRR(s.seqAll,ns,mx);
-    console.log(`  КОЛЬЦО ${ns} слотов по ${mx}Б (=${ns*128}Б): разворотов ${r.miss} (${(r.miss/s.iters).toFixed(2)}/итер, ${(100*r.miss/(s.work||1)).toFixed(0)}% от сегодняшних ${s.work}), попаданий ${(r.hit/s.iters).toFixed(2)}/итер, крупных мимо ${r.skip}`);
-  }
-  for(const [ns,ml,mx] of [[3,384,128],[4,512,128],[5,640,128],[6,768,128],[4,544,136],[6,816,136],[8,1024,128],[64,65536,9999]]){
-    const h2=simHybridLRU(s.seqAll,ns,ml,0,mx);
-    console.log(`  ГИБРИД+LRU ${String(ns).padStart(2)} слотов по ${mx}Б (=${ml}Б) : разворотов ${h2.miss} (${(h2.miss/s.iters).toFixed(2)}/итер, ${(100*h2.miss/294).toFixed(0)}%), попаданий ${(h2.hit/s.iters).toFixed(2)}/итер, мимо кэша (крупные) ${h2.skip}, копий ${(h2.copied/s.iters).toFixed(0)}Б/итер`);
-  }
-  const base=simHybrid(s.seqAll,0,0);
-  console.log(`  ГИБРИД без кэша (= сегодня): разворотов ${base.miss} (${(base.miss/s.iters).toFixed(2)}/итер), байт ${(base.flipped/s.iters).toFixed(0)}/итер`);
-  for(const [ns,ml] of [[4,256],[6,384],[6,512],[8,640],[8,768],[8,896],[10,1000],[16,1024],[64,65536]]){
-    const hb=simHybrid(s.seqAll,ns,ml);
-    console.log(`  ГИБРИД ${String(ns).padStart(2)} слотов/${String(ml).padStart(5)}Б: разворотов ${hb.miss} (${(hb.miss/s.iters).toFixed(2)}/итер, ${(100*hb.miss/(base.miss||1)).toFixed(0)}% от сегодня), попаданий ${hb.hit} (${(hb.hit/s.iters).toFixed(2)}/итер), не влезло ${hb.notfit}, занято ${hb.used} Б`);
   }
 }

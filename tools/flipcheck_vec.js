@@ -81,9 +81,7 @@ function call1(de,want){
   cpu.sp=0xC000;wr(0xBFFE,RETA&0xff);wr(0xBFFF,RETA>>8);cpu.sp=0xBFFE;
   cpu.set_rp(2,de);                                       // DE
   cpu.pc=FSD;cpu.iff=false;
-  let steps=0;const TR=(process.env.FCTRACE&&+process.env.FCTRACE===de&&want===0x40);const tr=[];
-  while(cpu.pc!==RETA&&steps++<200000){if(TR&&tr.length<20000)tr.push(cpu.pc.toString(16)+"/"+cpu.a().toString(16)+","+cpu.hl().toString(16)+","+cpu.de().toString(16)+","+cpu.bc().toString(16));cpu.instruction();}
-  if(TR){{const i=tr.findIndex(x=>parseInt(x,16)===0x3e2b);console.log("после fc_alloc:",tr.slice(i,i+70).join(" "));console.log("шагов всего",steps);}process.exit(0);}
+  let steps=0;while(cpu.pc!==RETA&&steps++<200000)cpu.instruction();
   if(cpu.pc!==RETA)throw new Error(`flip_sprite_data не вернулся: спрайт ${de.toString(16)} (w=${w} h=${h}) -> ориентация ${want.toString(16)}, pc=${cpu.pc.toString(16)}`);
   const got=cpu.de();
   const exp=model(before,want);

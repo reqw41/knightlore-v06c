@@ -13,6 +13,11 @@ build/knightlore_8080.asm — та же программа в подмножес
       ▼
 tools/check_i8080.py      — ГЕЙТ: ни одного Z80-only опкода в листинге (08/10/18/2x/3x/CB/D9/DD/ED/FD)
 tools/lockstep_vec.js     — ГЕЙТ: локстеп с оригиналом на headless-ядре vector06js
+tools/flipcheck_vec.js    — ГЕЙТ: разворот спрайтов (все спрайты × 4 ориентации, сверка с моделью
+                            на JS по возвращённому DE). Единственный гейт, трогающий V-разворот:
+                            в сценарных комнатах его нет. Запуск: node tools/flipcheck_vec.js
+                            build/knightlore_vec.r0m build/knightlore_vec.sld 3
+tools/flipstat_vec.js     — статистика разворотов и симулятор кэша развёрнутых копий
 ```
 `./build.sh [lockstep]` делает всё. Цель `lockstep` — логика 1:1, вывод заглушен (см. ниже).
 
