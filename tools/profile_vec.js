@@ -8,7 +8,7 @@ const [ROM,SLD,NS,INPUTS]=process.argv.slice(2); const N=+NS||300;
 const L={}; const lab=[];
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}}
 // функции = метки не loc_/. /il_/IL_/vec_ldir внутренние; отсортированные адреса
-const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|kl_b6|kl_frv|rp_|vb_|us_|bts_|vfw_|ps_|vdb_|vpb_|usl_)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
+const fn=Object.entries(L).filter(([n,a])=>!/^(loc_|\.|IL_|kl_b6|kl_frv|rp_|vb_|us_|bts_|vfw_|ps_|vdb_|vpb_|vp_|usl_)/.test(n)&&a>=0x80).sort((x,y)=>x[1]-y[1]);
 const isHelper=fn.map(x=>/^il_/.test(x[0]));
 const fa=fn.map(x=>x[1]), fnm=fn.map(x=>x[0]);
 function idx(pc){let lo=0,hi=fa.length-1,r=-1;while(lo<=hi){const m=(lo+hi)>>1;if(fa[m]<=pc){r=m;lo=m+1;}else hi=m-1;}return r;}
@@ -65,10 +65,12 @@ let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter;
 if(process.env.KLIO){let n=0;const oi=io.input.bind(io),oo=io.output.bind(io);io.input=function(p){const r=oi(p);if(n++<60)console.log('in',p.toString(16),'->',r.toString(16),'CW',io.CW.toString(16),'PA',io.PA.toString(16));return r;};io.output=function(p,w){if(n++<60)console.log('out',p.toString(16),'<-',w.toString(16));return oo(p,w);};} let cur=-1; const hcyc=new Float64Array(fa.length);
-let frc=0,tacc=0,lost=0,frames=0,hcyc_halt=0;   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
- while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();} const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;if(cpu.last_opcode===0x76)hcyc_halt+=c;tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();/* без filler вывод в порты не фиксируется */let i=idx(pc);if(i>=0){if(isHelper[i]){if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
+let frc=0,tacc=0,lost=0,frames=0,hcyc_halt=0;
+const PC0=L.vec_pace===undefined?-1:L.vec_pace, PCE=Math.min(...Object.entries(L).filter(([n,a])=>a>L.vec_pace&&!/^vp_/.test(n)).map(([n,a])=>a)), PC1=L.vp_done===undefined?-1:L.vp_done; let pcCode=0,pcHalt=0;   // цена ограничителя темпа: код и halt отдельно   // tacc: ВИ53 тикает вдвое медленнее CPU (1.5 МГц) — иначе секундомер бюджета стоит
+ while(iter-startIter<N&&steps<2e8){if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();} const pc=cpu.pc;const c=(cpu.instruction(),cpu.vcycles);steps++;total+=c;TOT+=c;frc+=c;if(cpu.last_opcode===0x76)hcyc_halt+=c;if(PC0>=0&&((pc>=PC0&&pc<PCE)||(pc>=PC1&&pc<PC1+3))){if(cpu.last_opcode===0x76)pcHalt+=c;else pcCode+=c;}tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}if(cpu.last_opcode===0xd3)io.commit();/* без filler вывод в порты не фиксируется */let i=idx(pc);if(i>=0){if(isHelper[i]){if(cur>=0){cyc[cur]+=c;hcyc[cur]+=c;}}else{cur=i;cyc[i]+=c;if(pc===fa[i])calls[i]++;}}}
 const iters=iter-startIter; console.log(`итераций ${iters}, инструкций ${steps}, тактов ${total}, тактов/итерацию ${(total/iters).toFixed(0)} (${(3000000/(total/iters)).toFixed(1)} итер/с на 3 МГц)`);
 // на Векторе кадровое прерывание НЕ защёлкивается: обратный ход внутри di = потерянный кадр
+if(PC0>=0)console.log(`ограничитель темпа: ${(pcCode/iters).toFixed(0)} тактов/итер кода + ${(pcHalt/iters).toFixed(0)} тактов/итер halt (${(100*(pcCode+pcHalt)/total).toFixed(1)} % всего)`);
 console.log(`кадров ${frames}, обратный ход пришёлся на di: ${lost} (${(100*lost/frames).toFixed(1)} %) — на железе это потерянные прерывания; в halt ${(hcyc_halt/iters).toFixed(0)} тактов/итер (${(100*hcyc_halt/total).toFixed(1)} %)`);
 // Разброс длительности итерации в кадрах (метрика сглаженности темпа).
 // Первая итерация окна — вход в комнату (десятки кадров), она считается отдельно: «без входа».
