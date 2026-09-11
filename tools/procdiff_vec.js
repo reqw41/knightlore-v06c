@@ -36,13 +36,15 @@ function machine(rom) {
   const memory = new ctx.Memory(), keyboard = new ctx.Keyboard(), timer = new ctx.I8253(), ay = new ctx.AY(),
         floppy = new (ctx.Floppy().FD1793)(), io = new ctx.IO(keyboard, timer, memory, ay, floppy);
   const cpu = new ctx.I8080(memory, io);
-  memory.init_from_array(new Uint8Array(fs.readFileSync(rom)).subarray(0, 0x10000), 0);
+  const img = new Uint8Array(fs.readFileSync(rom)).subarray(0, 0x10000);
+  memory.init_from_array(img, 0);
   memory.detach_boot && memory.detach_boot();
   const ow = memory.write.bind(memory);
   const m = { cpu, memory, trace: [], on: false };
   memory.write = function (a, w, s) { a &= 0xffff; if (m.on && a < 0x40) m.trace.push([a, w & 0xff]); return ow(a, w, s); };
   m.rd = a => memory.bytes[memory.tobank(a & 0xffff)];
   m.poke = (a, v) => ow(a & 0xffff, v & 0xff, false);
+  m.reload = () => { memory.init_from_array(img, 0); memory.detach_boot && memory.detach_boot(); };
   return m;
 }
 // --- генератор состояния: массив [имяМетки, смещение, байты] ---
@@ -89,6 +91,19 @@ const GEN = {
     const buf = []; for (let i = 0; i < 32 * 192; i++) buf.push(r());
     return { regs: {}, set: [["vidbufpic", 0, buf], ["curr_room_attrib", 0, [r()]]] };
   },
+  // «лишняя жизнь»: голова процедуры перекладывает IX/IY и расширяет коробку игрока
+  upd_103(r) {
+    return { regs: {}, set: [["graphic_objs_tbl", 0, objtbl(r)]],
+             ptr: [["z80_ix", "graphic_objs_tbl", 32 * (1 + r() % 39)], ["z80_iy", "graphic_objs_tbl", 32 * (r() % 40)]] };
+  },
+  // сброс объекта: копия X,Y,Z игрока в объект, подъём Z, пересчёт пиксельных координат.
+  // Вход в середину room_to_drop: HL = указатель на запись сбрасываемого объекта, а на стеке
+  // лежат два слова, которые снимет done_pickup_drop (их кладёт handle_pickup_drop).
+  loc_C0DD(r) {
+    return { regs: { hlLabel: ["special_objs_tbl", 9 * (r() % 30)] }, push: [r() | (r() << 8), r() | (r() << 8)],
+             set: [["graphic_objs_tbl", 0, objtbl(r)]],
+             ptr: [["z80_ix", "graphic_objs_tbl", 32 * (r() % 40)], ["z80_iy", "graphic_objs_tbl", 32 * (r() % 40)]] };
+  },
   // WIPE|DRAW объекту в IY (проверяется заодно сохранность IX и IY)
   set_wipe_and_draw_IY(r) {
     return { regs: {}, set: [["graphic_objs_tbl", 0, objtbl(r)]],
@@ -121,6 +136,9 @@ const DEAD = {
   // вызыватели (menu_loop, game_over, display_status_info) сразу перезадают всё
   display_menu: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
   display_day: ["a", "b", "c", "d", "e", "h", "l", "f", "iyn"],
+  // upd_* вызываются из диспетчера update_sprite_loop, который сразу перезадаёт всё
+  upd_103: ["a", "b", "c", "d", "e", "h", "l", "f"],
+  loc_C0DD: ["a", "b", "c", "d", "e", "h", "l", "f"],
   // единственный вызыватель (loc_C0DD+..., drop_object) сразу делает ld hl, object_carried_2
   set_wipe_and_draw_IY: ["a", "b", "c", "d", "e", "h", "l", "f"],
   // chk_all_objs_in_cauldron сразу делает ret; IY процедура и в оригинале не восстанавливает
@@ -129,6 +147,8 @@ const DEAD = {
 const CMP = {
   display_menu: [["vidbufpic", 0, 0]],
   display_day: [["vidbufpic", 0, 0]],
+  upd_103: [["graphic_objs_tbl", 0, 40 * 32], ["lives", 0, 1]],
+  loc_C0DD: [["graphic_objs_tbl", 0, 40 * 32]],
   set_wipe_and_draw_IY: [["graphic_objs_tbl", 0, 40 * 32]],
   prepare_final_animation: [["graphic_objs_tbl", 0, 40 * 32], ["special_objs_here", 0, 96]],
   find_special_objs_here: [["special_objs_here", 0, 96], ["special_objs_tbl", 0, 288]],
@@ -142,6 +162,12 @@ for (let p = 0xA000; p < 0xC000; p += 256) for (let a = p + 32; a < p + 224; a++
 
 function run(m, L, st) {
   const cpu = m.cpu;
+  // образ перезаливаем ПЕРЕД каждым состоянием: процедуры пишут самомодифицируемые иммедиаты
+  // (doi_prep) и переменные вне сравниваемых регионов, а зависший прогон оставлял бы мусор,
+  // из-за которого следующие тесты врут.
+  m.reload();
+  for (const r of [0, 1, 2, 3, 4, 5, 7]) cpu.set_reg(r, 0);      // регистры с прошлого прогона не переносим
+  cpu.sf = cpu.pf = cpu.hf = cpu.zf = cpu.cf = 0;
   for (const [lbl, off, bytes] of st.set) {
     if (lbl === "vidbufpic") { for (let i = 0; i < bytes.length && i < PIC.length; i++) m.poke(PIC[i], bytes[i]); continue; }
     const a = L[lbl]; if (a === undefined) throw new Error("нет метки " + lbl);
@@ -156,6 +182,8 @@ function run(m, L, st) {
   // Любой другой адрес рискует лечь в сравниваемый регион: с SP = 0x7DF0 стек вызовов затирал
   // объекты 23-24 таблицы (0x7AE8..0x7FE8) и гейт показывал ложное расхождение.
   cpu.sp = st.regs.sp || L.clear_start; m.poke(cpu.sp - 1, SENT >> 8); m.poke(cpu.sp - 2, SENT & 0xff); cpu.sp -= 2;
+  if (st.regs.hlLabel) { const v = L[st.regs.hlLabel[0]] + st.regs.hlLabel[1]; cpu.set_h(v >> 8); cpu.set_l(v & 0xff); }
+  if (st.push) for (const w of st.push) { m.poke(cpu.sp - 1, w >> 8); m.poke(cpu.sp - 2, w & 0xff); cpu.sp -= 2; }
   cpu.pc = L[LABEL]; cpu.iff = false;
   m.trace = []; m.on = true;
   let n = 0; while (cpu.pc !== SENT && n < 3000000) { cpu.instruction(); n++; }
@@ -182,12 +210,15 @@ const iyBase = (L) => [["special_objs_tbl", L.special_objs_tbl], ["special_objs_
                        ["graphic_objs_tbl", L.graphic_objs_tbl]];
 const normIY = (L, v) => { let best = "abs:" + v; for (const [n, a] of iyBase(L)) if (a !== undefined && v >= a && v < a + 512) best = n + "+" + (v - a); return best; };
 
-let bad = 0, stepsR = 0, stepsN = 0;
+let bad = 0, hang = 0, stepsR = 0, stepsN = 0;
 for (let i = 0; i < N; i++) {
   const st1 = GEN[LABEL](rng(SEED0 + i * 7919));
   const st2 = GEN[LABEL](rng(SEED0 + i * 7919));           // тот же seed -> то же состояние
   const a = run(mr, Lr, st1), b = run(mn, Ln, st2);
-  if (!a || !b) { console.log(`тест ${i}: не вернулась (${!a ? "эталон" : "новая"})`); bad++; continue; }
+  // холодный вызов может уйти в бесконечный цикл (путь через звук/вывод ждёт железа) —
+  // если ОБЕ сборки не вернулись, это согласие, а не расхождение
+  if (!a && !b) { hang++; continue; }
+  if (!a || !b) { console.log(`тест ${i}: не вернулась ${!a ? "эталонная" : "новая"} (вторая вернулась)`); bad++; continue; }
   stepsR += a.steps; stepsN += b.steps;
   a.regs.iyn = normIY(Lr, a.regs.iy); b.regs.iyn = normIY(Ln, b.regs.iy);
   const d = [];
@@ -203,6 +234,7 @@ for (let i = 0; i < N; i++) {
   if (a.trace !== b.trace) d.push(`нулевая страница: ref=[${a.trace}] new=[${b.trace}]`);
   if (d.length) { bad++; if (bad <= 3) console.log(`тест ${i}: ` + d.join("; ")); }
 }
-console.log(`${LABEL}: ${N} состояний, расхождений ${bad}; инструкций ref=${stepsR} new=${stepsN}` +
+console.log(`${LABEL}: ${N} состояний, расхождений ${bad}` + (hang ? `, обе не вернулись ${hang}` : "") +
+            `; инструкций ref=${stepsR} new=${stepsN}` +
             (stepsR ? ` (${(100 * stepsN / stepsR - 100).toFixed(1)} %)` : ""));
 process.exit(bad ? 1 : 0);

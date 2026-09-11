@@ -2563,6 +2563,61 @@ pfa_3:			ld		a, l
 """
 
 
+# ---------------------------------------------------------------------------
+# upd_103 (объект «лишняя жизнь») и loc_C0DD (сброс объекта): голова обеих процедур —
+# это перекладывание IX/IY друг в друга. На i8080 каждый push/pop индексного регистра —
+# 10 Б (сохранить HL, прочитать ячейку, push, вернуть HL), а `ld ix,nn` — 12 Б.
+# Пишем ячейки напрямую; `push iy / pop ix` воспроизводим как `ld hl,(z80_iy)` +
+# `ld (z80_ix),hl` — это точная семантика оригинала ДАЖЕ если вызванная процедура
+# успела изменить IY (сохранённая копия такой гарантии не дала бы).
+# Флаг CY между call is_on_or_near_obj и jp nc жив: inc/dec (hl), ld hl,nn и ld (nn),hl
+# переноса не трогают.
+# ---------------------------------------------------------------------------
+N_UPD_103 = """upd_103:		; объект «лишняя жизнь»: игрок с расширенной на 1 коробкой рядом?
+				call	upd_128_to_130
+				ld		hl, (z80_ix)
+				ld		(z80_iy), hl						; IY = объект «лишняя жизнь»
+				ld		hl, graphic_objs_tbl
+				ld		(z80_ix), hl						; IX = игрок
+				ld		hl, graphic_objs_tbl+4
+				inc		(hl)								; ширина игрока +1
+				inc		hl
+				inc		(hl)								; глубина +1
+				call	is_on_or_near_obj
+				ld		hl, graphic_objs_tbl+4
+				dec		(hl)								; вернуть ширину (inc/dec не трогают CY)
+				inc		hl
+				dec		(hl)								; вернуть глубину
+				ld		hl, (z80_iy)
+				ld		(z80_ix), hl						; IX снова объект «лишняя жизнь»
+				jp		nc, loc_C1EE						; не рядом — пропустить
+"""
+
+N_LOC_C0DD = """loc_C0DD:
+				push	hl									; указатель в таблице сброса
+				ld		hl, (z80_iy)
+				inc		hl
+				ex		de, hl								; DE = объект+1
+				ld		hl, (z80_ix)
+				inc		hl									; HL = игрок+1 (X)
+				ld		bc, 3
+				call	vec_ldir_fwd						; копия X, Y, Z игрока
+				ld		a, (ix+3)							; Z
+				add		a, 12
+				ld		(ix+3), a							; поднять Z
+				ld		a, (ix+0x23)						; Z второго спрайта
+				add		a, 12
+				ld		(ix+0x23), a
+				ld		hl, (z80_ix)
+				push	hl									; сохранить IX
+				ld		hl, (z80_iy)
+				ld		(z80_ix), hl						; IX = IY
+				call	calc_pixel_XY
+				pop		hl
+				ld		(z80_ix), hl						; вернуть IX
+"""
+
+
 def _sub(src, pattern, repl, name, flags=re.S):
     src, n = re.subn(pattern, lambda m: repl, src, count=1, flags=flags)
     assert n == 1, "kl_native_logic: не найдено: " + name
@@ -2655,6 +2710,8 @@ def apply(src, attrs_cut=False):
                    "\t\t\t\tcall\tclr_mem\n"
                    "\t\t\t\tld\t\ta, (0x5C78)\t\t; затравка seed_1: байт кода (на ZX — FRAMES), вне очищаемой области\n",
                    "START: затравка seed_1 без AF'")
+    src = _sub(src, r'(?m)^upd_103:[^\n]*\n.*?^[ \t]*jr[ \t]+NC,[ \t]*loc_C1EE[^\n]*\n', N_UPD_103, 'upd_103')
+    src = _sub(src, r'(?m)^loc_C0DD:[^\n]*\n.*?(?=^drop_object:)', N_LOC_C0DD, 'loc_C0DD')
     src = _sub(src, r'(?m)^set_wipe_and_draw_IY:[^\n]*\n.*?; End of function set_wipe_and_draw_IY\r?\n',
                N_SET_WD_IY, 'set_wipe_and_draw_IY')
     src = _sub(src, r'(?m)^prepare_final_animation:[^\n]*\n.*?; End of function prepare_final_animation\r?\n',
