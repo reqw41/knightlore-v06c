@@ -1055,69 +1055,134 @@ def _stub_after_label(src, label, note):
     return src[:m.end()] + f"\t\t\t\tret\t\t\t; STUB({note})\n" + src[m.end():]
 
 
-def kl_cut_controls(src):
-    """Борис 2026-09-10: варианты ввода ZX (Kempston/курсор/Interface II) вырезаны — на Векторе только клавиатура.
-    Оставлены ДВА режима управления (Борис: «одно классическое, другое прямое»): бит 3 user_input_method =
-    directional; в оригинале он работал только с джойстиком (проверка `and 6`), здесь — с клавиатурой.
-    Меню: «1 CLASSIC» / «1 DIRECT» (клавиша 1 переключает, строка показывает текущий режим), «0 START GAME»."""
+KL_SETMODE_VEC = """kl_setmode:		; номер режима (old_input_method 0..2) -> user_input_method + полоса подсветки.
+				; ПОДСВЕТКА — фон строки, а не инверсия картинки: буквы остаются белыми, как у Городецкого
+				; (инверсию байтов пробовали — шрифт игры «жирный», негатив читается как каша).
+				; Как: в плоскости 0 знакоместа строки заливаются 0xFF, а различает буквы от фона ПЛОСКОСТЬ 1
+				; (буфер кадра): в меню в нём лежит тот же текст и та же рамка, что на экране. Палитра меню:
+				; индексы 8..11 (p0=1, p1=0) — синий, 12..15 (p0=1, p1=1) — белый. Точки с p0=0 остаются
+				; чёрными при любых p1..p3 — поэтому КОД, лежащий в плоскостях 1..3 вне картинки (строки 0..31
+				; и 224..255) и в плоскости 3 внутри неё, не проступает. Заливать фон в плоскости 2 нельзя
+				; именно поэтому: пришлось бы красить индексы с p0=0, и весь этот код вылез бы синей рябью.
+				; Экран Вектора столбцовый: адрес = 0x8000 + столбец*256 + (Y + 32); глиф print_8x8 идёт ВНИЗ
+				; по младшему байту, поэтому нижняя строка знакоместа = Y + 25.
+				ld      hl, vidbuf + 6*256 + 112				; чистый текст трёх строк режимов из буфера
+				ld      de, 0x8000 + 6*256 + 112				; в плоскость 0: снимает прежнюю полосу.
+				ld      bc, 28*256 + 21							; Столбцы 6..26, строки 112..167; два блита по
+				call    blit_to_screen							; 28 строк — быстрый путь blit_to_screen до 32
+				ld      hl, vidbuf + 6*256 + 140
+				ld      de, 0x8000 + 6*256 + 140
+				ld      bc, 28*256 + 21
+				call    blit_to_screen
+				ld      a, (old_input_method)
+				ld      e, a
+				add     a, a
+				add     a, e									; *3
+				ld      e, a
+				ld      d, 0
+				ld      hl, kl_modetab
+				add     hl, de
+				ld      a, (hl)
+				ld      (user_input_method), a
+				inc     hl
+				ld      d, (hl)									; нижняя строка полосы
+				inc     hl
+				ld      b, (hl)									; ширина в знакоместах
+				ld      h, high (0x8000 + 6*256)				; X = 48 -> столбец 6
+				ld      a, 0xFF
+ksm_col:		ld      l, d
+				ld      c, 8
+ksm_row:		ld      (hl), a
+				inc     l
+				dec     c
+				jp      nz, ksm_row
+				inc     h
+				dec     b
+				jp      nz, ksm_col
+kl_menu_exit:	; полосу за собой убирать не надо: в игру идут через clr_bitmap_memory + update_screen,
+				; а палитру перебивает vec_set_pal по цвету комнаты
+				ret
+kl_modetab:		; режим: user_input_method, нижняя строка полосы, ширина в знакоместах
+				DB      0, 160, 10								; 1 KEYBOARD            (Y = 135, 10 знаков)
+				DB      4, 136, 8								; 2 CURSOR              (Y = 111,  8 знаков)
+				DB      8, 112, 21								; 3 DIRECTIONAL CONTROL (Y =  87, 21 знак)
+"""
+
+
+def kl_cut_controls(src, vec=False):
+    """Борис 2026-09-10/11: варианты ввода ZX (Kempston/курсор/Interface II) вырезаны — на Векторе только
+    клавиатура. Меню повторяет порт Городецкого (caglrc.cc/scalar/ware/873): шесть строк — заголовок,
+    три режима управления, «0 START GAME», копирайт; выбранный режим подсвечен цветной полосой.
+
+        1 KEYBOARD              O / P поворот, Q вперёд, A прыжок, цифры 0..7 взять
+        2 CURSOR                стрелки влево/вправо поворот, вверх вперёд, пробел прыжок, вниз взять
+        3 DIRECTIONAL CONTROL   стрелки = стороны света, пробел прыжок, цифры 0..7 взять
+
+    user_input_method: 0 / 4 / 8 (бит 3 = directional, как в оригинале; 0 у режима 1 ОБЯЗАТЕЛЕН —
+    ячейка сравнивается в локстепе, на ZX там 0). Номер режима 0..2 живёт в old_input_method: та
+    ячейка освободилась (toggle_audio_hw_x16 вырезан) и лежит ВЫШЕ objs_wiped_cnt, то есть переживает
+    игру — режим сохраняется между заходами в меню. debounce_5 больше не нужен: перерисовка идёт не по
+    антидребезгу, а по факту смены режима."""
     def cut(pat, name, repl='', flags=re.S, count=1):
         nonlocal src
         src, n = re.subn(pat, repl, src, count=count, flags=flags)
         assert n == count, "kl_cut_controls: " + name
-    # меню: 4 строки (заголовок, режим управления, 0 START GAME, (c) 1984)
-    cut(r'menu_colours:   DB 0x43, 0xC4, 0x44, 0x44, 0x44, 0x45, 0x47, 0x47', 'menu_colours', 'menu_colours:   DB 0x43, 0x44, 0x47, 0x47')
-    cut(r'menu_xy:        DB 88, 159, 48, 143, 48, 127, 48, 111, 48, 95, 48, 79\r?\n\t+DB 48, 63, 80, 39', 'menu_xy', 'menu_xy:        DB 88, 159, 72, 103, 48, 63, 80, 39')
-    # строка режима: слот 9 байт (заполняется из kl_ctl_classic / kl_ctl_direct), токены: цифра = значение, A=0xA.., пробел 0x26, бит 7 = конец
-    cut(r'; "1 KEYBOARD"\r?\n.*?(?=; "0 START GAME")', 'menu_text 1..5',
-        '; режим управления (слот, копируется из kl_ctl_*)\nkl_ctl_slot:\t\tDB 1, 0x26, 0xC, 0x15, 0xA, 0x1C, 0x1C, 0x12, 0x8C\n')
-    # исходные строки — ВНЕ списка меню (display_text_list печатает список подряд)
-    cut(r'(complete_colours:)', 'ctl strings', '; "1 CLASSIC" / "1 DIRECT "\nkl_ctl_classic:\t\tDB 1, 0x26, 0xC, 0x15, 0xA, 0x1C, 0x1C, 0x12, 0x8C\nkl_ctl_direct:\t\tDB 1, 0x26, 0xD, 0x12, 0x1B, 0xE, 0xC, 0x1D, 0xA6\n\\g<1>')
-    cut(r'(display_menu:\r?\n(?:[^\n]*\n){4}\t+ld      b, )8(\s+; 8 lines to display)', 'display_menu b', r'\g<1>4\g<2>')
-    cut(r'(\t+ld      hl, menu_colours\r?\n\t+ld      b, )8(\s+; # menu entries)', 'do_menu_selection b', r'\g<1>4\g<2>')
-    # цикл меню: вместо выбора 1..5 — переключатель режима клавишей 1 (с антидребезгом), затем проверка «0»
-    cut(r"\t+ld      a, 0xF7 ; '[^\n]*; 1,2,3,4,5\r?\n.*?(?=\t+ld      a, 0xEF ; '[^\n]*; 0,9,8,7,6\r?\n\t+call    read_port\r?\n\t+bit     0, a\s+; '0' \(Start Game\)\?)", 'menu 1..5',
-        "\t\t\t\tld      a, 0xF7                                 ; ряд 1..5\n"
+    # меню: 6 строк. Y с шагом 24 (как у Городецкого), X строк режимов 48 — как в оригинале,
+    # самая длинная («3 DIRECTIONAL CONTROL», 21 знак) стоит по центру кадра. Цвета на Векторе не
+    # используются (атрибутов нет), но display_text_list читает по байту на строку — нужно 6.
+    cut(r'menu_colours:   DB 0x43, 0xC4, 0x44, 0x44, 0x44, 0x45, 0x47, 0x47', 'menu_colours', 'menu_colours:   DB 0x43, 0x44, 0x44, 0x44, 0x45, 0x47')
+    cut(r'menu_xy:        DB 88, 159, 48, 143, 48, 127, 48, 111, 48, 95, 48, 79\r?\n\t+DB 48, 63, 80, 39', 'menu_xy', 'menu_xy:        DB 88, 159, 48, 135, 48, 111, 48, 87\n\t\t\t\tDB 48, 63, 80, 39')
+    # строки режимов: «1 KEYBOARD» и «3 DIRECTIONAL CONTROL» — оригинальные (у второй сменён номер),
+    # «2 CURSOR» набрана заново. Токены: цифра = значение, A=0xA .. Z=0x23, пробел 0x26, бит 7 = конец.
+    cut(r'; "2 KEMPSTON JOYSTICK"\r?\n.*?(?=; "0 START GAME")', 'menu_text 2..5',
+        '; "2 CURSOR"\n'
+        '\t\t\t\tDB 2, 0x26, 0xC, 0x1E, 0x1B, 0x1C, 0x18, 0x9B\n\n'
+        '; "3 DIRECTIONAL CONTROL"\n'
+        '\t\t\t\tDB 3, 0x26, 0xD, 0x12, 0x1B, 0xE, 0xC, 0x1D, 0x12, 0x18\n'
+        '\t\t\t\tDB 0x17, 0xA, 0x15, 0x26, 0xC, 0x18, 0x17, 0x1D, 0x1B\n'
+        '\t\t\t\tDB 0x18, 0x95\n\n')
+    cut(r'(display_menu:\r?\n(?:[^\n]*\n){4}\t+ld      b, )8(\s+; 8 lines to display)', 'display_menu b', r'\g<1>6\g<2>')
+    # вход в меню: рамку и выгрузку на экран делаем сами — ПОСЛЕ инверсии выбранной строки
+    # (display_text_list зовёт print_border/update_screen только при suppress_border = 0).
+    # вход в меню: как в оригинале (текст + рамка + выгрузка на экран), но потом буфер набивается
+    # заново: полоса подсветки красится ПО БУФЕРУ (см. KL_SETMODE_VEC), а update_screen его обнулил.
+    cut(r'do_menu_selection:\r?\n.*?(?=menu_loop:)', 'do_menu_selection head',
+        "do_menu_selection:\n"
+        "\t\t\t\txor     a\n"
+        "\t\t\t\tld      (suppress_border), a\n"
+        "\t\t\t\tcall    clear_scrn_buffer\n"
+        "\t\t\t\tcall    display_menu                            ; текст, рамка, выгрузка на экран\n"
+        "\t\t\t\tcall    display_menu                            ; буфер снова с текстом,\n"
+        "\t\t\t\tcall    print_border                            ; и с рамкой: update_screen его обнулил\n"
+        "\t\t\t\tcall    kl_setmode                              ; режим + полоса подсветки\n\n")
+    # цикл меню: клавиши 1/2/3 выбирают режим, «0» — старт. Полоса подсветки живёт в плоскости 2
+    # и меж кадрами не трогается — при смене режима перерисовывать текст (плоскость 0) не нужно.
+    cut(r"\t+ld      a, 0xF7 ; '[^\n]*; 1,2,3,4,5\r?\n.*?; End of function do_menu_selection\r?\n", 'menu loop tail',
+        "\t\t\t\tld      a, 0xF7                                 ; ряд ZX 3: клавиши 1..5\n"
         "\t\t\t\tcall    read_port\n"
-        "\t\t\t\tand     1                                      ; '1' — переключить режим управления\n"
-        "\t\t\t\tld      hl, debounce_5\n"
-        "\t\t\t\tjp      z, kl_ctl_rel\n"
-        "\t\t\t\tld      a, (hl)\n"
-        "\t\t\t\tor      a\n"
-        "\t\t\t\tjp      nz, kl_ctl_done                         ; ещё не отпущена\n"
-        "\t\t\t\tld      (hl), 1\n"
-        "\t\t\t\tld      a, (user_input_method)\n"
-        "\t\t\t\txor     8\n"
-        "\t\t\t\tld      (user_input_method), a\n"
-        "\t\t\t\tcall    kl_ctl_show\n"
-        "\t\t\t\tcall    display_menu                            ; перерисовать текст в буфер\n"
-        "\t\t\t\tld      hl, vidbuf + 9*256 + 32 + 96            ; окно строки режима: столбцы 9..17, строки 96..111\n"
-        "\t\t\t\tld      de, 0x8000 + 9*256 + 32 + 96\n"
-        "\t\t\t\tld      bc, 0x1009                              ; 16 строк, 9 байт\n"
-        "\t\t\t\tcall    blit_to_screen\n"
-        "\t\t\t\tjp      kl_ctl_done\n"
-        "kl_ctl_rel:\t\tld      (hl), 0\n"
-        "kl_ctl_done:\n")
-    cut(r'\t+call    flash_menu\r?\n', 'call flash_menu', count=2)
-    cut(r'\t+jp      menu_loop\r?\n; -+\r?\n(?:\r?\n)*clr_debounce:\r?\n\t+res     0, \(hl\)\r?\n\t+jr      check_for_start_game[^\n]*\r?\n', 'clr_debounce', '\t\t\t\tjp      menu_loop\n')
+        "\t\t\t\tand     7                                      ; '1' / '2' / '3' — режим управления\n"
+        "\t\t\t\tjp      z, kl_ctl_done\n"
+        "\t\t\t\tld      b, 0xFF                                 ; B = номер младшего нажатого бита\n"
+        "kl_ctl_idx:\t\tinc     b\n"
+        "\t\t\t\trra\n"
+        "\t\t\t\tjp      nc, kl_ctl_idx\n"
+        "\t\t\t\tld      hl, old_input_method                    ; номер режима 0..2\n"
+        "\t\t\t\tld      a, b\n"
+        "\t\t\t\tcp      (hl)\n"
+        "\t\t\t\tjp      z, kl_ctl_done                          ; тот же режим — ничего не трогаем\n"
+        "\t\t\t\tld      (hl), a\n"
+        "\t\t\t\tcall    kl_setmode\n"
+        "kl_ctl_done:\tld      a, 0xEF                                 ; ряд ZX 4: клавиши 0,9,8,7,6\n"
+        "\t\t\t\tcall    read_port\n"
+        "\t\t\t\tand     1                                      ; '0' — начать игру\n"
+        "\t\t\t\tjp      nz, kl_menu_exit\n"
+        "\t\t\t\tld      hl, seed_1\n"
+        "\t\t\t\tinc     (hl)                                    ; remember when BASIC games did this?\n"
+        "\t\t\t\tjp      menu_loop\n"
+        "; End of function do_menu_selection\n")
     cut(r'flash_menu:\r?\n.*?; End of function flash_menu\r?\n', 'flash_menu',
-        "kl_ctl_show:\t\t; строка меню по режиму: (user_input_method & 8) ? DIRECT : CLASSIC -> kl_ctl_slot\n"
-        "\t\t\t\tld      hl, kl_ctl_classic\n"
-        "\t\t\t\tld      a, (user_input_method)\n"
-        "\t\t\t\tand     8\n"
-        "\t\t\t\tjp      z, kl_cs_1\n"
-        "\t\t\t\tld      hl, kl_ctl_direct\n"
-        "kl_cs_1:\t\tld      de, kl_ctl_slot\n"
-        "\t\t\t\tld      b, 9\n"
-        "kl_cs_2:\t\tld      a, (hl)\n"
-        "\t\t\t\tld      (de), a\n"
-        "\t\t\t\tinc     hl\n"
-        "\t\t\t\tinc     de\n"
-        "\t\t\t\tdec     b\n"
-        "\t\t\t\tjp      nz, kl_cs_2\n"
-        "\t\t\t\tret\n")
+        KL_SETMODE_VEC if vec else "kl_setmode:\t\tret\t\t\t; полоса подсветки — только Вектор (плоскость 2)\nkl_menu_exit:\tret\n")
     cut(r'toggle_selected:\r?\n.*?; End of function toggle_selected\r?\n', 'toggle_selected')
-    # при входе в меню — показать текущий режим
-    cut(r'(do_menu_selection:\r?\n)', 'do_menu_selection entry', r'\g<1>\t\t\t\tcall    kl_ctl_show\n')
     # ввод: только клавиатура; directional — по биту 3 без проверки джойстика
     cut(r'\t+ld      a, \(user_input_method\)\r?\n\t+rrca\r?\n\t+and     3[^\n]*\r?\n\t+jp      Z, keyboard\r?\n.*?(?=keyboard:)', 'input dispatch')
     cut(r'(chk_pickup_drop:\r?\n)\t+ld      hl, user_input_method\r?\n\t+ld      a, \(hl\)\r?\n\t+and     6[^\n]*\r?\n\t+ld      a, \(user_input\)[^\n]*\r?\n\t+jr      Z, loc_C00B[^\n]*\r?\n\t+bit     3, \(hl\)[^\n]*\r?\n\t+jr      Z, loc_C00B\r?\n', 'chk_pickup_drop',
@@ -2333,6 +2398,66 @@ us_zero:
 us_sp:			DS		2							; стек игры на время захвата SP
 """
 
+KL_VEC_INPUT = """kl_vec_input:	; ТРИ РАСКЛАДКИ, читаются прямо из матрицы Вектора (vec_kbmat, active-high).
+				; Таблица: младший байт адреса ряда, маска клавиш, биты user_input; 0 = конец списка.
+				; Биты user_input: 0 влево, 1 вправо, 2 вперёд, 3 прыжок, 4 взять (поворотный режим,
+				; в directional это «вниз»), 5 взять (directional).
+				; Ряды Вектора: 0 ВК/стрелки, 2 цифры 0..7, 4 @ABCDEFG, 5 HIJKLMNO, 6 PQRSTUVW, 7 XYZ[\\\\]^ПРБ.
+				ld      de, kl_in_t3
+				ld      a, (user_input_method)
+				and     8                                      ; 3 DIRECTIONAL CONTROL
+				jp      nz, kl_in_scan
+				ld      de, kl_in_t2
+				ld      a, (user_input_method)
+				and     4                                      ; 2 CURSOR
+				jp      nz, kl_in_scan
+				ld      de, kl_in_t1                            ; 1 KEYBOARD (user_input_method = 0)
+kl_in_scan:		ld      c, 0
+kl_in_1:		ld      a, (de)                                 ; младший байт ряда (0 = конец)
+				or      a
+				jp      z, kl_in_store
+				ld      l, a
+				ld      h, high vec_kbmat
+				inc     de
+				ld      a, (de)                                 ; маска клавиш ряда
+				and     (hl)
+				inc     de
+				ld      a, (de)                                 ; биты user_input; LDAX/INX флагов не трогают,
+				inc     de                                      ; поэтому Z ещё от `and (hl)`
+				jp      z, kl_in_1
+				or      c
+				ld      c, a
+				jp      kl_in_1
+kl_in_store:	ld      a, c
+				ld      (user_input), a
+				ret
+; End of function check_user_input
+kl_in_t1:		; 1 KEYBOARD: O / P поворот, Q вперёд, A прыжок, цифры 0..7 взять
+				DB      low (vec_kbmat+5), 0x80, 0x01           ; O
+				DB      low (vec_kbmat+6), 0x01, 0x02           ; P
+				DB      low (vec_kbmat+6), 0x02, 0x04           ; Q
+				DB      low (vec_kbmat+4), 0x02, 0x08           ; A
+				DB      low (vec_kbmat+2), 0xFF, 0x10           ; 0..7
+				DB      0
+kl_in_t2:		; 2 CURSOR: стрелки влево/вправо поворот, вверх вперёд, пробел прыжок, вниз взять
+				DB      low (vec_kbmat+0), 0x10, 0x01           ; стрелка влево
+				DB      low (vec_kbmat+0), 0x40, 0x02           ; стрелка вправо
+				DB      low (vec_kbmat+0), 0x20, 0x04           ; стрелка вверх
+				DB      low (vec_kbmat+7), 0x80, 0x08           ; пробел
+				DB      low (vec_kbmat+0), 0x80, 0x10           ; стрелка вниз
+				DB      0
+kl_in_t3:		; 3 DIRECTIONAL CONTROL: стрелки = стороны света, пробел прыжок, цифры 0..7 взять
+				DB      low (vec_kbmat+0), 0x10, 0x01           ; стрелка влево
+				DB      low (vec_kbmat+0), 0x40, 0x02           ; стрелка вправо
+				DB      low (vec_kbmat+0), 0x20, 0x04           ; стрелка вверх
+				DB      low (vec_kbmat+0), 0x80, 0x10           ; стрелка вниз
+				DB      low (vec_kbmat+7), 0x80, 0x08           ; пробел
+				DB      low (vec_kbmat+2), 0xFF, 0x20           ; 0..7 (directional: бит 5)
+				DB      0
+				ASSERT (low vec_kbmat) != 0		; 0 — признак конца таблицы раскладки
+"""
+
+
 def _replace_func(src, label, end_marker, new, note=""):
     """Заменить тело от `label:` до строки end_marker (включительно) на new."""
     i = src.index(label + ":")
@@ -2470,58 +2595,45 @@ def kl_vec_glue(src, translate_later):
     src, _n = re.subn(r'\t+ORG 0x4000\r?\nzx_vram:\s+DS 0x1800\r?\n', '', src, count=1)
     assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
-    src = kl_cut_controls(src)
-    # прямое управление (Борис): стрелки = направления, пробел = прыжок, ВК = взять/положить. Читается из матрицы
-    # Вектора поверх ZX-раскладки, только когда включён бит directional (в классике стрелки сведены к Z/X/A/Q в vec_scan).
-    src, n_di = re.subn(r'(loc_D125:[^\n]*\r?\n)(\t+ld      a, c\r?\n\t+ld      \(user_input\), a)', r'\g<1>\t\t\t\tcall    kl_direct_in\n\g<2>', src, count=1)
-    assert n_di == 1, "direct input hook"
-    src = src.replace("; End of function check_user_input", """; End of function check_user_input
-kl_direct_in:	; directional: C = стрелки (0 влево, 1 вправо, 2 вверх, 4 вниз), пробел -> 3 (прыжок), ВК -> 5 (взять)
-				ld      a, (user_input_method)
-				and     8
+    src = kl_cut_controls(src, vec=True)
+    # ВВОД: три раскладки читаются ПРЯМО ИЗ МАТРИЦЫ ВЕКТОРА, а не через ряды ZX. Дорога через ZX
+    # для них не годится: у Городецкого в режиме 1 клавиши O и P — повороты, а на ZX обе лежат в
+    # ряду 5 и обе значат «прыжок». Ряды ZX (read_port) остаются для меню, «любой клавиши» в
+    # мелодиях и паузы. Ценой этого уходят keyboard:/finished_input/kl_direct_in — 251 байт на 103.
+    src = _replace_func(src, 'keyboard', '; End of function check_user_input', KL_VEC_INPUT, 'vec input')
+    src = src.replace("\t\t\t\tjp      NZ, finished_input\n", "\t\t\t\tjp      NZ, kl_in_store                         ; котёл: ввод не читаем\n", 1)
+    assert 'finished_input' not in src, "finished_input: остались ссылки"
+    # ПАУЗА — на ВК (в оригинале пробел, но пробел стал прыжком в режимах 2 и 3). Читаем матрицу
+    # Вектора напрямую: read_port для маски ряда 6 пришлось бы гонять общим циклом.
+    src = _replace_func(src, 'handle_pause', '; End of function handle_pause', """handle_pause:	; ВК (ряд 0 Вектора, бит 2) — пауза; нажатие снимает её
+				ld      a, (vec_kbmat+0)
+				and     4
 				ret     z
-				ld      c, 0
-				ld      a, (vec_kbmat+0)                        ; ряд 0: LT 0x10, RT 0x40, UP 0x20, DN 0x80, ВК 0x04
-				ld      b, a
-				and     0x10
-				jp      z, kdi_1
-				ld      c, 1
-kdi_1:			ld      a, b
-				and     0x40
-				jp      z, kdi_2
-				ld      a, c
-				or      2
-				ld      c, a
-kdi_2:			ld      a, b
-				and     0x20
-				jp      z, kdi_3
-				ld      a, c
-				or      4
-				ld      c, a
-kdi_3:			ld      a, b
-				and     0x80
-				jp      z, kdi_4
-				ld      a, c
-				or      0x10
-				ld      c, a
-kdi_4:			ld      a, b
-				and     0x04
-				jp      z, kdi_5
-				ld      a, c
-				or      0x20
-				ld      c, a
-kdi_5:			ld      a, (vec_kbmat+7)                        ; пробел 0x80
-				and     0x80
-				ret     z
-				ld      a, c
-				or      8
-				ld      c, a
-				ret
-""", 1)
+hp_rel:			ld      a, (vec_kbmat+0)                        ; дождаться отпускания
+				and     4
+				jp      nz, hp_rel
+				call    toggle_audio_hw_x24
+hp_wait:		ld      a, (vec_kbmat+0)                        ; дождаться нажатия
+				and     4
+				jp      z, hp_wait
+hp_rel2:		ld      a, (vec_kbmat+0)
+				and     4
+				jp      nz, hp_rel2
+				jp      toggle_audio_hw_x24
+; End of function handle_pause
+""", 'pause')
     # цвет комнаты как на ZX: после flag_room_visited (конец build_screen_objects) — палитра по атрибуту; меню — белое
     src, n_rp = re.subn(r'(\t+call    flag_room_visited\r?\n\t+ret\r?\n)', r'\t\t\t\tcall    flag_room_visited\n\t\t\t\tld      a, (curr_room_attrib)\n\t\t\t\tjp      vec_set_pal\n', src, count=1)
     assert n_rp == 1, "room palette hook"
-    src, n_mp = re.subn(r'(do_menu_selection:\r?\n)', r'\g<1>\t\t\t\tld      a, 7\n\t\t\t\tcall    vec_set_pal\n', src, count=1)
+    src, n_mp = re.subn(r'(do_menu_selection:\r?\n)',
+        '\\g<1>\t\t\t\tld      a, 7\n\t\t\t\tcall    vec_set_pal\n'
+        '\t\t\t\tld      a, 0xC0                                 ; ФОН ПОЛОСЫ ПОДСВЕТКИ — синий.\n'
+        '\t\t\t\tld      (vec_pal+8), a                          ; Индексы 8..11 = p0=1, p1=0: точка есть\n'
+        '\t\t\t\tld      (vec_pal+9), a                          ; на экране, но нет в буфере — так набита\n'
+        '\t\t\t\tld      (vec_pal+10), a                         ; заливка полосы. 12..15 (p0=1, p1=1) —\n'
+        '\t\t\t\tld      (vec_pal+11), a                         ; белые: буквы и рамка есть и там, и там.\n'
+        '\t\t\t\tld      a, 1                                    ; Перезапросить палитру: vec_set_pal свой\n'
+        '\t\t\t\tld      (vec_palreq), a                         ; запрос мог уже унести ISR\n', src, count=1)
     assert n_mp == 1, "menu palette hook"
     assert "out     (0xFE)" not in src, "остались OUT (0xFE)"
     src = re.sub(r'^\s*ASSERT\s+\$\s*<\s*0xD900[^\n]*$', '', src, flags=re.M)

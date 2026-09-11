@@ -3,6 +3,7 @@
 //   node tools/hudshot_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld <итераций> [out.png]
 // Ключи: KLROOM=<n> комната, KLGAG=1 погасить seed_3 (детерминизм), KLSCALE=<n> масштаб (2),
 //        KLCROP=y0,y1 вырезать экранные строки [y0..y1] (0 = верх кадра), KLPLANE=0..3 показать одну плоскость ч/б,
+//        KLMENU=1|2|3 нажать клавишу выбора режима в меню (вместе с KLFRAMES),
 //        KLGRID=1 сетка по знакоместам 8x8 с подписями столбцов/строк ПАМЯТИ Вектора.
 // Экран: адрес байта = 0x8000 + (столбец<<8) + строка_памяти; строка памяти 255 = ВЕРХ кадра (скролл 0xFF).
 // Индекс палитры = p0<<3|p1<<2|p2<<1|p3 (p0 = 0x8000 ... p3 = 0xE000), байт палитры %BBGGGRRR.
@@ -38,7 +39,7 @@ if(process.env.KLGAG){ const rdb=a=>memory.bytes[memory.tobank(a&0xffff)];
   if(at<0)throw new Error("не нашёл seed_3 += mem[seed_2]");
   ow(at+3,0x00,false); }
 const KEYS={z:[0,1],x:[0,2],a:[1,0],q:[2,0],"0":[4,0],space:[7,0]}; const rows=new Uint8Array(8).fill(0xFF);
-const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],space:[7,0x80]};
+const VKEYS={z:[7,0x04],x:[7,0x01],a:[4,0x02],q:[6,0x02],"0":[2,0x01],"1":[2,0x02],"2":[2,0x04],"3":[2,0x08],space:[7,0x80]};
 function key(k,down){
   if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
@@ -59,7 +60,10 @@ memory.write=function(a,w,s){a&=0xffff;
   return ow(a,w,s);};
 for(let f=0;f<60;f++)v06c.oneInterrupt(true);
 // KLFRAMES=n: снимок через n кадров от сброса, не дожидаясь комнаты (меню, заставка)
-if(process.env.KLFRAMES){for(let f=60;f<+process.env.KLFRAMES;f++)v06c.oneInterrupt(true);}
+if(process.env.KLFRAMES){const N2=+process.env.KLFRAMES;
+  // KLMENU=1|2|3: нажать клавишу выбора режима в меню на 8 кадров и отпустить (снимок подсветки)
+  const mk=process.env.KLMENU, at=N2-30;
+  for(let f=60;f<N2;f++){ if(mk&&f===at)key(mk,true); if(mk&&f===at+8)key(mk,false); v06c.oneInterrupt(true);} }
 else{
 key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
