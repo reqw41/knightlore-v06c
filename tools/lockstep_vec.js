@@ -89,3 +89,10 @@ console.log(`sync на кадре ${syncFrame}, комната на кадре $
 console.log(`seed_1=${(rd(L.seed_1)|rd(L.seed_1+1)<<8).toString(16)} seed_2=${(rd(L.seed_2)|rd(L.seed_2+1)<<8).toString(16)} seed_3=${rd(L.seed_3).toString(16)} lives=${rd(L.lives)} pc=${cpu.pc.toString(16)} (${nameOf.pc(cpu.pc)})`);
 fs.writeFileSync("build/vec_states.bin",Buffer.concat(states));fs.writeFileSync("build/vec_states.idx",idx.join("\n")+"\n");
 if(zx)console.log(diffs?`расхождений итераций: ${diffs} из ${Math.min(iter,zxN)}, первое на ${firstDiff}`:`СОВПАДЕНИЕ: ${Math.min(iter,zxN)} итераций байт в байт`);
+// КОД ВОЗВРАТА. Без него гейт печатал «расхождений итераций: 599» и выходил с нулём — любая
+// автоматическая проверка (в том числе самопроверка tools/gatecheck.py) считала это успехом.
+// Красным считается и «журнал ZX дан, а итераций не набрали»: сравнивать было нечего.
+if(zx){
+  if(diffs){process.exit(1);}
+  if(iter<Math.min(N,zxN)){console.log(`НЕ ДОШЛИ: итераций ${iter} из ${Math.min(N,zxN)} — сравнивать нечего`);process.exit(1);}
+}
