@@ -60,6 +60,18 @@ const combos=[[0x10,0,0,0,0,0,0,0x04],[0x50,0,0,0,0,0,0,0],[0xF0,0,0,0,0,0,0,0],
 combos.forEach((c,i)=>shot("сочет"+i,c));
 shot("пусто2",zero);
 fs.writeFileSync(`build/kb_${TAG}.txt`,out.join("\n")+"\n");
+// ЭТАЛОН. Без него гейт проверял только СОГЛАСОВАННОСТЬ vec_rptab с vec_zxrows — то есть таблицу
+// саму с собой: любая правка отображения «клавиша Вектора -> ряд ZX» (vec_zxmap -> vec_kbzx)
+// проходила молча (поймано самопроверкой tools/gatecheck.py). Теперь снимок сверяется с
+// tools/kbref.txt; перезаписать эталон осознанно — KBREF=write.
+const REF="tools/kbref.txt", cur=out.join("\n")+"\n";
+if(process.env.KBREF==="write"){fs.writeFileSync(REF,cur);console.log("эталон перезаписан: "+REF);}
+else if(fs.existsSync(REF)){const ref=fs.readFileSync(REF,"utf8");
+  if(ref!==cur){const a=ref.split("\n"),b=cur.split("\n");let n=0;
+    for(let i=0;i<Math.max(a.length,b.length);i++)if(a[i]!==b[i]){if(n<8)console.log(`  эталон: ${a[i]}\n  сейчас: ${b[i]}`);n++;}
+    console.log(`РАСХОЖДЕНИЕ С ЭТАЛОНОМ ${REF}: строк ${n}`);process.exit(1);}
+  console.log(`снимок совпал с эталоном ${REF} (${out.length} состояний)`);}
+else console.log(`эталона ${REF} нет — снять его: KBREF=write node tools/kbcheck_vec.js ...`);
 const nrp=L.vec_rptab===undefined?0:out.length*256;
 const nfill=L.vec_rptab===undefined?0:[...Array(256)].filter((_,m)=>rd(L.vec_rptab+m)!==0xFF).length;console.log(`заполнено записей vec_rptab в конце прогона: ${nfill}`);
 console.log(`состояний ${out.length} -> build/kb_${TAG}.txt; проверок vec_rptab ${nrp}, расхождений ${bad.length}`);
