@@ -83,12 +83,24 @@ function walkStep(it){
 let pauseTries=0,pauseFrame=0;
 const HP0=L.handle_pause!==undefined?L.handle_pause:-1;
 const HP1=HP0<0?-1:HP0+40;   // handle_pause: три цикла ожидания ВК подряд, меньше 40 байт
+// Хэш ЭКРАНА (плоскость 0, строки картинки). Владелец видит «зависание» как ЗАМЕРШУЮ КАРТИНКУ,
+// а главный цикл при этом может исправно крутиться — счётчик итераций такого не ловит.
+function hscr(){let h=0x811c9dc5>>>0;for(let p=0x8000;p<0xA000;p+=256)for(let a=p+32;a<p+224;a++){h=(h^rdb(a))>>>0;h=Math.imul(h,0x01000193)>>>0;}return h>>>0;}
+let scrH=0,scrSince=0,scrFreeze=0,scrFreezeIter=0;
+const SCRSTEP=+process.env.KLSCRSTEP||5;   // хэш экрана снимается раз в столько итераций (8К байт — дорого)
+// ИНВАРИАНТ: сменился номер комнаты у игрока -> обязана быть перестройка экрана (build_screen_objects).
+// В exit_screen есть ранний выход `ld a,(ix+0) / sub 0x10 / cp 0x40 / ret NC`: он меняет (ix+8) и
+// уходит БЕЗ `jp game_loop`, то есть без build_screen_objects. А build_screen_objects зовут только оттуда.
+const BSO=L.build_screen_objects!==undefined?L.build_screen_objects:-1;
+let bsoSeen=0, roomNoRebuild=[], pendingRoom=-1;
 const STALL=+process.env.KLSTALL||20000000;
 const DAY=+process.env.KLDAY||0;
 const ARCH=+process.env.KLARCH||0;
 let FR=0,TOT=0,phase="menu",iter=0,steps=0,lastIterCy=0,maxGap=0,maxGapIter=0;
 let lost=0,frames=0,roomSeen={},lastRoom=-1,roomChanges=0,dayForced=0,archForced=0;
+const RMB=L.graphic_objs_tbl+8;
 memory.write=function(a,w,s){a&=0xffff;
+  if(a===RMB&&phase==="game"&&w!==rdb(RMB))pendingRoom=iter;   // номер комнаты игрока меняется
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
@@ -98,6 +110,9 @@ memory.write=function(a,w,s){a&=0xffff;
       if(rdb(L.days)>=0x35)ow(L.days,1,false);}   // игра уходит в game over на `cp 64` = BCD 40    // и по дням: на 64-м дне игра сама уходит в game over
     const gap=TOT-lastIterCy; if(gap>maxGap&&iter>2){maxGap=gap;maxGapIter=iter;}
     pauseFrame=frames;
+    if(iter%SCRSTEP===0){ const h=hscr();
+      if(h===scrH){ scrSince+=SCRSTEP; if(scrSince>scrFreeze){scrFreeze=scrSince;scrFreezeIter=iter;} }
+      else {scrH=h;scrSince=0;} }
     lastIterCy=TOT;
     for(const [k,d] of (inputs[iter]||[]))key(k,d);
     walkStep(iter);
@@ -110,7 +125,11 @@ memory.write=function(a,w,s){a&=0xffff;
     // Условие выхода — координата у края комнаты в ТУ сторону, куда смотрит герой
     // (screen_west X=0, screen_east X=255, screen_north Y=255, screen_south Y=0), поэтому
     // край подставляется по очереди на все четыре стороны: сработает та, что совпала с лицом.
-    if(ARCH&&iter%ARCH===0){
+    // KLTEX=1: переход между комнатами ровно В МОМЕНТ ПРЕВРАЩЕНИЯ (графика игрока 92..95).
+    // Именно там exit_screen уходит по раннему `ret NC` — меняет номер комнаты и НЕ зовёт game_loop.
+    const gno=rdb(L.graphic_objs_tbl);
+    const texNow=process.env.KLTEX&&gno>=92&&gno<=95;
+    if((ARCH&&iter%ARCH===0)||texNow){
       ow(L.graphic_objs_tbl+7,rdb(L.graphic_objs_tbl+7)|1,false);
       ow(L.graphic_objs_tbl+12,rdb(L.graphic_objs_tbl+12)&0x0F,false);
       const d=(archForced++)&3;
@@ -119,7 +138,10 @@ memory.write=function(a,w,s){a&=0xffff;
       else if(d===2)ow(L.graphic_objs_tbl+2,0xFF,false);
       else ow(L.graphic_objs_tbl+2,0x00,false); }
     const rm=rdb(L.graphic_objs_tbl+8);
-    if(rm!==lastRoom){if(lastRoom>=0){roomChanges++;if(process.env.KLTRACE)console.log(`  итер ${iter}: комната ${lastRoom} -> ${rm}`);}lastRoom=rm;roomSeen[rm]=(roomSeen[rm]||0)+1;}
+    if(rm!==lastRoom){if(lastRoom>=0){roomChanges++;if(process.env.KLTRACE)console.log(`  итер ${iter}: комната ${lastRoom} -> ${rm} (графика игрока ${rdb(L.graphic_objs_tbl)})`);}lastRoom=rm;roomSeen[rm]=(roomSeen[rm]||0)+1;}
+    // перестройка обязана случиться в той же или следующей итерации после смены комнаты
+    if(pendingRoom>=0&&iter>pendingRoom+1){roomNoRebuild.push(pendingRoom);pendingRoom=-1;}
+
   }
   return ow(a,w,s);};
 for(let f=0;f<60;f++)v06c.oneInterrupt(true); key("0",true);
@@ -156,6 +178,7 @@ let deaths=0, menuHit=false, lastLives=rdb(L.lives);
 while(iter-startIter<N&&steps<3e9){
   if(frc>=59904){frc-=59904;frames++;FR++;if(!cpu.iff)lost++;v06c.irq=true;v06c.checkInterrupt();const fa_=frameAct.get(frames);if(fa_){for(const f_ of fa_)f_();frameAct.delete(frames);}}
   const pc=cpu.pc;
+  if(pc===BSO){bsoSeen++;pendingRoom=-1;}
   if(pc===LOSE){deaths++;if(process.env.KLTRACE)console.log(`  итер ${iter}: lose_life, lives=${rdb(L.lives)}`);}
   if(pc===MENU){menuHit=true;console.log(`  итер ${iter}: ВОЗВРАТ В МЕНЮ (game over), смертей ${deaths}`);break;}
   const c=(cpu.instruction(),cpu.vcycles);steps++;TOT+=c;frc+=c;
@@ -186,6 +209,8 @@ console.log(`обратный ход на di: ${lost} (${(100*lost/Math.max(1,fr
 console.log(`смен комнат ${roomChanges}, комнат посещено ${Object.keys(roomSeen).length}: ${Object.keys(roomSeen).join(",")}`);
 console.log(`принудительных смен дня/ночи ${dayForced}, взводов «рядом с аркой» ${archForced}; дней days=${rdb(L.days)}`);
 console.log(`самый длинный промежуток между итерациями ${maxGap} тактов (${(maxGap/59904).toFixed(1)} кадра) на итерации ${maxGapIter}`);
+console.log(`картинка не менялась максимум ${scrFreeze} итераций подряд (конец на итерации ${scrFreezeIter})`);
+console.log(`перестроек экрана (build_screen_objects) ${bsoSeen}; смен комнаты БЕЗ перестройки ${roomNoRebuild.length}${roomNoRebuild.length?": итерации "+roomNoRebuild.slice(0,12).join(","):""}`);
 console.log(`смертей ${deaths}${menuHit?", дошло до меню":""}; нажатий ВК для снятия паузы ${pauseTries}`);
 if(stalls.length)for(const s of stalls)console.log(`  остановка на итерации ${s.iter}: PC ${s.pc.toString(16)} (${s.lbl}), счётчик ${s.resumed?"пошёл дальше":"НЕ ВОЗОБНОВИЛСЯ"}`);
 console.log(stalls.length?"ВЕРДИКТ: были остановки счётчика (см. выше)":"ВЕРДИКТ: зависания не было");
