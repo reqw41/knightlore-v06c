@@ -43,11 +43,19 @@ function key(k,down){
   if(VKBD===undefined){const [r,b]=VKEYS[k];if(down)keyboard.matrix[r]|=b;else keyboard.matrix[r]&=~b;return;}
   const [r,b]=KEYS[k];if(down)rows[r]&=~(1<<b);else rows[r]|=(1<<b);poke(VKBD+r,rows[r]);}
 let phase="menu",iter=0,steps=0;
+const startIter0={v:0};
+const pokes=(process.env.KLPOKE||"").split(";").filter(Boolean).map(t=>{
+  const m=t.match(/^([A-Za-z_0-9]+)(?:\+(\d+))?=(\d+)@(\d+)$/); if(!m)throw new Error("KLPOKE: "+t);
+  if(L[m[1]]===undefined)throw new Error("нет метки "+m[1]);
+  return {addr:L[m[1]]+(+m[2]||0),val:+m[3],iter:+m[4]};});
 memory.write=function(a,w,s){a&=0xffff;
   if(phase==="menu"&&cpu.pc===SYNC){poke(L.seed_1,0x34);poke(L.seed_1+1,0x12);poke(L.seed_2,0x78);poke(L.seed_2+1,0x56);poke(L.seed_3,0x9A);phase="init";}
   if(process.env.KLROOM&&phase==="init"&&a>=0xA000&&a<0xC000&&memory.read(L.graphic_objs_tbl+8,false)!==0&&!g.roomSet){g.roomSet=true;ow(L.graphic_objs_tbl+8,+process.env.KLROOM,false);ow(L.graphic_objs_tbl+40,+process.env.KLROOM,false);}
   if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
-  if(a===SEED2HI&&phase==="game"){iter++;}
+  if(a===SEED2HI&&phase==="game"){iter++;
+    // KLPOKE=метка+смещение=значение@итерация[;...] — вмешательство в игру для проверки веток
+    if(pokes.length)for(const q of pokes)if(q.iter===iter-startIter0.v){ow(q.addr,q.val,false);}
+  }
   return ow(a,w,s);};
 for(let f=0;f<60;f++)v06c.oneInterrupt(true);
 // KLFRAMES=n: снимок через n кадров от сброса, не дожидаясь комнаты (меню, заставка)
@@ -56,7 +64,7 @@ else{
 key("0",true);
 let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");}
-const startIter=iter;
+const startIter=iter; startIter0.v=iter;
 let frc=0,tacc=0; if(process.env.KLFRAMES)N=0;
 // KLSCAN=c0,c1,r0,r1: копить по кадрам объединение и пересечение пикселей окна плоскости 0
 let scan=null; if(process.env.KLSCAN){const m=process.env.KLSCAN.split(",").map(Number);
