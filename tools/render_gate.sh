@@ -40,10 +40,18 @@ git archive "$REF" | tar -x -C build/ref
 ( cd build/ref && run ref > "$ROOT"/build/prof_ref.txt )
 run new > build/prof_new.txt
 rc=0
+# ИТЕРАЦИЯ 1 СРАВНИВАЕТСЯ ОТДЕЛЬНО. Снимок берётся на границе итерации, а на первой из них на
+# экране ещё висит КАРТИНКА МЕНЮ: комната попадает на экран только со второй. Меню — часть порта,
+# а не рендера комнаты, и его правки (коммит 577c082, шесть строк и полоса подсветки) красили
+# гейт во всех семи сценариях, хотя итерации 2..N совпадали байт в байт. Поэтому вердикт гейта
+# выносится по итерациям 2..N, а расхождение на первой печатается отдельной строкой-замечанием.
 for t in "${SCEN[@]}"; do
-  if cmp -s build/ref/build/scr_ref_"$t".bin build/scr_new_"$t".bin && cmp -s build/ref/build/scr_ref_"$t".txt build/scr_new_"$t".txt
-  then echo "картинка $t: СОВПАДЕНИЕ ($N итераций, буфер+экран байт в байт)"
-  else echo "картинка $t: РАСХОЖДЕНИЕ — первая итерация:"; diff build/ref/build/scr_ref_"$t".txt build/scr_new_"$t".txt | head -3; rc=1; fi
+  ref=build/ref/build/scr_ref_"$t".txt; new=build/scr_new_"$t".txt
+  if cmp -s build/ref/build/scr_ref_"$t".bin build/scr_new_"$t".bin \
+     && diff -q <(tail -n +2 "$ref") <(tail -n +2 "$new") >/dev/null
+  then echo "картинка $t: СОВПАДЕНИЕ ($N итераций, буфер+экран байт в байт, итерации 2..$N)"
+  else echo "картинка $t: РАСХОЖДЕНИЕ — первая разошедшаяся итерация:"; diff <(tail -n +2 "$ref") <(tail -n +2 "$new") | head -3; rc=1; fi
+  cmp -s <(head -1 "$ref") <(head -1 "$new") || echo "   замечание: итерация 1 не совпала — на экране ещё меню (проверять снимком hudshot KLFRAMES, а не этим гейтом)"
 done
 echo "эталон ($REF):"; cat build/prof_ref.txt
 echo "текущее:";       cat build/prof_new.txt
