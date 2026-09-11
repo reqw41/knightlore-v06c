@@ -73,14 +73,16 @@ function walkStep(it){
   else if(r<78){walkHeld="z";walkUntil=it+2+(rnd()%3);}       // поворот влево
   else if(r<92){walkHeld="x";walkUntil=it+2+(rnd()%3);}       // поворот вправо
   else if(r<97){walkHeld="q";walkUntil=it+2;}                 // прыжок
-  else if(process.env.KLPAUSE){                               // ВК: пауза и снятие паузы (по кадрам)
-    vk(true);atFrame(frames+4,()=>vk(false));
-    atFrame(frames+40,()=>vk(true));atFrame(frames+46,()=>vk(false));
+  else if(process.env.KLPAUSE){                               // ВК: поставить паузу
+    vk(true);atFrame(frames+6,()=>vk(false));pauseTries=0;
     walkUntil=it+4;return;}
   else {walkHeld="0";walkUntil=it+3;}                          // взять/бросить
   key(walkHeld,true);
 }
 
+let pauseTries=0,pauseFrame=0;
+const HP0=L.handle_pause!==undefined?L.handle_pause:-1;
+const HP1=HP0<0?-1:HP0+40;   // handle_pause: три цикла ожидания ВК подряд, меньше 40 байт
 const STALL=+process.env.KLSTALL||20000000;
 const DAY=+process.env.KLDAY||0;
 const ARCH=+process.env.KLARCH||0;
@@ -93,8 +95,9 @@ memory.write=function(a,w,s){a&=0xffff;
   if(a===SEED2HI&&phase==="game"){
     iter++;
     if(process.env.KLLIVES){ow(L.lives,5,false);   // бессмертие: длинный прогон не должен кончаться по жизням
-      if(rdb(L.days)>=0x50)ow(L.days,1,false);}    // и по дням: на 64-м дне игра сама уходит в game over
+      if(rdb(L.days)>=0x35)ow(L.days,1,false);}   // игра уходит в game over на `cp 64` = BCD 40    // и по дням: на 64-м дне игра сама уходит в game over
     const gap=TOT-lastIterCy; if(gap>maxGap&&iter>2){maxGap=gap;maxGapIter=iter;}
+    pauseFrame=frames;
     lastIterCy=TOT;
     for(const [k,d] of (inputs[iter]||[]))key(k,d);
     walkStep(iter);
@@ -163,6 +166,12 @@ while(iter-startIter<N&&steps<3e9){
   // клавишу во время замершей картинки, а расписание ходьбы идёт по итерациям и само себя не
   // расклинит. Иначе loc_BA87 «ждём отпускания клавиши» выглядит как зависание.
   if(walkHeld&&TOT-lastIterCy>30*59904){key(walkHeld,false);walkHeld=null;walkUntil=0;}
+  // Снятие паузы: игрок видит замершую картинку и жмёт ВК ещё раз. Планировать это по итерациям
+  // нельзя (их нет), поэтому смотрим на PC: пока он в handle_pause, шлём ВК с паузами между.
+  // pauseFrame сбрасывается на границе ИТЕРАЦИИ, а не по выходу PC из handle_pause: пока игра
+  // стоит на паузе, ISR каждый кадр уводит PC в vec_isr, и сброс по PC не давал счётчику дорасти.
+  if(HP0>=0&&cpu.pc>=HP0&&cpu.pc<HP1&&frames-pauseFrame>25){
+    pauseFrame=frames;pauseTries++;vk(true);atFrame(frames+8,()=>vk(false));}
   if(TOT-lastIterCy>STALL){
     const it0=iter;
     dumpState(`ОСТАНОВКА СЧЁТЧИКА №${stalls.length+1}`);
@@ -177,7 +186,7 @@ console.log(`обратный ход на di: ${lost} (${(100*lost/Math.max(1,fr
 console.log(`смен комнат ${roomChanges}, комнат посещено ${Object.keys(roomSeen).length}: ${Object.keys(roomSeen).join(",")}`);
 console.log(`принудительных смен дня/ночи ${dayForced}, взводов «рядом с аркой» ${archForced}; дней days=${rdb(L.days)}`);
 console.log(`самый длинный промежуток между итерациями ${maxGap} тактов (${(maxGap/59904).toFixed(1)} кадра) на итерации ${maxGapIter}`);
-console.log(`смертей ${deaths}${menuHit?", дошло до меню":""}`);
+console.log(`смертей ${deaths}${menuHit?", дошло до меню":""}; нажатий ВК для снятия паузы ${pauseTries}`);
 if(stalls.length)for(const s of stalls)console.log(`  остановка на итерации ${s.iter}: PC ${s.pc.toString(16)} (${s.lbl}), счётчик ${s.resumed?"пошёл дальше":"НЕ ВОЗОБНОВИЛСЯ"}`);
 console.log(stalls.length?"ВЕРДИКТ: были остановки счётчика (см. выше)":"ВЕРДИКТ: зависания не было");
 process.exit(stalls.length?1:0);
