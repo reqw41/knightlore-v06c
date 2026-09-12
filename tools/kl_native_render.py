@@ -107,6 +107,7 @@ ps_al:			ld		(ps_shpg+1), a					; сюда пришли по jp z: A = 0. Выр
 				add		a, a
 				add		a, a
 				add		a, a
+				sub		b								; 7w: группа выровненной цепочки — 7 байт
 				neg
 				sub		6
 ps_ent:			add		a, low (loc_D7AC+3)				; i8080: jp — младший байт адреса входа

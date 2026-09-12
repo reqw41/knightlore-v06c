@@ -2725,6 +2725,18 @@ hp_rel2:		ld      a, (vec_kbmat+0)
         old_s = "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n"
         assert old_s in src, "ps shifted base"
         src = src.replace(old_s, "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт адреса входа\n", 1)
+        # ---- выровненная группа: cpl/or e/cpl/or d -> or e/xor e/or d ----
+        # (A|e)^e = A & ~e — «И с дополнением» за две ALU-операции вместо трёх с cpl.
+        # Результат ПОБИТНО тот же, включая 8 пар данных, где data не вложена в маску
+        # (spr_012/021/028/030/032/070): последняя операция осталась `or d`, а не `xor d`.
+        # 52 -> 48 тактов на байт окна; группа 8 -> 7 байт, вход в цепочку считается по 7
+        # (заголовок kl_native_render: add a,a x3 + sub b = 7w).
+        old_g = ("\t\t\t\tld      a, (bc)\n\t\t\t\tcpl\n\t\t\t\tor      e\n"
+                 "\t\t\t\tcpl\n\t\t\t\tor      d\n")
+        new_g = ("\t\t\t\tld      a, (bc)\n\t\t\t\tor      e\n\t\t\t\txor     e\n"
+                 "\t\t\t\tor      d\n")
+        assert src.count(old_g) == 5, ("выровненная группа", src.count(old_g))
+        src = src.replace(old_g, new_g)
         old_a = "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tjr      loc_D73C\n"
         assert old_a in src, "ps aligned base"
         src = src.replace(old_a, "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт входа (+1: перед loc_D7AC убран ex af,af')\n\t\t\t\tjr      loc_D73C\n", 1)
