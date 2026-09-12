@@ -14,6 +14,7 @@ lab.sort((a,b)=>a[0]-b[0]);
 const nameOf=a=>{let lo=0,hi=lab.length-1,r=-1;while(lo<=hi){const m=(lo+hi)>>1;if(lab[m][0]<=a){r=m;lo=m+1;}else hi=m-1;}
   return r<0?"?":lab[r][1]+(a>lab[r][0]?"+"+(a-lab[r][0]):"");};
 const SEED2HI=L.seed_2+1, ROOM=L.curr_room_attrib;
+const VPBF=L.vpb_est===undefined?-1:L.vpb_est, VPBS=L.vpb_set===undefined?-1:L.vpb_set;
 const lst=fs.readFileSync(ROM.replace(/\.r0m$/,".lst"),"latin1").split("\n");
 let SYNC=-1;for(const l of lst){const m=l.match(/^\s*\d+\+?\s+([0-9A-F]{4})\s.*\tcall\s+shuffle_objects_required/);if(m){SYNC=parseInt(m[1],16);break;}}
 const g={};g.window=g;g.document={createElement:()=>fc(),getElementById:()=>fc()};
@@ -57,16 +58,20 @@ function runRoom(room){
   while(iter-start<N&&steps<8e7){
     if(frc>=59904){frc-=59904;frames++;if(!cpu.iff){lost++;if(diAt>=0)lostAt.set(diAt,(lostAt.get(diAt)||0)+1);}v06c.irq=true;v06c.checkInterrupt();}
     const pc=cpu.pc, op=rd(pc);
-    if(pc===VDB){pendEst=(cpu.regs[2]<<8)|cpu.regs[3];}                  // оценка блока в тиках ВИ53
+    if(pc===VDB||pc===VPBF){pendEst=(cpu.regs[2]<<8)|cpu.regs[3];}       // оценка блока в тиках ВИ53
+    if(pc===VPBS)pendEst=-1;   // сегмент print_sprite УРЕЗАН по границе кадра: модели длины у него нет,
+                               //   длину задаёт остаток кадра — такие блоки в средние оценки не берём
     if(op===0xF3&&cpu.iff){diAt=pc;diT=tot;
-      const e=est.get(pc)||{n:0,sum:0,sum2:0,halt:0};e.n++;e.sum+=pendEst;e.sum2+=pendEst*pendEst;e.halt+=pendHalt;est.set(pc,e);pendHalt=0;curEst=pendEst;}
+      const e=est.get(pc)||{n:0,sum:0,sum2:0,halt:0,cut:0};e.n++;e.halt+=pendHalt;
+      if(pendEst<0)e.cut++;else{e.sum+=pendEst;e.sum2+=pendEst*pendEst;}est.set(pc,e);pendHalt=0;curEst=pendEst;}
     if(cpu.last_opcode===0x76)pendHalt+=cpu.vcycles;          // halt перед di = ожидание кадра
     const c=(cpu.instruction(),cpu.vcycles);steps++;tot+=c;frc+=c;
     tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
     if(cpu.last_opcode===0xFB&&diAt>=0){                     // ei — блок закрыт
       const d=tot-diT, s=stat.get(diAt)||{n:0,max:0,sum:0,mrg:1e9,msum:0,est:0};
       s.n++;s.sum+=d;if(d>s.max)s.max=d;
-      const mg=2*curEst-d;if(mg<s.mrg)s.mrg=mg;s.msum+=mg;s.est+=2*curEst;stat.set(diAt,s);diAt=-1;}
+      if(curEst>=0){const mg=2*curEst-d;if(mg<s.mrg)s.mrg=mg;s.msum+=mg;s.est+=2*curEst;s.ne=(s.ne||0)+1;s.esum=(s.esum||0)+d;}else s.nc=(s.nc||0)+1;
+      stat.set(diAt,s);diAt=-1;}
     if(cpu.last_opcode===0xd3)io.commit();
   }
   return {iters:iter-start,frames,lost,lostAt};
@@ -79,9 +84,9 @@ console.log(`кадров ${tf}, обратный ход пришёлся на d
 for(const [k,v] of [...allLost].sort((a,b)=>b[1]-a[1]))console.log(`  потери в блоке ${k.toString(16)} (${nameOf(k)}): ${v}`);
 console.log("\nоценка блока и halt (модель: если фаза кадра равномерна, E[halt] = оценка^2/(2*кадр) тактов)");
 console.log("блок                вызовов  средн.оценка  halt/вызов(такт)  модель E[halt]  выигрыш от дробления на 2/3/4 (тактов/вызов, цена дробления 344)");
-for(const [a,e] of est){const mean=e.sum/e.n, mod=e.sum2/e.n/(2*FRAME)*2;  // *2: тик -> такт
+for(const [a,e] of est){const nm=e.n-e.cut, mean=nm?e.sum/nm:0, mod=nm?e.sum2/nm/(2*FRAME)*2:0;  // *2: тик -> такт
   const g=n=>((mod*(1-1/n))-(n-1)*344).toFixed(0);
-  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(20)} ${String(e.n).padStart(7)} ${mean.toFixed(0).padStart(13)} ${(e.halt/e.n).toFixed(0).padStart(17)} ${mod.toFixed(0).padStart(15)}   ${g(2)} / ${g(3)} / ${g(4)}`);}
+  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(20)} ${String(e.n).padStart(7)} ${(nm?mean.toFixed(0):"—").padStart(13)} ${(e.halt/e.n).toFixed(0).padStart(17)} ${mod.toFixed(0).padStart(15)}   ${g(2)} / ${g(3)} / ${g(4)}${e.cut?"   урезано по кадру: "+e.cut+" из "+e.n:""}`);}
 console.log("\nблок (адрес di)        вызовов   макс.тактов  макс.тиков ВИ53   средн.тактов  запас оценки: мин  средн.  средн.оценка/факт");
 for(const [a,s] of [...stat].sort((x,y)=>y[1].max-x[1].max))
-  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(28)} ${String(s.n).padStart(8)} ${String(s.max).padStart(12)} ${String(Math.ceil(s.max/2)).padStart(14)} ${(s.sum/s.n).toFixed(0).padStart(14)}  ${String(s.mrg).padStart(9)} ${(s.msum/s.n).toFixed(0).padStart(7)}  ${(s.est/s.sum).toFixed(3).padStart(8)}`);
+  console.log(`${(a.toString(16)+" "+nameOf(a)).padEnd(28)} ${String(s.n).padStart(8)} ${String(s.max).padStart(12)} ${String(Math.ceil(s.max/2)).padStart(14)} ${(s.sum/s.n).toFixed(0).padStart(14)}  ${(s.ne?String(s.mrg):"—").padStart(9)} ${(s.ne?(s.msum/s.ne).toFixed(0):"—").padStart(7)}  ${(s.ne?(s.est/s.esum).toFixed(3):"—").padStart(8)}${s.nc?"   (урезанных по кадру "+s.nc+" — у них оценки нет)":""}`);

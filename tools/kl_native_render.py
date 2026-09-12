@@ -134,7 +134,7 @@ ps_pos:			ld		a, (hl)
 				ld		(kl_lines), a					; высота окна (её читает vec_ps_budget)
 				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере; на выходе A = C
 				add		a, (hl)							; HL = obj+25 (высота) — процедура HL не трогает
-				ld		(ps_end+1), a					; строка за последней: конец пиксельного цикла
+				ld		(ps_fin+1), a					; строка за последней; сам конец сегмента ставит vec_ps_budget
 				call	vec_ps_budget					; хватит ли кадра на пиксельный цикл под di
 				di										; SP уходит в данные спрайта
 				ld      (tmp_SP), sp
