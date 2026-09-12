@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """Сверка журнала записей в AY (tools/aytrace_vec.js) с эталонной моделью MSX.
 
-    python3 tools/aycheck.py <журнал.txt> <мелодия> <кадр старта>
+    python3 tools/aycheck.py <журнал.txt> <мелодия> <кадр старта> [--mode=a,b,c]
 
 Мелодия: start_game | game_over | game_complete | menu | blip.
+--mode: режимы громкости каналов 0,1,2, оставшиеся от ПРЕДЫДУЩЕЙ мелодии (play_tune их не
+обнуляет — дефект оригинала, SOUND.md). Нужен только game_complete: её потоки начинаются
+сразу с ноты. Играла menu -> --mode=0,1,2; играла start_game -> --mode=0,2,2.
 «Кадр старта» — кадр, в котором Вектор записал список инициализации PSG
 (R8=0 R9=0 R10=0 R7=0x38 R11=0 R12=8); первый тик мелодии приходится на следующий кадр.
 
@@ -44,9 +47,17 @@ INIT_PAT = [(8, 0), (9, 0), (10, 0), (7, 0x38), (11, 0), (12, 8)]   # списо
 
 
 def main():
-    logf, name = sys.argv[1], sys.argv[2]
-    after = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    argv = [a for a in sys.argv[1:] if not a.startswith('--')]
+    modes = next((a.split('=', 1)[1] for a in sys.argv[1:] if a.startswith('--mode=')), None)
+    logf, name = argv[0], argv[1]
+    after = int(argv[2]) if len(argv) > 2 else 0
     p = M.Player(HEADERS[name])
+    if modes:
+        # Поле «режим громкости» канала MSX play_tune НЕ обнуляет (SOUND.md, «Замечание о дефекте»):
+        # потоки game_complete и мёртвой 0x46BC начинаются сразу с ноты, без команды режима, и
+        # звучат громкостью, оставшейся от предыдущей мелодии. Модель играет мелодию в ИЗОЛЯЦИИ и
+        # стартует с нулей, поэтому для таких мелодий ей надо сказать, что играло перед ними.
+        p.mode = [int(x) for x in modes.split(',')]
     p.run()
     ref = split(p.writes, None)
 
