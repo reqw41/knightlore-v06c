@@ -2615,6 +2615,8 @@ def kl_vec_glue(src, translate_later):
     assert _n == 1 and 'zx_vram' not in src, "zx_vram: " + str(re.findall(r'[^\n]*zx_vram[^\n]*', src))
     src, snd_cut = kl_sound_ay.apply(src)
     src = kl_cut_controls(src, vec=True)
+    if kl_sound_ay.JUKEBOX_ON:
+        src = kl_sound_ay.apply_jukebox(src)     # стартовый экран -> стенд приёмки на слух
     # ВВОД: три раскладки читаются ПРЯМО ИЗ МАТРИЦЫ ВЕКТОРА, а не через ряды ZX. Дорога через ZX
     # для них не годится: у Городецкого в режиме 1 клавиши O и P — повороты, а на ZX обе лежат в
     # ряду 5 и обе значат «прыжок». Ряды ZX (read_port) остаются для меню, «любой клавиши» в
@@ -2687,7 +2689,8 @@ hp_rel2:		ld      a, (vec_kbmat+0)
     screen = screen.replace("__BTS_CHAIN__\n",
         "bts_ch:\n" + "\t\t\t\tpop\t\tde\n\t\t\t\tld\t\t(hl), e\n\t\t\t\tinc\t\tl\n"
         "\t\t\t\tld\t\t(hl), d\n\t\t\t\tinc\t\tl\n" * 16, 1)
-    tail = VEC_TAIL + screen + kl_sound_ay.DRIVER + kl_sound_ay.data_block()
+    tail = VEC_TAIL + screen + kl_sound_ay.DRIVER \
+        + (kl_sound_ay.jukebox_block() if kl_sound_ay.JUKEBOX_ON else '') + kl_sound_ay.data_block()
     # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
     kbzx = [0xFF]*64
     zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', tail)
@@ -2931,6 +2934,8 @@ def main():
             target = argv[i + 1]; i += 2; continue
         if a.startswith('--target='):
             target = a.split('=', 1)[1]; i += 1; continue
+        if a == '--jukebox':
+            kl_sound_ay.JUKEBOX_ON = True; i += 1; continue
         pos.append(a); i += 1
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='latin-1').read()
@@ -2957,7 +2962,8 @@ def main():
                 src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+2[^\n]*\n', '', src, count=1)
                 assert n == 1, 'снятие мёртвой ячейки ' + cell
         src, moved, nblk = vec_pack_holes(src, VEC_HOLES, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
-        src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "build/knightlore_vec.r0m", 0, 0x10000', src, flags=re.M)
+        rom = 'build/knightlore_jukebox.r0m' if kl_sound_ay.JUKEBOX_ON else 'build/knightlore_vec.r0m'
+        src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "%s", 0, 0x10000' % rom, src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)
         print(f"vector glue + translate (i8080) {inp} -> {outp}; exx-B pairs={exx_pairs}; IX-хелперов {len(_ix_used)}; "
               f"в дыры вне картинки увезено {moved} Б ({nblk} процедур)"
