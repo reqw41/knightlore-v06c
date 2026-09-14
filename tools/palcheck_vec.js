@@ -19,9 +19,16 @@
 // Снимок берётся НА ГРАНИЦЕ КАДРА, до прерывания, — это ровно то, что показывалось весь кадр.
 //
 // ДЕФЕКТ = точка, у которой индекс (все четыре плоскости) НЕ изменился с прошлого кадра, а цвет
-// изменился. Такую точку никто не перерисовывал — значит её перекрасила палитра.
-// Погасание (палитра сменилась, когда на экране чёрное) дефектом НЕ является: у чёрной точки
-// цвет чёрный при любой палитре, и счётчик её не видит.
+// изменился С ОДНОГО ВИДИМОГО НА ДРУГОЙ ВИДИМЫЙ (оба не чёрные). Такую точку никто не
+// перерисовывал — значит её перекрасила палитра, и пользователь видит вспышку смены цвета.
+// ГАШЕНИЕ (видимый -> чёрный) и ПОЯВЛЕНИЕ (чёрный -> видимый) дефектом НЕ считаются: это
+// разрешённый владельцем приём «1–2 чёрных кадра между комнатами». Их счётчики печатаются
+// отдельно — по ним видно, сколько кадров экран гаснет.
+//
+// ВТОРОЙ ИНВАРИАНТ (иначе первый обманывается «поздним гашением»): между кадром ГАШЕНИЯ и
+// следующим кадром ЗАЖИГАНИЯ картинка ОБЯЗАНА измениться — копия буфера должна идти по ЧЁРНОМУ
+// экрану. Если гасить ПОСЛЕ update_screen, первый инвариант зелёный (цвет менялся только через
+// чёрное), а пользователь всё равно видит, как новая комната выезжает столбцами в цвете старой.
 "use strict";
 const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
@@ -101,12 +108,14 @@ function snapPlanes(){const b=Buffer.alloc(4*0x2000);
   return b;}
 let prev=null, prevPal=null;
 const events=[]; let recolorFrames=0, recolorTotal=0, worst={n:0,frame:-1};
+let blankFrames=0, darkRun=0, darkMax=0, darkMaxAt=-1;
+let blankShot=null, lateBlank=0; const blanks=[];
 const trace=!!process.env.KLTRACE, verb=!!process.env.KLVERB;
 const traceLines=[];
 let lastRoom=-1;
 function onFrame(){
   const pl=snapPlanes(), pal=Buffer.from(chipPal);
-  let recol=0, redrawn=0, lit=0;
+  let recol=0, off=0, on=0, redrawn=0, lit=0, vis=0, c0=-1, c1=-1;
   if(prev){
     // изменившиеся записи палитры
     const dif=[]; for(let i=0;i<16;i++)if(pal[i]!==prevPal[i])dif.push(i);
@@ -116,35 +125,49 @@ function onFrame(){
             a2=prev[0x4000+i],b2=pl[0x4000+i],a3=prev[0x6000+i],b3=pl[0x6000+i];
       const same=(a0===b0&&a1===b1&&a2===b2&&a3===b3);
       if(!same){ // точка перерисована — считаем сколько битов p0 изменилось (объём копирования)
-        redrawn+=popc(a0^b0); }
+        redrawn+=popc(a0^b0); const col=i>>8; if(c0<0)c0=col; c1=col; }
       if(dif.length===0)continue;
-      if(!same){
-        // разбор по битам: часть точек байта могла остаться прежней
-        for(let bit=0;bit<8;bit++){
-          const m=1<<bit;
-          const ia=((a0&m)?8:0)|((a1&m)?4:0)|((a2&m)?2:0)|((a3&m)?1:0);
-          const ib=((b0&m)?8:0)|((b1&m)?4:0)|((b2&m)?2:0)|((b3&m)?1:0);
-          if(ia===ib&&pal[ia]!==prevPal[ia])recol++;
-        }
-      } else {
-        for(let bit=0;bit<8;bit++){
-          const m=1<<bit;
-          const ia=((a0&m)?8:0)|((a1&m)?4:0)|((a2&m)?2:0)|((a3&m)?1:0);
-          if(pal[ia]!==prevPal[ia])recol++;
-        }
+      // разбор по битам: часть точек байта могла остаться прежней
+      for(let bit=0;bit<8;bit++){
+        const m=1<<bit;
+        const ia=((a0&m)?8:0)|((a1&m)?4:0)|((a2&m)?2:0)|((a3&m)?1:0);
+        const ib=same?ia:(((b0&m)?8:0)|((b1&m)?4:0)|((b2&m)?2:0)|((b3&m)?1:0));
+        if(ia!==ib)continue;                  // точку перерисовали — цвет менять законно
+        const ca=prevPal[ia], cb=pal[ia];
+        if(ca===cb)continue;
+        if(cb===0)off++;                      // гашение: видимый -> чёрный
+        else if(ca===0)on++;                  // появление: чёрный -> видимый
+        else recol++;                         // ДЕФЕКТ: видимый -> другой видимый
       }
     }
-    if(dif.length&&(recol||verb)){
-      events.push({frame:frames,iter,room:rdb(RMB),attr:rdb(ROOM),recol,
+    if(dif.length&&(recol||off||on||verb)){
+      events.push({frame:frames,iter,room:rdb(RMB),attr:rdb(ROOM),recol,off,on,
         pal:dif.map(i=>`${i.toString(16)}:${prevPal[i].toString(16)}->${pal[i].toString(16)}`).join(",")});
     }
     if(recol){recolorFrames++;recolorTotal+=recol;if(recol>worst.n)worst={n:recol,frame:frames,iter,room:rdb(RMB)};}
+    // второй инвариант: копия обязана идти ПО ЧЁРНОМУ. Помним картинку кадра гашения и
+    // сверяем её с картинкой кадра зажигания: если не изменилась — гасили уже ПОСЛЕ копии.
+    if(off&&!on){blankShot={frame:frames,pl:prev};}
+    else if(on&&blankShot){
+      let d=0; for(let i=0;i<0x2000;i++)d+=popc(blankShot.pl[i]^pl[i]);
+      blanks.push({from:blankShot.frame,to:frames,bits:d,room:rdb(RMB)});
+      if(d===0)lateBlank++;
+      blankShot=null;}
   }
   for(let i=0;i<0x2000;i++)lit+=popc(pl[i]);
+  // виден ли хоть один не-чёрный пиксель (для замера длины чёрного промежутка)
+  for(let i=0;i<0x2000&&!vis;i++){
+    const b0=pl[i],b1=pl[0x2000+i],b2=pl[0x4000+i],b3=pl[0x6000+i];
+    if((b0|b1|b2|b3)===0){if(pal[0]!==0)vis=1;continue;}
+    for(let bit=0;bit<8&&!vis;bit++){const m=1<<bit;
+      const ia=((b0&m)?8:0)|((b1&m)?4:0)|((b2&m)?2:0)|((b3&m)?1:0);
+      if(pal[ia]!==0)vis=1;}
+  }
+  if(!vis){blankFrames++;darkRun++;if(darkRun>darkMax){darkMax=darkRun;darkMaxAt=frames;}}else darkRun=0;
   if(trace){
     const rm=rdb(RMB);
     traceLines.push(`${String(frames).padStart(5)} итер=${String(iter).padStart(5)} комн=${String(rm).padStart(3)} `+
-      `точек_p0=${String(lit).padStart(6)} перерисовано_бит_p0=${String(redrawn).padStart(6)} перекрашено=${String(recol).padStart(6)} `+
+      `точек_p0=${String(lit).padStart(6)} перерисовано_бит_p0=${String(redrawn).padStart(6)} столбцы=${c0<0?"--":c0+".."+c1} перекрашено=${String(recol).padStart(6)} `+
       `пал=${[8,9,10,11,12,13,14,15].map(i=>pal[i].toString(16).padStart(2,"0")).join("")}`);
     if(rm!==lastRoom){traceLines.push(`      ^^^ комната ${lastRoom} -> ${rm}`);lastRoom=rm;}
   }
@@ -175,9 +198,17 @@ if(trace)fs.writeFileSync(process.env.KLTRACEOUT||"build/palcheck_trace.txt",tra
 console.log(`palcheck: кадров ${frames}, итераций ${iter}, принудительных арок ${archForced}, OUT палитры ${palOuts}`);
 console.log(`события смены палитры: ${events.length}`);
 for(const e of events.slice(0,60))
-  console.log(`  кадр ${String(e.frame).padStart(5)} итер ${String(e.iter).padStart(5)} комната ${String(e.room).padStart(3)} attr ${e.attr}: ${e.pal}  ПЕРЕКРАШЕНО ТОЧЕК: ${e.recol}`);
+  console.log(`  кадр ${String(e.frame).padStart(5)} итер ${String(e.iter).padStart(5)} комната ${String(e.room).padStart(3)} attr ${e.attr}: ${e.pal}`+
+    `  погашено ${e.off}, зажжено ${e.on}, ПЕРЕКРАШЕНО ${e.recol}`);
 if(events.length>60)console.log(`  ... ещё ${events.length-60}`);
 console.log(`кадров с перекраской: ${recolorFrames}, точек всего: ${recolorTotal}, худший кадр ${worst.frame} (${worst.n} точек, комната ${worst.room})`);
+console.log(`чёрных кадров (на экране ни одной видимой точки): ${blankFrames}, самый длинный чёрный промежуток ${darkMax} кадров (кончается на ${darkMaxAt})`);
+console.log(`гашений экрана: ${blanks.length}`);
+for(const b of blanks.slice(0,40))console.log(`  кадры ${b.from}..${b.to} (${b.to-b.from} чёрных), комната ${b.room}: за время черноты перерисовано бит p0: ${b.bits}`);
+if(blanks.length>40)console.log(`  ... ещё ${blanks.length-40}`);
 const LIMIT=+process.env.KLPALLIMIT||0;
-if(recolorTotal>LIMIT){console.log(`ГЕЙТ КРАСНЫЙ: старая картинка перекрашивается (допуск ${LIMIT})`);process.exit(1);}
-console.log("ГЕЙТ ЗЕЛЁНЫЙ: ни одной точки, перекрашенной без перерисовки");
+let bad=false;
+if(recolorTotal>LIMIT){console.log(`ГЕЙТ КРАСНЫЙ: старая картинка перекрашивается (допуск ${LIMIT})`);bad=true;}
+if(lateBlank){console.log(`ГЕЙТ КРАСНЫЙ: ${lateBlank} гашений, за которые картинка не изменилась — копия шла по ВИДИМОМУ экрану, гасили уже после неё`);bad=true;}
+if(bad)process.exit(1);
+console.log("ГЕЙТ ЗЕЛЁНЫЙ: ни одной точки, перекрашенной без перерисовки; каждая копия шла по чёрному экрану");
