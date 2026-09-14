@@ -659,7 +659,20 @@ VEC_CODE_TOP = 0x7A00      # потолок кода: ниже 128 байт ст
                            # временный `ld sp,seed_1` 72 Б, ISR добавляет 10 -> максимум 82)
 VEC_HOLE_BYTES = int(__import__('os').environ.get('KL_HOLE_BYTES', '-1'))   # сколько байт увозить в дыры (-1 = сколько влезет)
 VEC_HOLE_SKIP = tuple(x for x in __import__('os').environ.get('KL_HOLE_SKIP', '').split(',') if x)
+VEC_HOLE_NODATA = bool(__import__('os').environ.get('KL_HOLE_NODATA'))   # 1 = не увозить таблицы (для разведения причин)
 VEC_HOLE_PLANES = [0xA000, 0xC000]   # плоскости, чьи строки вне картинки отданы под код (1 = буфер, 2 = селектор HUD)
+# Дыры ВНЕ видеопамяти (§17.5.2). Каждая — свободный кусок образа, который никто не читает и не пишет:
+#   0x0007..0x0030  между `jp vec_boot` нулевой страницы и вектором RST 38 (0x0030..0x0038 оставлены
+#                   гейтам kbcheck/inputcheck: они паркуют там CPU);
+#   0x003B..0x0040  между `jp vec_isr` и переменными нулевой страницы на 0x0040;
+#   0x7FE8..0x8000  хвост страницы переменных за clear_end (адрес переменных кратен 32, поэтому
+#                   0x568 байт кончаются на 0x7FE8 и 24 байта до плоскости 0 лежали зря).
+VEC_HOLE_GAPS = [(0x0007, 0x0030 - 0x0007), (0x003B, 0x0040 - 0x003B), (0x7FE8, 0x8000 - 0x7FE8)]
+# Хвост ВЕРХНЕГО региона: между концом build_lookup_tbls и таблицами сдвига остаётся добивка
+# (разрез спрайтов VEC_SPLIT кладёт наверх целые спрайты по ~150 Б, точно в потолок не попасть).
+# Её размер считает vec_walk, класть туда можно что угодно: блоки идут ПОСЛЕ `ret`
+# build_lookup_tbls (провалиться в них нельзя), сторож — тот же ASSERT $ <= 0xF100.
+VEC_UPPER_TOP = 0xF100     # таблицы сдвига: print_sprite адресует их страницу константой `or 0xF0`
 VEC_UPPER = int(__import__('os').environ.get('KL_VEC_UPPER', '0xE000'), 16)   # начало верхнего региона (плоскость 3)
 # Разрез массива спрайтов: с этой метки хвост уезжает в верхний регион. Ниже сколько влезет —
 # граница подобрана замером (см. ASSERT нижнего региона: свободно должно оставаться ~0), сдвигать
@@ -3106,9 +3119,111 @@ def _i8080_len(t):
 
 
 _H_LBL = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):')
-_H_HARD = re.compile(r'(?i)^(ORG|DEVICE|SAVEBIN|SAVESNA|ASSERT|ALIGN|IF|ELSE|ENDIF|INCBIN|DS|DB|DW|EQU)\b')
+_H_HARD = re.compile(r'(?i)^(ORG|DEVICE|SAVEBIN|SAVESNA|ASSERT|ALIGN|IF|ELSE|ENDIF|INCBIN|DS|EQU)\b')
+_H_DATA = re.compile(r'(?i)^(DB|DW|DEFB|DEFW|DC)\b')   # DC — строка, у последнего байта взведён бит 7
+_H_PAD = re.compile(r'(?i)^(ORG|ALIGN)\b')
 # halt НЕ прерывает поток: после прерывания исполнение идёт дальше (vec_di_budget: ei/halt/ret)
 _H_TERM = re.compile(r'(?i)^(ret$|jp\s+(?!nz\b|z\b|nc\b|c\b|po\b|pe\b|p\b|m\b))')
+# метка в «адресном» выражении: high/low, сдвиг, маска, разность адресов. Такую таблицу двигать
+# нельзя — её читают по младшему байту или её адрес участвует в ASSERT'е.
+_H_SENS = re.compile(r'(?i)(?:\b(?:high|low)\s*\(?\s*([A-Za-z_]\w*))'
+                     r'|(?:([A-Za-z_]\w*)\s*(?:&|\||\^|\*|/|%|<<|>>|-))'
+                     r'|(?:(?:&|\||\^|\*|/|%|<<|>>|-)\s*([A-Za-z_]\w*))')
+
+
+def _db_len(code):
+    """Длина строки DB/DW в байтах. Ошибка в меньшую сторону ловится ASSERT'ом дыры при ассемблировании."""
+    mn = code.split()[0].upper()
+    unit = 2 if mn in ('DW', 'DEFW') else 1
+    rest = code[len(mn):].strip()
+    items, cur, q, depth = [], '', None, 0
+    for ch in rest:
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+            continue
+        if ch in '"\'':
+            q = ch; cur += ch; continue
+        if ch in '([':
+            depth += 1
+        elif ch in ')]':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            items.append(cur); cur = ''; continue
+        cur += ch
+    if cur.strip():
+        items.append(cur)
+    n = 0
+    for it in items:
+        it = it.strip()
+        if len(it) >= 2 and it[0] in '"\'' and it[-1] == it[0]:
+            n += (len(it) - 2) * unit
+        else:
+            n += unit
+    return n
+
+
+_H_ANYLBL = re.compile(r'^\.?[A-Za-z_][A-Za-z0-9_]*:')
+_H_SKIP = re.compile(r'(?i)^(ASSERT|DEVICE|SAVEBIN|SAVESNA|IF|ELSE|ENDIF|OUTPUT|DISPLAY|END)\b')
+
+
+def vec_walk(lines, hi):
+    """Адрес каждой строки исходника от начала до hi (включительно), None — если счёт сбился.
+
+    Считаем построчно (_i8080_len/_db_len/DS/ALIGN/ORG) — сверено с листингом до байта. Нужно
+    двоим: (1) ALIGN 256 перед `kl_optr` съедает СОТНИ байт добивки, и снятое ДО него нижний
+    регион не укорачивает — надо знать, сколько в эту добивку класть; (2) хвост верхнего региона
+    (до таблиц сдвига на 0xF100) — тоже добивка, её размер иначе пришлось бы держать константой.
+    Сторож в обоих случаях — ASSERT в ассемблере: промах счёта стоит места, но не поведения."""
+    eqs = {}
+    for l in lines:
+        m = re.match(r'^([A-Za-z_]\w*)[: \t]+\s*(?:EQU|equ)\s+(.+)$', l.split(';')[0].strip())
+        if m:
+            eqs[m.group(1)] = m.group(2).strip()
+
+    def ev(e):
+        for k, v in eqs.items():
+            e = re.sub(r'\b' + k + r'\b', '(' + v + ')', e)
+        return int(eval(e, {'__builtins__': {}}, {}))
+
+    addr, at = None, [None] * (hi + 1)
+    for i in range(hi + 1):
+        l = lines[i]
+        m = _H_ANYLBL.match(l)
+        code = ' '.join((l[m.end():] if m else l).split(';')[0].split())
+        at[i] = addr
+        if not code:
+            continue
+        u = code.upper()
+        if u.startswith('ORG'):
+            try:
+                addr = int(code.split()[1], 0)
+            except ValueError:
+                addr = None
+            continue
+        if addr is None:
+            continue
+        if u.startswith('ALIGN'):
+            n = int(code.split()[1], 0)
+            addr = (addr + n - 1) & ~(n - 1)
+            continue
+        if u.startswith('DS'):
+            try:
+                addr += ev(code.split(None, 1)[1].split(',')[0])
+            except Exception:
+                return None                            # неизвестный размер — считать нечего
+            continue
+        if _H_DATA.match(code):
+            addr += _db_len(code)
+            continue
+        if re.search(r'(?i)\bequ\b', code) or _H_SKIP.match(code):
+            continue
+        n = _i8080_len(code)
+        if n is None:
+            return None                                # неизвестная инструкция — счёт адреса врёт
+        addr += n
+    return at
 
 
 def vec_holes(base, pages=32):
@@ -3120,37 +3235,71 @@ def vec_holes(base, pages=32):
 
 
 def vec_pack_holes(src, holes, need=-1, exclude=()):
-    """Увезти мелкие самостоятельные процедуры нижнего региона в дыры вне картинки.
-    Движим блок «метка: ... ret/jp», если: весь блок — инструкции; кончается безусловной передачей
-    управления (в него нельзя провалиться из него же); предыдущий блок тоже кончается безусловно и
-    непуст (иначе метка-синоним или провал сверху); перед блоком нет ORG (иначе следующий блок
-    уедет на его адрес). Ссылки на метки символические, поэтому переезд ничего не ломает."""
+    """Увезти мелкие самостоятельные процедуры И ЧИСТЫЕ ТАБЛИЦЫ нижнего региона в дыры вне картинки.
+
+    КОД. Движим блок «метка: ... ret/jp», если: весь блок — инструкции; кончается безусловной
+    передачей управления (в него нельзя провалиться из него же); предыдущий блок тоже кончается
+    безусловно и непуст (иначе метка-синоним или провал сверху); перед блоком нет ORG/ALIGN (иначе
+    следующий блок уедет на его адрес). В блок, куда проваливаются сверху, ставится `jp` (3 Б).
+
+    ДАННЫЕ (§17.5.2). Движим группу «метка: DB/DW …» без единой инструкции, если:
+      * на метку есть хотя бы одна ссылка и ВСЕ ссылки символические — ни `high`/`low`, ни маски,
+        ни сдвига, ни разности адресов (иначе таблицу читают по младшему байту либо её адрес
+        участвует в ASSERT'е: ловушка vec_kbzx — при пересечении границы страницы клавиатура молча
+        умирала);
+      * перед группой нет ORG/ALIGN (требование выравнивания переезд не переживёт);
+      * следом идущие БЕЗЫМЯННЫЕ для ссылок таблицы (на них не ссылается никто — значит их читают,
+        продолжая предыдущую) едут ВМЕСТЕ с группой, соседство сохраняется;
+      * блок сразу за группой не «адресный» (иначе по группе могли идти до его младшего байта);
+      * в дыре группа НЕ ПЕРЕСЕКАЕТ границу страницы — читатель таблицы может считать только по L.
+    Заглушка данным не нужна: в таблицу не проваливаются, поэтому байт в дыре освобождает байт внизу.
+    Поэтому данные и код без заглушки кладутся ПЕРВЫМИ, а блоки с заглушкой добирают остаток."""
     if not holes or need == 0:
         return src, 0, 0
     lines = src.split('\n')
     end = next(i for i, l in enumerate(lines) if 'ASSERT $ <=' in l and 'нижний регион' in l)
-    blocks, cur, org, prev_org = [], None, None, False
+    nocom = '\n'.join(l.split(';')[0] for l in lines)
+    nrefs = {}
+    for w in re.findall(r'[A-Za-z_]\w*', nocom):
+        nrefs[w] = nrefs.get(w, 0) + 1
+    sens = set()
+    for l in nocom.split('\n'):
+        m = _H_LBL.match(l)
+        if m:
+            nrefs[m.group(1)] -= 1                     # собственное определение ссылкой не считается
+        if re.match(r'(?i)^\s*ASSERT\b', l):           # метка в ASSERT'е: её адрес проверяют, не двигать
+            sens.update(re.findall(r'[A-Za-z_]\w*', l))
+    for m in _H_SENS.finditer(nocom):
+        sens.add(m.group(1) or m.group(2) or m.group(3))
+    blocks, cur, org, prev_pad = [], None, None, False
     for i in range(end):
         raw = lines[i]
         m = _H_LBL.match(raw)
-        body = raw[m.end():] if m else raw
+        ml = m or _H_ANYLBL.match(raw)                # .локальная метка блок не начинает, но длину не рушит
+        body = raw[ml.end():] if ml else raw
         code = ' '.join(body.split(';')[0].split())   # пробелы схлопнуть: иначе `jp\s+` в _H_TERM отступает назад и «jp nz, x» проходит за безусловный
         hard = bool(code) and bool(_H_HARD.match(code))
+        data = bool(code) and bool(_H_DATA.match(code))
         if m:
-            cur = {'name': m.group(1), 'i0': i, 'iend': i + 1, 'size': 0, 'ok': True,
-                   'org': org, 'after_org': prev_org, 'last': ''}
+            cur = {'name': m.group(1), 'i0': i, 'iend': i + 1, 'size': 0, 'ok': True, 'data': True,
+                   'org': org, 'after_org': prev_pad, 'last': ''}
             blocks.append(cur)
         if code:
-            prev_org = code.upper().startswith('ORG')
-            if prev_org:
+            prev_pad = bool(_H_PAD.match(code))
+            if code.upper().startswith('ORG'):
                 try:
                     org = int(code.split()[1], 0)
                 except ValueError:
                     org = None
             if cur is not None:
                 if hard:
+                    cur['ok'] = cur['data'] = False
+                elif data:
                     cur['ok'] = False
+                    cur['size'] += _db_len(code)
+                    cur['iend'] = i + 1
                 else:
+                    cur['data'] = False
                     n = _i8080_len(code)
                     if n is None:
                         cur['ok'] = False
@@ -3158,7 +3307,25 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
                         cur['size'] += n
                         cur['last'] = code
                         cur['iend'] = i + 1
-    maxh = max(sz for _, sz in holes)
+    # --- дыры: видеопамять/зазоры (ORG+ASSERT), добивка верхнего региона (a<0) и добивки ALIGN ---
+    uas = _line_of(lines, 'ASSERT $ <=', 'верхний регион')
+    at = vec_walk(lines, uas) or []
+    base = [{'a': a, 'sz': sz, 'ins': None, 'min': -1} for a, sz in holes]
+    if len(at) > uas and at[uas] is not None:          # хвост верхнего региона до таблиц сдвига
+        base.append({'a': at[uas], 'sz': VEC_UPPER_TOP - at[uas], 'ins': uas, 'min': -1})
+    rpa = next((i for i, l in enumerate(lines) if l.startswith('vec_rptab:')), end)
+    # ALIGN 8/16 стоят копейки (добивка < модуля), а вот ALIGN 256 перед kl_optr — сотни байт.
+    # Добивку ПОСЛЕДНЕГО ALIGN (перед vec_rptab) не трогаем: это и есть запас внизу.
+    aligns = []
+    for i in range(min(rpa - 2, end)):
+        m = _H_ANYLBL.match(lines[i])
+        code = ' '.join((lines[i][m.end():] if m else lines[i]).split(';')[0].split())
+        if code.upper().startswith('ALIGN') and at and at[i] is not None:
+            n = int(code.split()[1], 0)
+            if n >= 64:
+                aligns.append((i, at[i], n))
+    lastbig = max([i for i, _, _ in aligns] or [-1])
+    maxh = max([h['sz'] for h in base] + [n - 1 for _, _, n in aligns])
     cand = []
     for k, b in enumerate(blocks):
         pv = blocks[k - 1] if k else None
@@ -3174,19 +3341,76 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
         if b['stub'] and b['size'] < 16:
             continue
         cand.append(b)
-    cand.sort(key=lambda b: (-b['size'], b['name']))
-    free = [[a, sz] for a, sz in holes]
-    placed, moved = [[] for _ in holes], 0
-    for b in cand:
-        if need >= 0 and moved >= need:
-            break
-        for j, (a, sz) in enumerate(free):
-            if sz >= b['size']:
-                placed[j].append(b)
-                free[j][0] += b['size']
-                free[j][1] -= b['size']
-                moved += b['size'] - (3 if b.get('stub') else 0)
+    if not VEC_HOLE_NODATA:
+        k = 0
+        while k < len(blocks):
+            b = blocks[k]
+            if not (b['data'] and b['size'] > 0 and not b['after_org'] and b['name'] not in exclude
+                    and b['org'] is not None and 0x0100 <= b['org'] < 0x8000
+                    and nrefs[b['name']] > 0 and b['name'] not in sens):
+                k += 1
+                continue
+            grp, size, j = [b], b['size'], k + 1        # безымянные продолжения — вместе с головой
+            while j < len(blocks) and blocks[j]['data'] and blocks[j]['size'] > 0 \
+                    and nrefs[blocks[j]['name']] == 0 and blocks[j]['name'] not in sens \
+                    and not blocks[j]['after_org']:
+                grp.append(blocks[j]); size += blocks[j]['size']; j += 1
+            nxt = blocks[j] if j < len(blocks) else None
+            if size <= maxh and (nxt is None or nxt['name'] not in sens):
+                cand.append({'name': b['name'], 'i0': grp[0]['i0'], 'iend': grp[-1]['iend'],
+                             'size': size, 'stub': False, 'page': True})
+            k = j
+    # Порядок: (1) блок НИЖЕ большого ALIGN укорачивает нижний регион байт в байт, а снятый ВЫШЕ
+    # него только растит добивку — такие кладём последними; (2) без заглушки (байт в дыре = байт
+    # внизу, с заглушкой на 3 меньше); (3) крупные вперёд — плотнее укладка.
+    cand.sort(key=lambda b: (b['i0'] < lastbig, bool(b.get('stub')), -b['size'], b['name']))
+
+    def lay(holes):
+        free = [[h['a'], h['sz']] for h in holes]
+        placed, moved = [[] for _ in holes], 0
+        for b in cand:
+            if need >= 0 and moved >= need:
                 break
+            best = -1
+            for j, (a, sz) in enumerate(free):         # ПЛОТНАЯ укладка: самый тесный подходящий
+                if sz < b['size'] or b['i0'] <= holes[j]['min']:   # остаток, иначе крошки расползаются
+                    continue
+                if b.get('page') and a >= 0 and (a >> 8) != ((a + b['size'] - 1) >> 8):
+                    continue                           # таблица через границу страницы — нельзя
+                if best < 0 or sz < free[best][1]:
+                    best = j
+            if best < 0:
+                continue
+            placed[best].append(b)
+            if free[best][0] >= 0:
+                free[best][0] += b['size']
+            free[best][1] -= b['size']
+            moved += b['size'] - (3 if b.get('stub') else 0)
+        return placed, moved
+
+    # Размер добивки ALIGN'а зависит от того, сколько снято ВЫШЕ него, а это результат раскладки:
+    # ищем неподвижную точку (обычно 2-3 шага). Промах стоит только места: лишнее уйдёт на
+    # следующую страницу, недобор останется добивкой, — поведение не меняется ни при каком исходе.
+    holes, placed, moved = list(base), None, 0
+    for _ in range(8):
+        hn = list(base)
+        for i, a, n in aligns:
+            shift = 0
+            if placed:
+                for j, h in enumerate(holes):
+                    for b in placed[j]:
+                        if b['i0'] < i:
+                            shift -= b['size']         # блок уехал из региона выше ALIGN'а
+                        if h['ins'] is not None and h['ins'] < i:
+                            shift += b['size']         # ... или, наоборот, приехал в добивку выше
+            pad = (-(a + shift)) % n
+            if pad >= 8:
+                hn.append({'a': a + shift, 'sz': pad, 'ins': i, 'min': i})
+        pl, mv = lay(hn)
+        stable = (mv == moved and len(hn) == len(holes))
+        holes, placed, moved = hn, pl, mv
+        if stable:
+            break
     if not moved:
         return src, 0, 0
     drop, stubs = set(), {}
@@ -3195,21 +3419,41 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
             drop.update(range(b['i0'], b['iend']))
             if b.get('stub'):                      # оставить переход на уехавший блок
                 stubs[b['i0']] = '\t\t\t\tjp\t\t%s\t\t\t; блок уехал в дыру' % b['name']
-    out = ['\n; ==== дыры вне картинки (строки 224..255/0..31 столбцов): мелкие процедуры нижнего региона ====']
-    for j, (a, sz) in enumerate(holes):
+    out = ['\n; ==== дыры вне картинки (строки 224..255/0..31 столбцов): мелкие процедуры и таблицы нижнего региона ====']
+    ins = {}                                           # что вставить ПЕРЕД строкой (добивки)
+    for j, h in enumerate(holes):
         if not placed[j]:
             continue
-        out.append('\t\t\t\tORG %#06x' % a)
+        body = []
         for b in placed[j]:
-            out += [lines[i] for i in range(b['i0'], b['iend'])]
-        out.append('\t\t\t\tASSERT $ <= %#06x\t\t; дыра %#06x (%d Б)' % (a + sz, a, sz))
-    kept = [stubs[i] if i in stubs else l for i, l in enumerate(lines) if i not in drop or i in stubs]
+            body += [lines[i] for i in range(b['i0'], b['iend'])]
+        if h['ins'] is None:                           # отдельная дыра: свой ORG и свой сторож
+            out.append('\t\t\t\tORG %#06x' % h['a'])
+            out += body
+            out.append('\t\t\t\tASSERT $ <= %#06x\t\t; дыра %#06x (%d Б)'
+                       % (h['a'] + h['sz'], h['a'], h['sz']))
+        else:                                          # добивка: ORG не нужен, сторож — ASSERT конца
+            t = ['\n; ---- добивка %#06x..%#06x (%d Б): блоки нижнего региона ----'
+                 % (h['a'], h['a'] + h['sz'], h['sz'])]
+            t += body
+            t.append('\t\t\t\tASSERT $ <= %#06x\t\t; конец добивки' % (h['a'] + h['sz']))
+            ins.setdefault(h['ins'], []).extend(t)
+    kept = []
+    for i, l in enumerate(lines):
+        if i in ins:
+            kept += ins[i]
+        if i not in drop or i in stubs:
+            kept.append(stubs[i] if i in stubs else l)
     ei = next(i for i, l in enumerate(kept) if 'ASSERT $ <=' in l and 'нижний регион' in l)
     return '\n'.join(kept[:ei + 1] + out + kept[ei + 1:]), moved, sum(len(x) for x in placed)
 
 
+def _line_of(lines, *needles):
+    return next(i for i, l in enumerate(lines) if all(n in l for n in needles))
 
-VEC_HOLES = [h for b in VEC_HOLE_PLANES for h in vec_holes(b)]
+
+
+VEC_HOLES = [h for b in VEC_HOLE_PLANES for h in vec_holes(b)] + VEC_HOLE_GAPS
 
 
 def main():
