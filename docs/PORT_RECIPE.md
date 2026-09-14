@@ -832,6 +832,9 @@ MOV r,M 8, ALU r 4, ALU M 8, POP 12, PUSH 16, INR/DCX 8, DAD 12, Jcc 12, CALL 24
   `pa_l` (`play_audio`), `pauk_l` (`play_audio_until_keypress`), `vp_e/vp_h` (`vec_pace`),
   `vdb_wait` (`vec_di_budget`), `hp_rel/hp_wait/hp_rel2` (`handle_pause`), `loc_BA87` (game over),
   `mf_loop` (`msx_fetch`), `wait_for_key_press` (счётный, 8·65536 ≈ 23 с, снимается любой клавишей).
+  **С 2026-09-15 к списку добавился `pof_w` (`vec_scr_off`, §27.2): ждёт обнуления `vec_palreq`
+  ISR'ом перед копией экрана.** Тоже ждёт прерывания, и оно приходит: `hangwatch_vec.js` на 20000
+  итераций прошёл через него 768 раз (столько смен комнат) без единой остановки.
   Все, кроме `mf_loop`, ждут прерывания или клавиши; прерывание приходит всегда — за 40000 кадров
   прогона «обратный ход пришёлся на di» = 0, то есть ни один `di`-блок не остаётся открытым.
 * **`mf_loop` закрыт гейтом `tools/tunecheck_vec.js`:** поток мелодии без команды END повесил бы
