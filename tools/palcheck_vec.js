@@ -25,10 +25,13 @@
 // разрешённый владельцем приём «1–2 чёрных кадра между комнатами». Их счётчики печатаются
 // отдельно — по ним видно, сколько кадров экран гаснет.
 //
-// ВТОРОЙ ИНВАРИАНТ (иначе первый обманывается «поздним гашением»): между кадром ГАШЕНИЯ и
-// следующим кадром ЗАЖИГАНИЯ картинка ОБЯЗАНА измениться — копия буфера должна идти по ЧЁРНОМУ
-// экрану. Если гасить ПОСЛЕ update_screen, первый инвариант зелёный (цвет менялся только через
-// чёрное), а пользователь всё равно видит, как новая комната выезжает столбцами в цвете старой.
+// ВТОРОЙ ИНВАРИАНТ (иначе первый обманывается «поздним гашением»): копия буфера обязана идти
+// ВНУТРИ черноты, а не перед ней. Меряется без порогов — сравнением: сколько бит плоскости 0
+// перерисовано ЗА время черноты против того, сколько их перерисовано в 4 кадра ДО гашения.
+// У правильного порядка первое много больше второго (копия внутри), у порядка «погасить ПОСЛЕ
+// update_screen» — наоборот. Без этого инварианта позднее гашение проходит насквозь: цвет меняется
+// только через чёрное, первый инвариант зелёный, а человек видит, как новая комната выезжает
+// столбцами в цвете старой.
 "use strict";
 const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
@@ -109,7 +112,7 @@ function snapPlanes(){const b=Buffer.alloc(4*0x2000);
 let prev=null, prevPal=null;
 const events=[]; let recolorFrames=0, recolorTotal=0, worst={n:0,frame:-1};
 let blankFrames=0, darkRun=0, darkMax=0, darkMaxAt=-1;
-let blankShot=null, lateBlank=0; const blanks=[];
+let blankShot=null, lateBlank=0; const blanks=[]; const redrawRing=[]; let inBlack=0;
 const trace=!!process.env.KLTRACE, verb=!!process.env.KLVERB;
 const traceLines=[];
 let lastRoom=-1;
@@ -147,12 +150,14 @@ function onFrame(){
     if(recol){recolorFrames++;recolorTotal+=recol;if(recol>worst.n)worst={n:recol,frame:frames,iter,room:rdb(RMB)};}
     // второй инвариант: копия обязана идти ПО ЧЁРНОМУ. Помним картинку кадра гашения и
     // сверяем её с картинкой кадра зажигания: если не изменилась — гасили уже ПОСЛЕ копии.
-    if(off&&!on){blankShot={frame:frames,pl:prev};}
+    if(off&&!on){ // кадр гашения: сколько было перерисовано в 4 кадра ДО него
+      blankShot={frame:frames,before:redrawRing.slice(-4).reduce((a,b)=>a+b,0)}; inBlack=0;}
     else if(on&&blankShot){
-      let d=0; for(let i=0;i<0x2000;i++)d+=popc(blankShot.pl[i]^pl[i]);
-      blanks.push({from:blankShot.frame,to:frames,bits:d,room:rdb(RMB)});
-      if(d===0)lateBlank++;
+      blanks.push({from:blankShot.frame,to:frames,before:blankShot.before,during:inBlack,room:rdb(RMB)});
+      if(blankShot.before>inBlack)lateBlank++;
       blankShot=null;}
+    else if(blankShot)inBlack+=redrawn;
+    redrawRing.push(redrawn); if(redrawRing.length>8)redrawRing.shift();
   }
   for(let i=0;i<0x2000;i++)lit+=popc(pl[i]);
   // виден ли хоть один не-чёрный пиксель (для замера длины чёрного промежутка)
@@ -204,11 +209,12 @@ if(events.length>60)console.log(`  ... ещё ${events.length-60}`);
 console.log(`кадров с перекраской: ${recolorFrames}, точек всего: ${recolorTotal}, худший кадр ${worst.frame} (${worst.n} точек, комната ${worst.room})`);
 console.log(`чёрных кадров (на экране ни одной видимой точки): ${blankFrames}, самый длинный чёрный промежуток ${darkMax} кадров (кончается на ${darkMaxAt})`);
 console.log(`гашений экрана: ${blanks.length}`);
-for(const b of blanks.slice(0,40))console.log(`  кадры ${b.from}..${b.to} (${b.to-b.from} чёрных), комната ${b.room}: за время черноты перерисовано бит p0: ${b.bits}`);
+for(const b of blanks.slice(0,40))console.log(`  кадры ${b.from}..${b.to} (${b.to-b.from} чёрных), комната ${b.room}: `+
+  `перерисовано бит p0 ЗА черноту ${b.during}, в 4 кадра ДО гашения ${b.before}`+(b.before>b.during?"  <-- копия ШЛА ДО гашения":""));
 if(blanks.length>40)console.log(`  ... ещё ${blanks.length-40}`);
 const LIMIT=+process.env.KLPALLIMIT||0;
 let bad=false;
 if(recolorTotal>LIMIT){console.log(`ГЕЙТ КРАСНЫЙ: старая картинка перекрашивается (допуск ${LIMIT})`);bad=true;}
-if(lateBlank){console.log(`ГЕЙТ КРАСНЫЙ: ${lateBlank} гашений, за которые картинка не изменилась — копия шла по ВИДИМОМУ экрану, гасили уже после неё`);bad=true;}
+if(lateBlank){console.log(`ГЕЙТ КРАСНЫЙ: ${lateBlank} гашений, у которых до гашения перерисовано БОЛЬШЕ, чем за него — копия шла по ВИДИМОМУ экрану, гасили уже после неё`);bad=true;}
 if(bad)process.exit(1);
 console.log("ГЕЙТ ЗЕЛЁНЫЙ: ни одной точки, перекрашенной без перерисовки; каждая копия шла по чёрному экрану");
