@@ -1846,10 +1846,16 @@ vec_rpbuild:	ld		a, (vec_zxrows+0)
 				ld		(vec_rptab+0x00), a
 				ret
 __VEC_KBZX__
-; ---- таблица ZX-ряд -> клавиши Вектора: 8 рядов x 5 записей (адрес ячейки vec_kbmat, маска) ----
+; ---- таблица ZX-ряд -> клавиши Вектора: ИСХОДНЫЕ ДАННЫЕ СБОРЩИКА (VEC_ZXMAP ниже), в образ не идёт ----
+; §17.0: в ПЗУ на неё нет ни одной ссылки — vec_zxbuild читает только vec_kbzx, которую строит
+; сборщик из этого же текста. 80 байт нижнего региона освобождены 2026-09-12.
 ; ZX ряды: 0 SHIFT Z X C V | 1 A S D F G | 2 Q W E R T | 3 1 2 3 4 5 | 4 0 9 8 7 6 | 5 P O I U Y | 6 ENTER L K J H | 7 SPACE SYM M N B
 ; Вектор: ряд4 @ABCDEFG(бит0..7) ряд5 HIJKLMNO ряд6 PQRSTUVW ряд7 XYZ[\\]^SPC ряд2 0-7 ряд3 8=бит0 9=бит1 ряд0 ВК=бит2
-vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4,0x08, vec_kbmat+6,0x40	; SHIFT(нет) Z X C V
+
+"""
+
+
+VEC_ZXMAP = """vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4,0x08, vec_kbmat+6,0x40	; SHIFT(нет) Z X C V
 				DB	vec_kbmat+4,0x02, vec_kbmat+6,0x08, vec_kbmat+4,0x10, vec_kbmat+4,0x40, vec_kbmat+4,0x80	; A S D F G
 				DB	vec_kbmat+6,0x02, vec_kbmat+6,0x80, vec_kbmat+4,0x20, vec_kbmat+6,0x04, vec_kbmat+6,0x10	; Q W E R T
 				DB	vec_kbmat+2,0x02, vec_kbmat+2,0x04, vec_kbmat+2,0x08, vec_kbmat+2,0x10, vec_kbmat+2,0x20	; 1 2 3 4 5
@@ -1857,7 +1863,6 @@ vec_zxmap:		DB	vec_kbmat+7,0x00, vec_kbmat+7,0x04, vec_kbmat+7,0x01, vec_kbmat+4
 				DB	vec_kbmat+6,0x01, vec_kbmat+5,0x80, vec_kbmat+5,0x02, vec_kbmat+6,0x20, vec_kbmat+7,0x02	; P O I U Y
 				DB	vec_kbmat+0,0x04, vec_kbmat+5,0x10, vec_kbmat+5,0x08, vec_kbmat+5,0x04, vec_kbmat+5,0x01	; ENTER L K J H
 				DB	vec_kbmat+7,0x80, vec_kbmat+7,0x10, vec_kbmat+5,0x20, vec_kbmat+5,0x40, vec_kbmat+4,0x04	; SPACE SYM(\\) M N B
-
 """
 
 
@@ -1981,11 +1986,11 @@ vp_done:		ld		(hl), 0				; отсчёт с этого кадра (сразу п�
 
 ; Оценка пиксельного цикла print_sprite в тиках ВИ53 (тик = 2 такта CPU).
 ; ТОЧНАЯ модель строки по слотам шины (замер psbreak_vec.js подтверждает такт в такт):
-;   выровненный путь  52*w + 84 такта  = 26w + 42 тика на строку;
+;   выровненный путь  48*w + 84 такта  = 24w + 42 тика на строку (группа 48 тактов с 2026-09-12);
 ;   сдвинутый путь   124*w - 36 тактов = 62w - 18 тиков на строку.
 ; Оценка обязана быть СВЕРХУ, но не втрое: чем она больше, тем чаще vec_di_budget уводит в
 ; ei/halt, а halt — чистый простой (в комнате 31 он доходил до 9 % всех тактов). Берём РОВНО
-; модель строки: шаг 26h и старт 68h (выровненный), шаг 62h и старт 44h (сдвинутый) — то есть
+; модель строки: шаг 24h и старт 66h (выровненный), шаг 62h и старт 44h (сдвинутый) — то есть
 ; оценка цепочки совпадает с её длительностью такт в такт, а запас сверху даёт единственная
 ; добавка VEC_PSB_PAD (обвязка блока между di и ei: diprol 112 тактов + возврат SP/ei).
 ; Прежние множители 32h*(w+2) и 64h*w завышали оценку цепочки на h*(6w+22) и h*(2w+18) тиков.
@@ -2009,15 +2014,15 @@ vec_ps_budget:	push	de					; DE = данные спрайта
 				ld		a, (ps_shpg+1)		; страница таблицы сдвига; 0 = выровненный путь
 				or		a
 				jp		nz, vpb_sh
-; ВЫРОВНЕННЫЙ: шаг 26h = 16h+8h+2h, старт (w=1) 68h = 2*26h + 16h
+; ВЫРОВНЕННЫЙ: шаг 24h = 16h+8h, старт (w=1) 66h = 2*24h + 16h + 2h
 				push	hl					; 16h
-				add		hl, de				; 24h
-				add		hl, bc				; 26h = шаг
+				add		hl, de				; 24h = шаг
 				ld		d, h
 				ld		e, l
-				add		hl, hl				; 52h
+				add		hl, hl				; 48h
+				add		hl, bc				; 50h
 				pop		bc					; 16h
-				add		hl, bc				; 68h = старт
+				add		hl, bc				; 66h = старт
 				jp		vpb_go
 ; СДВИНУТЫЙ: шаг 62h = 64h - 2h, старт (w=1) 44h = 32h+8h+2h+2h
 vpb_sh:			push	hl					; 16h
@@ -2046,10 +2051,115 @@ vpb_done:		ld		a, h				; DE = оценка + обвязка блока (VEC_PSB_
 				add		a, VEC_PSB_PAD
 				ld		d, a
 				ld		e, l
-				pop		bc
-				call	vec_di_budget
+; ---- остаток кадра: секундомер (счётчик 0 ВИ53) считает ВНИЗ от 0xFFFF, перезаряд в ISR ----
+vpb_est:		xor		a					; метка для distat_vec.js: здесь DE = оценка ВСЕГО остатка спрайта
+				out		(0x08), a			; команда защёлки счётчика 0
+				in		a, (0x0B)
+				ld		l, a
+				in		a, (0x0B)
+				sub		0x8D				; 0xFFFF-0x8D00 = 29439 тиков кадра из 29952 (запас 513)
+				ld		h, a				; HL = тиков до границы кадра
+				jp		c, vpb_wait			; граница уже рядом
+				ld		a, l
+				sub		e
+				ld		a, h
+				sbc		a, d
+				jp		nc, vpb_full		; весь остаток спрайта влезает в кадр
+; ---- НЕ ВЛЕЗАЕТ: не ждать кадр, а нарисовать столько строк, сколько до границы помещается ----
+				ld		a, (msx_vic0)
+				or		a
+				jp		nz, vpb_wait		; счётчик 0 ВИ53 отдан мелодии — ISR его не перезаряжает,
+											;   секундомеру верить нельзя, дробить по нему нельзя
+				ld		a, (ps_jrow+1)
+				cp		low (ps_fix)
+				jp		z, vpb_wait			; печать обрезана по столбцу 31: хвост строки досылает ps_fix,
+											;   на последней строке сегмента он не отрабатывает — не дробим
+				push	hl					; тиков до границы
+				ld		hl, 66				; тиков на строку: выровненный 24w+42
+				ld		de, 24
+				ld		a, (ps_shpg+1)
+				or		a
+				jp		z, vpb_pr
+				ld		hl, 44				; сдвинутый 62w-18
+				ld		de, 62
+vpb_pr:			ld		a, (loc_D800+1)		; w-1
+vpb_pl:			or		a
+				jp		z, vpb_pd
+				dec		a
+				add		hl, de
+				jp		vpb_pl
+vpb_pd:			ld		a, l				; DE = -(тиков на строку + 32)
+				add		a, 32				; ВИТОК САМОГО СЧЁТА: строка цикла vpb_kl стоит 52 такта = 26 тиков.
+				cpl							;   Он идёт ПОСЛЕ снятия остатка кадра, то есть тратит тот самый
+				ld		e, a				;   остаток. Не учесть его — блок переезжает границу кадра
+				ld		a, h				;   (замер: 162 потерянных обратных хода из 2276).
+				adc		a, 0
+				cpl
+				ld		d, a
+				inc		de
+				pop		hl					; тиков до границы
+				ld		a, h
+				cp		3
+				jp		c, vpb_wait			; меньше обвязки — ждём кадра
+				sub		3
+				ld		h, a				; минус обвязка сегмента и самого бюджета (768 тиков)
+				pop		bc					; BC = адрес в буфере, C = текущая строка
+				ld		a, (ps_fin+1)
+				ld		(vpb_ce+1), a		; строка за последней строкой спрайта
+				ld		a, c
+vpb_kl:			add		hl, de				; минус строка; CY = строка влезла
+				jp		nc, vpb_ke
+				inc		a
+vpb_ce:			cp		0
+				jp		nz, vpb_kl
+				jp		vpb_set				; влез весь остаток (граничный случай)
+vpb_ke:			cp		c
+				jp		nz, vpb_set
+				push	bc					; не влезла ни одна строка — ждём кадра
+				jp		vpb_wait
+vpb_set:		ld		(ps_end+1), a		; конец сегмента: цепочка выйдет на этой строке
+				ld		(psa_end+1), a		; у выровненной цепочки свой иммедиат конца строки
 				pop		de
 				ret
+vpb_wait:		ei
+				halt						; после обратного хода кадр целый — остаток влезает заведомо
+vpb_full:		pop		bc
+				ld		a, (ps_fin+1)
+				ld		(ps_end+1), a		; сегмент = весь остаток спрайта
+				ld		(psa_end+1), a		; у выровненной цепочки свой иммедиат конца строки
+				pop		de
+				ret
+
+; ---- ДРОБЛЕНИЕ di-БЛОКА print_sprite ПО ГРАНИЦЕ КАДРА (2026-09-12) ----
+; Оценка блока часто не влезала в остаток кадра, и бюджет уводил в ei/halt — целый обратный ход
+; простоя (комната 39: 1186 тактов на вызов print_sprite, 3.1 % итерации). Теперь vec_ps_budget
+; урезает сегмент до числа строк, помещающихся до границы: цепочка выходит на этой строке, кадр
+; отдаётся (ждать уже нечего), печать продолжается с той же строки. Состояние сегмента цепочка
+; оставляет сама: BC = адрес в буфере (столбец откачен, строка поднята), SP = место в данных
+; спрайта, страница таблицы сдвига — в иммедиате ps_shpg+1.
+ps_more:		ld		a, (ps_shpg+1)
+				or		a
+				jp		nz, psm_bc			; сдвинутый: адрес в буфере уже в BC
+				ld		b, h
+				ld		c, l				; выровненный: адрес в буфере лежит в HL
+psm_bc:			ld		hl, 0
+				add		hl, sp
+				ld		(ps_sp), hl			; где цепочка встала в данных спрайта
+				ld		sp, (tmp_SP)		; стек игры
+				ei							; отдать кадр: обратный ход не потерян
+				ld		a, (ps_fin+1)
+				sub		c
+				ld		(kl_lines), a		; строк осталось
+				call	vec_ps_budget		; следующий сегмент (подождёт кадра, если надо)
+				di
+				ld		hl, (ps_sp)
+				ld		sp, hl
+				ld		a, (ps_shpg+1)
+				or		a
+				jp		z, ps_algo			; выровненный: HL = адрес в буфере, BC = дельта строки
+				ld		h, a				; сдвинутый: страница таблицы сдвига
+				jp		loc_D7AA
+ps_sp:			DS		2					; указатель в данных спрайта на границе сегмента
 
 ; ---- НАТИВНЫЙ РЕНДЕР: буфер = плоскость 1 (0xA000-0xBFFF, невидима) в раскладке экрана Вектора:
 ; ---- адрес = база + (X/8)*256 + (32+Y), Y растёт вверх (0 = низ поля). Экран = буфер - 0x2000. ----
@@ -2826,7 +2936,7 @@ hp_rel2:		ld      a, (vec_kbmat+0)
         + (kl_sound_ay.jukebox_block() if kl_sound_ay.JUKEBOX_ON else '') + kl_sound_ay.data_block()
     # vec_kbzx: 64 байта (ряд Вектора*8 + бит) -> (ряд ZX<<5 | маска 5 бит), 0xFF = клавиша не отображена
     kbzx = [0xFF]*64
-    zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', tail)
+    zxrows = re.findall(r'DB\t((?:vec_kbmat\+\d,0x[0-9A-Fa-f]{2},?[ \t]*){5})', VEC_ZXMAP)
     assert len(zxrows) == 8, "vec_zxmap: 8 рядов"
     for zr, line in enumerate(zxrows):
         for zb, (vr, mask) in enumerate(re.findall(r'vec_kbmat\+(\d),0x([0-9A-Fa-f]{2})', line)):
@@ -2857,10 +2967,24 @@ hp_rel2:		ld      a, (vec_kbmat+0)
         # Сравнение с патч-иммедиатом «строка за последней» даёт то же за 16: 84 -> 60 тактов на строку.
         src = src.replace(old_e, "\t\t\t\tld      a, c\n"
                           "ps_end:\t\t\tcp      0\t\t\t\t\t; патч заголовка: строка за последней (32+Y+h)\n"
-                          "ps_jrow:\t\tjp      NZ, loc_D7AA\t\t; младший байт патчит ps_cw: ps_fix, если печать обрезана по столбцу 31\n", 1)
+                          "ps_jrow:\t\tjp      NZ, loc_D7AA\t\t; младший байт патчит ps_cw: ps_fix, если печать обрезана по столбцу 31\n"
+                          "ps_fin:\t\t\tcp      0\t\t\t\t\t; патч заголовка: НАСТОЯЩАЯ строка за последней (A ещё = C)\n"
+                          "\t\t\t\tjp      NZ, ps_more\t\t\t; сегмент кончился, спрайт нет: дробление di-блока по границе кадра\n", 1)
         old_s = "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n"
         assert old_s in src, "ps shifted base"
         src = src.replace(old_s, "\t\t\t\tneg\n\t\t\t\tadd     a, 0x50 ; 'P'\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт адреса входа\n", 1)
+        # ---- выровненная группа: cpl/or e/cpl/or d -> or e/xor e/or d ----
+        # (A|e)^e = A & ~e — «И с дополнением» за две ALU-операции вместо трёх с cpl.
+        # Результат ПОБИТНО тот же, включая 8 пар данных, где data не вложена в маску
+        # (spr_012/021/028/030/032/070): последняя операция осталась `or d`, а не `xor d`.
+        # 52 -> 48 тактов на байт окна; группа 8 -> 7 байт, вход в цепочку считается по 7
+        # (заголовок kl_native_render: add a,a x3 + sub b = 7w).
+        old_g = ("\t\t\t\tld      a, (bc)\n\t\t\t\tcpl\n\t\t\t\tor      e\n"
+                 "\t\t\t\tcpl\n\t\t\t\tor      d\n")
+        new_g = ("\t\t\t\tld      a, (bc)\n\t\t\t\tor      e\n\t\t\t\txor     e\n"
+                 "\t\t\t\tor      d\n")
+        assert src.count(old_g) == 5, ("выровненная группа", src.count(old_g))
+        src = src.replace(old_g, new_g)
         old_a = "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tjr      loc_D73C\n"
         assert old_a in src, "ps aligned base"
         src = src.replace(old_a, "\t\t\t\tneg\n\t\t\t\tsub     6\n\t\t\t\tadd     a, low (loc_D7AC+3)\t\t; i8080: jp — младший байт входа (+1: перед loc_D7AC убран ex af,af')\n\t\t\t\tjr      loc_D73C\n", 1)
@@ -2870,6 +2994,38 @@ hp_rel2:		ld      a, (vec_kbmat+0)
         # (патчится только младший байт `jp` в loc_D7AC). ALIGN 256 на месте съедал 244 байта
         # выравнивания — вместо него цепочки уезжают в НАЧАЛО верхнего региона (0xE000/0xD400 —
         # граница страницы по построению). Вход в блок только через `jp loc_D7AA`, провала нет.
+        k = src.index("\t\t\t\tld      sp, (tmp_SP)\n", j)
+        k = src.index("\t\t\t\tret\n", k) + len("\t\t\t\tret\n")
+        # ---- ВЫРОВНЕННАЯ ЦЕПОЧКА НА HL: столбец = inc h, конец строки = ОДИН add hl,bc ----
+        # Конец строки стоил 80 тактов на обе цепочки: откат столбца (ld a,b/sub w-1/ld b,a = 24),
+        # строка и тест (inc c/ld a,c/cp/jp nz = 36), холостой ld a,(bc) у loc_D7AA (8, нужен только
+        # сдвинутому) и jp в цепочку (12). У выровненного пути HL СВОБОДЕН (таблицы сдвига он не
+        # читает), поэтому адрес в буфере кладём в HL, а в BC — дельту строки (B = 1-w', C = 1):
+        # `add hl, bc` делает откат столбца И переход на строку разом за 12 тактов, строка теперь
+        # в L, а переход идёт прямо на вход цепочки. 80 -> 40 тактов на строку.
+        # Сдвинутому пути так нельзя: у него HL — указатель в таблицу сдвига, а `and (hl)` —
+        # единственная форма «ALU с памятью» у i8080.
+        i_al = src.index("\t\t\t\tpop     de\n", j)
+        i_ae = src.index("\t\t\t\tjp      loc_D7FF\n", i_al)
+        al = src[i_al:i_ae]
+        assert al.count("ld      a, (bc)") == 5 and al.count("ld      (bc), a") == 5, "выровненная цепочка"
+        al = al.replace("ld      a, (bc)", "ld      a, (hl)").replace("ld      (bc), a", "ld      (hl), a")
+        assert al.count("inc     b\n") == 4, "inc b выровненной цепочки"
+        al = al.replace("inc     b\n", "inc     h\n")
+        al += ("psa_row:\t\tadd     hl, bc\t\t\t\t; B = 1-w', C = 1: столбец назад и строка вверх за один dad\n"
+               "\t\t\t\tld      a, l\t\t\t\t; строка = младший байт адреса в буфере\n"
+               "psa_end:\t\tcp      0\t\t\t\t\t; патч vec_ps_budget: строка за последней в СЕГМЕНТЕ\n"
+               "psa_jrow:\t\tjp      NZ, psa_row\t\t; ПАТЧ МЛАДШЕГО БАЙТА: вход в цепочку (ps_cw: psa_fix, если печать обрезана).\n"\
+               "\t\t\t\t\t\t\t\t\t\t; Адрес-заглушка обязан лежать в СТРАНИЦЕ ЦЕПОЧКИ: патчится только младший байт\n"
+               "\t\t\t\tjp      ps_fin\t\t\t\t; сегмент кончился — общий хвост (A ещё = строка)\n"
+               "; печать обрезана по столбцу 31 (выровненный путь): HL занят адресом в буфере, поэтому через DE\n"
+               "psa_fix:\t\tex      de, hl\n"
+               "psa_fsp:\t\tld      hl, 0\t\t\t\t; патч ps_cw: 2*(w - w')\n"
+               "\t\t\t\tadd     hl, sp\n"
+               "\t\t\t\tld      sp, hl\n"
+               "\t\t\t\tex      de, hl\n"
+               "psa_fixj:\t\tjp      psa_row\t\t\t; патч младшего байта: вход в цепочку (сюда же первый вход из заголовка)\n")
+        src = src[:i_al] + al + src[i_ae + len("\t\t\t\tjp      loc_D7FF\n"):]
         k = src.index("\t\t\t\tld      sp, (tmp_SP)\n", j)
         k = src.index("\t\t\t\tret\n", k) + len("\t\t\t\tret\n")
         ps_chain = ("; ---- развёрнутые цепочки print_sprite: начало верхнего региона = граница страницы ----\n"

@@ -107,11 +107,26 @@ ps_al:			ld		(ps_shpg+1), a					; сюда пришли по jp z: A = 0. Выр
 				add		a, a
 				add		a, a
 				add		a, a
+				sub		b								; 7w': группа выровненной цепочки — 7 байт
 				neg
-				sub		6
+				inc		a
+				add		a, low (psa_row)				; вход = psa_row + 1 - 7w'
+				ld		(psa_fixj+1), a					; редкая ветка клипа уходит на вход отсюда же
+				ld		(psa_jrow+1), a
+				ld		a, (ps_jrow+1)					; что решил ps_cw про столбец 31?
+				cp		low (ps_fix)
+				jp		nz, psa_nc
+				ld		a, low (psa_fix)
+				ld		(psa_jrow+1), a					; обрезано: конец строки через psa_fix (он двигает SP)
+psa_nc:			ld		a, b
+				cpl
+				inc		a
+				inc		a								; 1 - w' — старший байт дельты строки
+				ld		(ps_algd+2), a
+				jp		ps_wid
 ps_ent:			add		a, low (loc_D7AC+3)				; i8080: jp — младший байт адреса входа
 				ld		(loc_D7AC+1), a
-				ld		a, b
+ps_wid:			ld		a, b
 				dec		a								; столбцовый буфер: откат B на w-1
 				ld		(loc_D800+1), a
 				inc		hl								; -> obj+25
@@ -133,7 +148,7 @@ ps_pos:			ld		a, (hl)
 				ld		(kl_lines), a					; высота окна (её читает vec_ps_budget)
 				call    vidbuf_calc_addr_in_bc			; BC = Y,X -> адрес в буфере; на выходе A = C
 				add		a, (hl)							; HL = obj+25 (высота) — процедура HL не трогает
-				ld		(ps_end+1), a					; строка за последней: конец пиксельного цикла
+				ld		(ps_fin+1), a					; строка за последней; сам конец сегмента ставит vec_ps_budget
 				call	vec_ps_budget					; хватит ли кадра на пиксельный цикл под di
 				di										; SP уходит в данные спрайта
 				ld      (tmp_SP), sp
@@ -141,7 +156,13 @@ ps_pos:			ld		a, (hl)
 				ld      sp, hl
 				ex      de, hl
 ps_shpg:		ld		h, 0							; патч: страница таблицы сдвига
-				jp      loc_D7AA
+				ld		a, h
+				or		a
+				jp		nz, loc_D7AA					; сдвинутый путь: BC = адрес в буфере, HL = таблица
+ps_algo:		ld		h, b							; выровненный путь: адрес в буфере — в HL,
+				ld		l, c
+ps_algd:		ld		bc, 1							;   дельта строки — в BC (патч: B = 1-w', C = 1)
+				jp		psa_fixj						; psa_fixj = `jp вход` (без правки SP)
 
 ; ---- клип печати по столбцу 31 -------------------------------------------------------------
 ; Буфер Вектора столбцовый: за столбцом 31 (страница 0xBF) начинается плоскость 2 — селектор
@@ -170,6 +191,7 @@ ps_cw_clip:		ld		(ps_cwt), a						; w' = сколько столбцов вле�
 				add		a, a
 				neg										; 2*(w - w') = непрочитанный хвост строки спрайта
 				ld		(ps_fix+1), a
+				ld		(psa_fsp+1), a					; тот же хвост у выровненной цепочки
 				ld		a, (ps_cwt)
 				ld		b, a							; B = w'
 				ld		a, low (ps_fix)

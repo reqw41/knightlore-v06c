@@ -102,5 +102,6 @@ console.log(`кадров ${frames}, обратный ход пришёлся н
 const rows_=[];for(let i=0;i<fa.length;i++)if(cyc[i]>0)rows_.push([fnm[i],cyc[i],(i+1<fa.length?fa[i+1]:0x10000)-fa[i],calls[i],hcyc[i]]);
 rows_.sort((a,b)=>b[1]-a[1]);
 console.log("процедура                          тактов%   тактов/итер  байт  вызовов/итер  из них IX-хелперы%");
-let acc=0;for(const [n,c,sz,cl,hc] of rows_.slice(0,40)){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
-console.log(`(топ-40 = ${(100*acc/total).toFixed(1)} %)`);
+const TOPN=+(process.env.KLTOP||40);
+let acc=0;for(const [n,c,sz,cl,hc] of rows_.slice(0,TOPN)){acc+=c;console.log(`${n.padEnd(34)} ${(100*c/total).toFixed(1).padStart(6)}%  ${(c/iters).toFixed(0).padStart(10)}  ${String(sz).padStart(5)}  ${(cl/iters).toFixed(1).padStart(8)}  ${hc>0?(100*hc/c).toFixed(0)+'%':''}`);}
+console.log(`(топ-${TOPN} = ${(100*acc/total).toFixed(1)} %)`);
