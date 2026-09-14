@@ -1098,6 +1098,10 @@ kl_menu_exit:	; Картинка меню висит на экране, пока
 				; очищен. Поэтому уходим из меню начисто: полосу снять, палитру вернуть белую —
 				; иначе всё это время висели бы белый прямоугольник вместо строки и синий текст
 				; (в палитре меню p1=0 — синий, а буфер пуст).
+				; ЗАМОК КНОПОК: игру запустили с зажатой FIRE — в игре она не должна тут же читаться
+				; как прыжок и «взять». Замок снимает сам kl_vec_input, когда кнопку отпустят.
+				ld      a, 0xC0
+				ld      (vec_joylck), a
 				call    kl_unbar
 				ld      a, 7
 				jp      vec_set_pal
@@ -1181,7 +1185,8 @@ def kl_cut_controls(src, vec=False):
         "\t\t\t\tjp      z, kl_ctl_done                          ; тот же режим — ничего не трогаем\n"
         "\t\t\t\tld      (hl), a\n"
         "\t\t\t\tcall    kl_setmode\n"
-        "kl_ctl_done:\tld      a, 0xEF                                 ; ряд ZX 4: клавиши 0,9,8,7,6\n"
+        "kl_ctl_done:\tcall    kl_joy_menu                             ; джойстик: раскладка по фронту\n"
+        "\t\t\t\tld      a, 0xEF                                 ; ряд ZX 4: клавиши 0,9,8,7,6\n"
         "\t\t\t\tcall    read_port\n"
         "\t\t\t\tand     1                                      ; '0' — начать игру\n"
         "\t\t\t\tjp      nz, kl_menu_exit\n"
@@ -1190,7 +1195,9 @@ def kl_cut_controls(src, vec=False):
         "\t\t\t\tjp      menu_loop\n"
         "; End of function do_menu_selection\n")
     cut(r'flash_menu:\r?\n.*?; End of function flash_menu\r?\n', 'flash_menu',
-        KL_SETMODE_VEC if vec else "kl_setmode:\t\tret\t\t\t; полоса подсветки — только Вектор (плоскость 2)\nkl_menu_exit:\tret\n")
+        KL_SETMODE_VEC if vec else "kl_setmode:\t\tret\t\t\t; полоса подсветки — только Вектор (плоскость 2)\n"
+                                   "kl_menu_exit:\tret\n"
+                                   "kl_joy_menu:\tret\t\t\t; джойстик — только Вектор (порт 0x0E)\n")
     cut(r'toggle_selected:\r?\n.*?; End of function toggle_selected\r?\n', 'toggle_selected')
     # ввод: только клавиатура; directional — по биту 3 без проверки джойстика
     cut(r'\t+ld      a, \(user_input_method\)\r?\n\t+rrca\r?\n\t+and     3[^\n]*\r?\n\t+jp      Z, keyboard\r?\n.*?(?=keyboard:)', 'input dispatch')
@@ -1366,6 +1373,7 @@ vb_pal_done:	xor		a
 				out		(0x02), a			; бордюр чёрный
 vi_kbd:			call	vec_scan
 				call	vec_zxbuild
+				call	vec_joy					; джойстик (порт 0x0E) — ОДНА строка в ISR, см. §25
 				call	msx_mtick				; мелодия: один тик = один кадр
 				call	msx_viflush				; зеркало регистров AY -> ВИ53 (в режиме AY сразу ret)
 				pop		hl
@@ -1710,6 +1718,63 @@ vec_arrzx:		DB		0x10, low (vec_zxrows+0), 0xFD	; LT -> Z  (ряд ZX 0, бит 1
 				DB		0x40, low (vec_zxrows+0), 0xFB	; RT -> X  (ряд ZX 0, бит 2)
 				DB		0x20, low (vec_zxrows+1), 0xFE	; UP -> A  (ряд ZX 1, бит 0)
 				DB		0x80, low (vec_zxrows+2), 0xFE	; DN -> Q  (ряд ZX 2, бит 0)
+
+; ---- ДЖОЙСТИК A (порт 0x0E), раз в кадр из ISR. Подробности и таблица сведения — docs §25. ----
+; Порт active-low: бит 0 RIGHT, 1 LEFT, 2 UP, 3 DOWN, 6 FIRE1, 7 FIRE2; биты 4 и 5 схема держит
+; в единице (кнопок там нет). PPI-инициализация не нужна, чтение ничего не защёлкивает.
+;
+; ДВЕ ДОРОГИ, потому что их две и у клавиатуры:
+;   * ИГРА читает раскладку ПРЯМО ИЗ МАТРИЦЫ (kl_vec_input), и лезть туда джойстику нечем:
+;     vec_joy просто кладёт состояние в vec_joyraw, а kl_vec_input подмешивает его к клавишам.
+;     В vec_kbmat писать НЕЛЬЗЯ: vec_scan сравнивает матрицу с прошлым кадром, и наша примесь
+;     каждый кадр читалась бы как «матрица изменилась» — полный пересбор рядов ZX на ровном месте.
+;   * МЕНЮ, «любая клавиша» и пауза читают РЯДЫ ZX (read_port). Туда кнопка сводится к клавише '0'
+;     (ряд ZX 4, бит 0): '0' — это и «0 START GAME» в меню, и «любая клавиша» в мелодиях.
+; Ряды пересобирает только vec_zxbuild и только когда изменилась матрица, поэтому наш бит надо
+; (а) накладывать заново в каждом кадре, где ряды пересобрали, и (б) при ОТПУСКАНИИ кнопки
+; заставить пересбор — иначе бит остался бы прижатым навсегда.
+; Цена в кадре покоя: 72 такта тела + 17 такта call = 89 (разбор в §25).
+vec_joy:		in		a, (0x0E)			; 10
+				cpl						; 4   -> 1 = нажато
+				ld		hl, vec_joyprt		; 10
+				ld		c, a				; 5
+				xor		(hl)				; 7   изменилось ли состояние порта
+				jp		nz, vj_chg			; 10
+				ld		a, (vec_joyraw)		; 13  нет: кнопка сейчас нажата?
+				and		0xC0				; 7
+				ret		z					; 11  нет — в рядах ZX нам делать нечего
+				ld		a, (vec_kbchg)		; 13
+				or		a					; 4
+				ret		z					; 11  ряды ZX не пересобирались — наш бит в них цел
+				jp		vj_fire
+vj_chg:			ld		(hl), c				; запомнить СЫРОЕ состояние порта (сравнение — по нему)
+				ld		a, c
+				and		0x30				; биты 4 и 5 схема держит в единице, после cpl тут нули. Иначе
+				jp		z, vj_ok			; порта нет (эмулятор без джойстика) и «нажато всё» — считаем,
+				ld		c, 0				; что отпущено всё: иначе игра была бы неуправляема
+vj_ok:			ld		a, (vec_joyraw)
+				ld		b, a
+				ld		a, c
+				ld		(vec_joyraw), a		; действующее состояние — его читает kl_vec_input
+				xor		b					; что изменилось в деле
+				and		0xC0				; кнопка?
+				jp		z, vj_dir
+				ld		a, 0xFF				; кнопку нажали или ОТПУСТИЛИ: ряды ZX собрать заново
+				ld		(vec_kbchg), a		; (иначе отпускание не сотрёт наш бит '0')
+				call	vec_zxbuild
+vj_dir:			ld		a, (vec_joyraw)
+				and		0xC0
+				ret		z
+vj_fire:		ld		hl, vec_zxrows+4	; FIRE -> клавиша '0' (ряд ZX 4, бит 0): старт игры в меню
+				ld		a, (hl)				; и «любая клавиша» на экранах мелодий
+				and		0xFE
+				ld		(hl), a
+				jp		vec_rpbuild			; готовые ответы read_port пересчитать
+vec_joyprt:		DS		1			; сырое состояние порта прошлого кадра (active-high), для сравнения
+vec_joyraw:		DS		1			; действующее состояние джойстика (active-high): 0 RIGHT 1 LEFT 2 UP
+									; 3 DOWN 6 FIRE1 7 FIRE2 — читают kl_vec_input и kl_joy_menu
+vec_joylck:		DS		1			; кнопки, «дожатые» из меню: не в счёт, пока их не отпустят
+vec_joyprv:		DS		1			; направления прошлого опроса МЕНЮ (антидребезг по фронту)
 
 ; vec_rpbuild: ряды ZX -> vec_rptab, готовые ответы read_port для масок, которыми игра реально
 ; пользуется. Значение = cpl(AND выбранных рядов) and 0x1F, то есть всегда <= 0x1F; 0xFF в таблице
@@ -2434,7 +2499,7 @@ KL_VEC_INPUT = """kl_vec_input:	; ТРИ РАСКЛАДКИ, читаются п
 kl_in_scan:		ld      c, 0
 kl_in_1:		ld      a, (de)                                 ; младший байт ряда (0 = конец)
 				or      a
-				jp      z, kl_in_store
+				jp      z, kl_in_joy
 				ld      l, a
 				ld      h, high vec_kbmat
 				inc     de
@@ -2447,10 +2512,82 @@ kl_in_1:		ld      a, (de)                                 ; младший ба�
 				or      c
 				ld      c, a
 				jp      kl_in_1
+kl_in_joy:		; ДЖОЙСТИК РАБОТАЕТ ВСЕГДА, ПАРАЛЛЕЛЬНО С КЛАВИАТУРОЙ (просто or к набранным битам)
+				; и сводится ровно к тем же битам user_input, что клавиши ВЫБРАННОЙ раскладки.
+				; Таблица: маска джойстика (active-high), биты user_input; 0 = конец.
+				ld      hl, kl_joy_r                            ; режимы 1 и 2 — поворотные
+				ld      a, (user_input_method)
+				and     8                                      ; 3 DIRECTIONAL CONTROL
+				jp      z, kl_joy_go
+				ld      hl, kl_joy_d
+kl_joy_go:		ld      a, (vec_joylck)                         ; замок: кнопка, которой вышли из меню,
+				ld      b, a                                    ; не считается нажатой, пока её не отпустят
+				ld      a, (vec_joyraw)                         ; (иначе игра начиналась бы с прыжка)
+				and     b
+				ld      (vec_joylck), a
+				cpl
+				ld      b, a
+				ld      a, (vec_joyraw)
+				and     b
+				ld      b, a                                    ; B = действующее состояние джойстика
+				jp      z, kl_in_store
+kl_joy_1:		ld      a, (hl)                                 ; маска джойстика (0 = конец таблицы)
+				inc     hl
+				or      a
+				jp      z, kl_in_store
+				and     b
+				ld      a, (hl)                                 ; биты user_input; MOV/INX флагов не трогают,
+				inc     hl                                      ; поэтому Z ещё от `and b`
+				jp      z, kl_joy_1
+				or      c
+				ld      c, a
+				jp      kl_joy_1
+kl_joy_r:		; 1 KEYBOARD и 2 CURSOR (поворотные): «вниз» не заведено
+				DB      0x02, 0x01                              ; LEFT  -> поворот влево  (как O / стрелка влево)
+				DB      0x01, 0x02                              ; RIGHT -> поворот вправо (как P / стрелка вправо)
+				DB      0x04, 0x04                              ; UP    -> шаг вперёд     (как Q / стрелка вверх)
+				DB      0x40, 0x08                              ; FIRE1 -> прыжок         (как A / пробел)
+				DB      0x80, 0x10                              ; FIRE2 -> взять/бросить  (как цифры / стрелка вниз)
+				DB      0
+kl_joy_d:		; 3 DIRECTIONAL CONTROL: стрелки = стороны света, «взять» на бите 5
+				DB      0x02, 0x01                              ; LEFT  -> влево          (как стрелка влево)
+				DB      0x01, 0x02                              ; RIGHT -> вправо         (как стрелка вправо)
+				DB      0x04, 0x04                              ; UP    -> вверх          (как стрелка вверх)
+				DB      0x08, 0x10                              ; DOWN  -> вниз           (как стрелка вниз)
+				DB      0x40, 0x08                              ; FIRE1 -> прыжок         (как пробел)
+				DB      0x80, 0x20                              ; FIRE2 -> взять/бросить  (как цифры)
+				DB      0
 kl_in_store:	ld      a, c
 				ld      (user_input), a
 				ret
 ; End of function check_user_input
+kl_joy_menu:	; МЕНЮ: направление переключает раскладку ПО ФРОНТУ. По уровню одно отклонение стика
+				; пролистало бы все три за кадр-другой. LEFT/UP — назад, RIGHT/DOWN — вперёд.
+				; Кнопка (старт игры) сюда не заходит: она сведена к клавише '0' прямо в рядах ZX
+				; (vec_joy), и её разбирает та же строка меню, что и настоящую '0'.
+				ld      hl, vec_joyprv
+				ld      a, (vec_joyraw)
+				and     0x0F                                    ; только направления
+				ld      b, a
+				xor     (hl)
+				ld      (hl), b
+				and     b                                      ; 1 = нажато сейчас и НЕ было в прошлый раз
+				ret     z
+				and     0x09                                    ; RIGHT | DOWN -> следующая раскладка
+				ld      hl, old_input_method                    ; номер раскладки 0..2
+				ld      a, (hl)                                 ; MOV A,M флагов не трогает — Z ещё от `and`
+				jp      z, kl_jm_prev
+				inc     a
+				cp      3
+				jp      c, kl_jm_set
+				xor     a
+				jp      kl_jm_set
+kl_jm_prev:		or      a
+				jp      nz, kl_jm_dec
+				ld      a, 3
+kl_jm_dec:		dec     a
+kl_jm_set:		ld      (hl), a
+				jp      kl_setmode                              ; раскладка + полоса подсветки
 kl_in_t1:		; 1 KEYBOARD: O / P поворот, Q вперёд, A прыжок, цифры 0..7 взять
 				DB      low (vec_kbmat+5), 0x80, 0x01           ; O
 				DB      low (vec_kbmat+6), 0x01, 0x02           ; P
