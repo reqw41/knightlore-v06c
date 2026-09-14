@@ -4,8 +4,11 @@
 // касается. Поэтому проверка отдельная — как tools/kbcheck_vec.js для рядов ZX.
 //   node tools/inputcheck_vec.js build/knightlore_vec.r0m build/knightlore_vec.sld
 // Часть 1: меню — нажатие '1'/'2'/'3' меняет old_input_method (номер режима) и user_input_method.
+// Часть 1J: меню и ДЖОЙСТИК — направление листает раскладку ПО ФРОНТУ, FIRE = старт игры ('0').
 // Часть 2: ввод — главный код паркуется в jp $, работает только ISR (она набивает vec_kbmat);
 //          check_user_input зовётся точечно, читается user_input.
+// Часть 2J: ввод с ДЖОЙСТИКА (io.input(0x0E) подменён) во всех трёх раскладках, вместе с клавишами,
+//          плюс замок кнопки после старта из меню и цена vec_joy в тактах.
 "use strict";
 const fs = require("fs"), vm = require("vm");
 const base = "/Users/boris/projects/vector06js";
@@ -67,16 +70,45 @@ for (const [key, idx, uim] of MODES) {
   chk(oi === idx && ui === uim, `'${key}' -> old_input_method=${oi} (ждём ${idx}), user_input_method=${ui} (ждём ${uim})`);
 }
 
+// ============ часть 1J: меню с джойстика (CPU ещё крутит menu_loop) ============
+console.log("МЕНЮ: джойстик");
+function joyFrames(f) { for (let i = 0; i < f; i++) v06c.oneInterrupt(true); }
+function joyStep(bits, name, idx, uim) {
+  joy(...bits); joyFrames(8);
+  joy();        joyFrames(8);
+  const oi = rd(L.old_input_method), ui = rd(L.user_input_method);
+  chk(oi === idx && ui === uim, `${name.padEnd(22)} -> old_input_method=${oi} (ждём ${idx}), user_input_method=${ui} (ждём ${uim})`);
+}
+press([]);                                   // клавиатура молчит: листает именно джойстик
+joyStep([JOY_R], "RIGHT (вперёд)",   1, 4);
+joyStep([JOY_D], "DOWN  (вперёд)",   2, 8);
+joyStep([JOY_D], "DOWN  (по кругу)", 0, 0);
+joyStep([JOY_L], "LEFT  (назад)",    2, 8);
+joyStep([JOY_U], "UP    (назад)",    1, 4);
+// АНТИДРЕБЕЗГ: по уровню одно отклонение стика пролистало бы все три раскладки подряд.
+joy(JOY_R); joyFrames(60);
+chk(rd(L.old_input_method) === 2, `удержание RIGHT 60 кадров = ОДИН шаг: old_input_method=${rd(L.old_input_method)} (ждём 2)`);
+joy(); joyFrames(8);
+// FIRE сведён к клавише '0' в рядах ZX: меню обязано увидеть его как «0 START GAME».
+press(["1"]); joyFrames(8); press([]); joyFrames(8);          // вернуться в раскладку 1
+chk(rd(L.vec_pal + 8) === 0xC0, "в меню vec_pal+8 = синий фон полосы (0xC0)");
+joy(JOY_F1); joyFrames(4);
+chk((rd(L.vec_zxrows + 4) & 1) === 0, "FIRE1 прижимает клавишу '0' в ряду ZX 4");
+joyFrames(60);
+chk(rd(L.vec_pal + 8) !== 0xC0, `FIRE1 = старт игры: kl_menu_exit вернул белую палитру (vec_pal+8=0x${rd(L.vec_pal + 8).toString(16)})`);
+chk(rd(L.vec_joylck) === 0xC0, `при выходе из меню замкнуты обе кнопки (vec_joylck=0x${rd(L.vec_joylck).toString(16)})`);
+
 // ================= часть 2: раскладки =================
 // ПАРКОВКА: 0x0030..0x0032 — дыра перед ORG 0x0038 (как в kbcheck_vec.js)
 wr(0x0030, 0xC3); wr(0x0031, 0x30); wr(0x0032, 0x00);
 cpu.pc = 0x0030; cpu.sp = 0xC000; cpu.iff = true;
 press([]); for (let f = 0; f < 3; f++) v06c.oneInterrupt(true);
 
-function userInput(uim, keys) {
+function userInput(uim, keys, jbits) {
   wr(L.user_input_method, uim);
   wr(L.all_objs_in_cauldron, 0); wr(L.obj_dropping_into_cauldron, 0);
-  press(keys); for (let f = 0; f < 3; f++) v06c.oneInterrupt(true);   // ISR набивает vec_kbmat
+  joy(...(jbits || []));
+  press(keys); for (let f = 0; f < 3; f++) v06c.oneInterrupt(true);   // ISR набивает vec_kbmat и vec_joyraw
   cpu.iff = false;
   cpu.sp = 0xC000; wr(0xBFFF, 0x00); wr(0xBFFE, 0x30); cpu.sp = 0xBFFE;   // адрес возврата = 0x0030
   cpu.pc = L.check_user_input;
@@ -87,6 +119,14 @@ function userInput(uim, keys) {
 }
 const BITS = ["влево", "вправо", "вперёд", "прыжок", "взять", "взять(dir)"];
 const show = v => v ? BITS.filter((_, i) => v & (1 << i)).join("+") : "—";
+// ЗАМОК КНОПКИ. Игру только что запустили с зажатой FIRE1 (часть 1J) — она НЕ должна читаться
+// как прыжок, пока кнопку не отпустят. Идёт ПЕРВЫМ: замок снимает сам kl_vec_input, и любой
+// следующий опрос ввода с отпущенной кнопкой его уже откроет.
+console.log("ДЖОЙСТИК: замок кнопки после старта из меню");
+chk(userInput(0, [], [JOY_F1]) === 0x00, "зажатая с меню FIRE1 прыжком НЕ читается");
+chk(userInput(0, [], []) === 0x00, "кнопку отпустили — ввод пуст");
+chk(userInput(0, [], [JOY_F1]) === 0x08, "нажали заново — прыжок");
+
 // ожидание: маска битов user_input
 const TESTS = [
   ["1 KEYBOARD", 0, [
@@ -116,6 +156,76 @@ for (const [name, uim, cases] of TESTS) {
     const got = userInput(uim, keys);
     chk(got === want, `${(keys.join("+") || "ничего").padEnd(12)} -> ${got.toString(2).padStart(6, "0")} (${show(got)}), ждём ${want.toString(2).padStart(6, "0")} (${show(want)})`);
   }
+}
+
+// ============ часть 2J: джойстик в игре ============
+const JT = [
+  ["1 KEYBOARD", 0, [
+    [[JOY_L], 0x01], [[JOY_R], 0x02], [[JOY_U], 0x04], [[JOY_F1], 0x08], [[JOY_F2], 0x10],
+    [[JOY_D], 0x00],                                        // вниз в поворотных раскладках не заведено
+    [[JOY_L, JOY_F1], 0x09], [[JOY_U, JOY_F2], 0x14], [[], 0x00],
+  ]],
+  ["2 CURSOR", 4, [
+    [[JOY_L], 0x01], [[JOY_R], 0x02], [[JOY_U], 0x04], [[JOY_F1], 0x08], [[JOY_F2], 0x10],
+    [[JOY_D], 0x00], [[JOY_R, JOY_U], 0x06], [[], 0x00],
+  ]],
+  ["3 DIRECTIONAL CONTROL", 8, [
+    [[JOY_L], 0x01], [[JOY_R], 0x02], [[JOY_U], 0x04], [[JOY_D], 0x10],
+    [[JOY_F1], 0x08], [[JOY_F2], 0x20],
+    [[JOY_D, JOY_F2], 0x30], [[], 0x00],
+  ]],
+];
+const JNAME = new Map([[JOY_R, "RIGHT"], [JOY_L, "LEFT"], [JOY_U, "UP"], [JOY_D, "DOWN"], [JOY_F1, "FIRE1"], [JOY_F2, "FIRE2"]]);
+for (const [name, uim, cases] of JT) {
+  console.log(`ДЖОЙСТИК, РЕЖИМ ${name} (user_input_method=${uim})`);
+  for (const [jb, want] of cases) {
+    const got = userInput(uim, [], jb);
+    chk(got === want, `${(jb.map(b => JNAME.get(b)).join("+") || "покой").padEnd(12)} -> ${got.toString(2).padStart(6, "0")} (${show(got)}), ждём ${want.toString(2).padStart(6, "0")} (${show(want)})`);
+  }
+}
+// ПАРАЛЛЕЛЬНО С КЛАВИАТУРОЙ: джойстик ничего не отменяет, биты только складываются.
+console.log("ДЖОЙСТИК И КЛАВИАТУРА ОДНОВРЕМЕННО");
+chk(userInput(0, ["O"], [JOY_U]) === 0x05, "режим 1: клавиша O + джойстик UP = влево+вперёд");
+chk(userInput(0, ["A"], [JOY_L]) === 0x09, "режим 1: клавиша A + джойстик LEFT = влево+прыжок");
+chk(userInput(4, ["<"], [JOY_F1]) === 0x09, "режим 2: стрелка влево + FIRE1 = влево+прыжок");
+chk(userInput(8, ["0"], [JOY_L]) === 0x21, "режим 3: цифра 0 + джойстик LEFT = влево+взять(dir)");
+// ДЖОЙСТИКА НЕТ (порт молчит, все биты в нуле): игра обязана остаться управляемой, а не «зажатой».
+{ const save = JOY; JOY = 0x00;
+  chk(userInput(8, [], []) === 0x00 || (JOY = save, false), "порт 0x0E читается нулём (эмулятор без джойстика) — считаем отпущенным");
+  JOY = save; }
+
+// РЯДЫ ZX: кнопка сведена к клавише '0' («0 START GAME» и «нажми любую клавишу»), направления
+// в ряды НЕ лезут вовсе — иначе они цепляли бы клавиши меню и ложную паузу на ВК.
+console.log("ДЖОЙСТИК И РЯДЫ ZX");
+const rows = () => [...Array(8)].map((_, r) => rd(L.vec_zxrows + r) & 0x1F).join(" ");
+joy(); press([]); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+const rowsIdle = rows();
+joy(JOY_F2); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+chk((rd(L.vec_zxrows + 4) & 1) === 0, "FIRE2 тоже прижимает '0' (кнопка = «любая клавиша»)");
+chk((rd(L.vec_rptab + 0) & 1) === 1, "read_port(0) видит кнопку — экраны «нажми любую клавишу» её примут");
+joy(); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+chk(rows() === rowsIdle, "кнопку отпустили — ряды ZX пересобраны, бит '0' вернулся");
+chk((rd(L.vec_rptab + 0) & 1) === 0, "read_port(0) снова чист");
+for (const [b, n] of [[JOY_L, "LEFT"], [JOY_R, "RIGHT"], [JOY_U, "UP"], [JOY_D, "DOWN"]]) {
+  joy(b); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+  chk(rows() === rowsIdle, `${n} в ряды ZX не лезет (ни клавиш меню, ни ложной паузы на ВК)`);
+}
+joy(); press(["0"]); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+chk((rd(L.vec_zxrows + 4) & 1) === 0, "настоящая клавиша '0' работает по-прежнему");
+press([]); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+
+// ЦЕНА vec_joy В ТАКТАХ (кадр покоя: ничего не нажато, ряды ZX не пересобирались).
+{
+  joy(); press([]); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
+  cpu.iff = false; wr(0xBFFF, 0x00); wr(0xBFFE, 0x30); cpu.sp = 0xBFFE; cpu.pc = L.vec_joy;
+  let cyc = 0, i8 = 0; for (let n = 0; n < 5000 && cpu.pc !== 0x0030; n++) { cpu.instruction(); cyc += cpu.vcycles; i8 += cpu.cpu_cycles; }
+  cpu.iff = true;
+  // ТАКТ ВЕКТОРА в модели vector06js = 4 на машинный цикл (ею же считает profile_vec.js и гейт
+  // картинки), в скобках — «книжные» такты i8080. CALL стоит 24 (17) и в тело не входит.
+  const CALL = 24, CALLI = 17;
+  console.log(`ЦЕНА: vec_joy в кадре покоя ${cyc} + ${CALL} (call) = ${cyc + CALL} тактов Вектора ` +
+              `(${i8} + ${CALLI} = ${i8 + CALLI} тактов i8080)`);
+  chk(cyc + CALL <= 112, `цена vec_joy в ISR ${cyc + CALL} тактов Вектора за кадр (бюджет 112)`);
 }
 
 // ================= часть 3: пауза на ВК =================
