@@ -63,6 +63,23 @@ MUTS = [
          file="tools/kl_z80_to_8080.py",
          old="vj_fire:\t\tld\t\thl, vec_zxrows+4\t; FIRE -> клавиша '0' (ряд ZX 4, бит 0): старт игры в меню\n\t\t\t\tld\t\ta, (hl)\t\t\t\t; и «любая клавиша» на экранах мелодий\n\t\t\t\tand\t\t0xFE\n",
          new="vj_fire:\t\tld\t\thl, vec_zxrows+4\t; FIRE -> клавиша '0' (ряд ZX 4, бит 0): старт игры в меню\n\t\t\t\tld\t\ta, (hl)\t\t\t\t; и «любая клавиша» на экранах мелодий\n\t\t\t\tand\t\t0xFF\n"),
+    dict(name="pal", gate="palcheck",
+         why="палитра новой комнаты подаётся БЕЗ гашения (состояние bw-1.1) — старая картинка перекрашивается на глазах",
+         file="tools/kl_z80_to_8080.py",
+         old="'\\t\\t\\t\\tcall    vec_scr_off                             ; погасить, дождаться, скопировать\\n'",
+         new="'\\t\\t\\t\\tcall    update_screen\\n'"),
+    dict(name="pallate", gate="palcheck",
+         why="гашение переставлено ПОСЛЕ копии — новая комната выезжает столбцами в цвете старой (первый инвариант этого НЕ видит)",
+         file="tools/kl_z80_to_8080.py",
+         old="vec_scr_off:" + T + "xor" + T*2 + "a" + T*5 + "; чернила 0 = ЧЁРНЫЙ (см. vec_zxcol): гасим поле комнаты\n"
+             + T*4 + "call" + T + "vec_set_pal" + T*3 + "; заливает vec_pal и ставит vec_palreq\n"
+             + "pof_w:" + T*3 + "ld" + T*2 + "a, (vec_palreq)\n" + T*4 + "or" + T*2 + "a\n"
+             + T*4 + "jp" + T*2 + "nz, pof_w\n" + T*4 + "jp" + T*2 + "update_screen",
+         new="vec_scr_off:" + T + "call" + T + "update_screen\n"
+             + T*4 + "xor" + T*2 + "a\n"
+             + T*4 + "call" + T + "vec_set_pal\n"
+             + "pof_w:" + T*3 + "ld" + T*2 + "a, (vec_palreq)\n" + T*4 + "or" + T*2 + "a\n"
+             + T*4 + "jp" + T*2 + "nz, pof_w\n" + T*4 + "ret"),
     dict(name="hud", gate="hudcolor",
          why="зона маски HUD «цифры жизней» сдвинута на 4 строки — цифра РЕЖЕТСЯ на два цвета",
          file="tools/kl_z80_to_8080.py",
@@ -99,6 +116,7 @@ GATES = {
     "inputcheck": ["node", "tools/inputcheck_vec.js", "build/knightlore_vec.r0m", "build/knightlore_vec.sld"],
     "tunecheck": ["node", "tools/tunecheck_vec.js", "build/knightlore_vec.r0m", "build/knightlore_vec.sld", "3000"],
     "hudcolor": None,          # особый: снять дамп и прогнать hudcolor.py
+    "palcheck": None,          # особый: свой набор ключей сценария
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
     "check_ixflags": None,     # то же
@@ -128,6 +146,15 @@ def gate_result(gate, env=None):
         r = run(["node", "tools/lockstep_vec.js", "build/knightlore_8080.r0m", "build/knightlore_8080.sld",
                  "600", ALIVE + "/inputs_alive.txt", ALIVE + "/zx_states600.bin"], env)
         return r.returncode, (r.stdout + r.stderr)[-300:]
+    if gate == "palcheck":
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        e = {"KLGAG": "1", "KLLIVES": "1", "KLARCH": "40"}
+        e.update(env or {})
+        r = run(["node", "tools/palcheck_vec.js", "build/knightlore_vec.r0m",
+                 "build/knightlore_vec.sld", "500"], e)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "hudcolor":
         b = build("vec", env)
         if b.returncode:
