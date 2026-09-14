@@ -172,6 +172,7 @@ def main():
             rc, out = gate_result(m["gate"], env)
         finally:
             run(["git", "checkout", "--", m["file"]])
+            drop_pyc()
             # пересобрать ОБЕ цели: иначе в build/ остаётся испорченный образ, и следующий
             # ручной прогон гейта краснеет «на ровном месте» (наступали)
             build("lockstep"); build("vec")
@@ -184,6 +185,23 @@ def main():
     return 1 if bad else 0
 
 
+def drop_pyc():
+    """Снести кэш байткода Python в tools/.
+
+    ТРЕТЬЯ ЛОВУШКА САМОПРОВЕРКИ (стоила красного render_gate «на ровном месте», 2026-09-12).
+    Python держит .pyc валидным, пока совпадают mtime источника В СЕКУНДАХ и его размер. Порча
+    вида «0xC0 -> 0x80» РАЗМЕР НЕ МЕНЯЕТ, а быстрый гейт успевает отработать внутри одной
+    секунды, так что после `git checkout --` у восстановленного файла та же секунда mtime —
+    и кэш считается годным. Дальше ВСЕ сборки берут ИСПОРЧЕННЫЙ байткод: исходник чистый,
+    git status чистый, а в образе живёт порча. Ловится только сверкой .asm с эталоном.
+    """
+    d = os.path.join(ROOT, "tools", "__pycache__")
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            os.unlink(os.path.join(d, f))
+        os.rmdir(d)
+
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, lambda *a: (run(["git", "checkout", "--", "tools"]), sys.exit(130)))
+    signal.signal(signal.SIGINT, lambda *a: (run(["git", "checkout", "--", "tools"]), drop_pyc(), sys.exit(130)))
     sys.exit(main())

@@ -6,7 +6,16 @@ set -e
 cd "$(dirname "$0")"
 TARGET=${1:-lockstep}
 mkdir -p build
-if [ "$TARGET" = "vec" ]; then
+if [ "$TARGET" = "jukebox" ] || [ -n "$KL_JUKEBOX" ]; then
+  # тот же образ, но стартовый экран — стенд приёмки звука на слух: 1..9/A..H запускают
+  # по одному каждый эффект и каждую мелодию (таблица в docs/PORT_RECIPE.md §23).
+  python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_jukebox.asm --target vec --jukebox
+  ./tools/sjasmplus --lst=build/knightlore_jukebox.lst --sld=build/knightlore_jukebox.sld --fullpath build/knightlore_jukebox.asm
+  python3 tools/check_i8080.py build/knightlore_jukebox.lst
+  python3 tools/check_ixflags.py build/knightlore_jukebox.asm
+  python3 tools/check_plane2.py build/knightlore_jukebox.lst
+  ls -la build/knightlore_jukebox.r0m
+elif [ "$TARGET" = "vec" ]; then
   python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_vec.asm --target vec
   ./tools/sjasmplus --lst=build/knightlore_vec.lst --sld=build/knightlore_vec.sld --fullpath build/knightlore_vec.asm
   python3 tools/check_i8080.py build/knightlore_vec.lst
