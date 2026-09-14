@@ -26,7 +26,7 @@ def vh(base, pages=32):
     h.append((base + (pages - 1) * 256 + 224, 32))
     return h
 
-ALL = [h for b in (0xA000, 0xC000) for h in vh(b)] + [(0x0007, 0x29), (0x003B, 5), (0x7FE8, 0x18)]
+ALL = [h for b in (0xA000, 0xC000) for h in vh(b)] + [(0x0007, 0x29), (0x003B, 5), (0x00D1, 0x2F), (0x7FE8, 0x18)]
 used = {b: e for b, sz, e in holes}
 free = sum((b + sz - used[b]) if b in used else sz for b, sz in ALL)
 print("дыры: занято %d из %d, свободно %d Б из %d" % (len(holes), len(ALL), free, sum(s for _, s in ALL)))

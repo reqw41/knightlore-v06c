@@ -660,6 +660,23 @@ VEC_CODE_TOP = 0x7A00      # потолок кода: ниже 128 байт ст
 VEC_HOLE_BYTES = int(__import__('os').environ.get('KL_HOLE_BYTES', '-1'))   # сколько байт увозить в дыры (-1 = сколько влезет)
 VEC_HOLE_SKIP = tuple(x for x in __import__('os').environ.get('KL_HOLE_SKIP', '').split(',') if x)
 VEC_HOLE_NODATA = bool(__import__('os').environ.get('KL_HOLE_NODATA'))   # 1 = не увозить таблицы (для разведения причин)
+# ТАБЛИЦЫ, КОТОРЫЕ РАЗРЕШЕНО УВОЗИТЬ В ДЫРЫ (§17.5.2). Список ИМЕННОЙ, а не по признаку «чистые
+# DB/DW»: замер показал, что общего признака нет — таблицы игры сплошь читаются пробегом ЗА свой
+# конец (следующая метка — продолжение записи или её ограничитель), и авто-перенос ломает картинку.
+# Здесь только НАШИ таблицы, у которых читатель разобран построчно и адресуется 16-битно
+# (inc de/inc hl), а конец задан счётчиком или терминатором внутри самой таблицы:
+#   vec_hudcols  зоны маски HUD: записи по 5 Б, конец — нулевая страница (vhm_run: ld a,(hl)/or a/ret z)
+#   vec_arrzx    стрелки ряда 0 -> ряды ZX: 4 записи по 3 Б, счётчик b=4 (zb_ar)
+#   vec_zxcol    цвет ZX 0..7 -> перо Вектора: 8 Б, индекс 0..7
+#   kl_modetab   три режима ввода по 3 Б, индекс = user_input_method
+#   kl_in_t1/t2  раскладки 1 и 2: записи по 3 Б, счётчик в kl_vec_input
+#   kl_joy_r/d   раскладки джойстика (§25): записи по 2 Б, счётчик в kl_in_joy
+#   msx_init/stop/env  списки «регистр, значение» с терминатором 0xFF (msx_psg_list)
+#   msx_kmask    3 Б, индекс = слот 0..2;   msx_steptb  8 Б, индекс = msx_stepc AND 7
+#   msx_hdr_*    заголовки мелодий: 6 Б, play_audio читает ровно запись по DE
+VEC_HOLE_DATA = frozenset("""vec_hudcols vec_arrzx vec_zxcol kl_modetab kl_in_t1 kl_in_t2
+    kl_joy_r kl_joy_d msx_init msx_stop msx_env msx_kmask msx_steptb msx_hdr_menu
+    msx_hdr_start_game msx_hdr_game_over msx_hdr_game_complete msx_hdr_blip""".split())
 VEC_HOLE_PLANES = [0xA000, 0xC000]   # плоскости, чьи строки вне картинки отданы под код (1 = буфер, 2 = селектор HUD)
 # Дыры ВНЕ видеопамяти (§17.5.2). Каждая — свободный кусок образа, который никто не читает и не пишет:
 #   0x0007..0x0030  между `jp vec_boot` нулевой страницы и вектором RST 38 (0x0030..0x0038 оставлены
@@ -667,7 +684,9 @@ VEC_HOLE_PLANES = [0xA000, 0xC000]   # плоскости, чьи строки �
 #   0x003B..0x0040  между `jp vec_isr` и переменными нулевой страницы на 0x0040;
 #   0x7FE8..0x8000  хвост страницы переменных за clear_end (адрес переменных кратен 32, поэтому
 #                   0x568 байт кончаются на 0x7FE8 и 24 байта до плоскости 0 лежали зря).
-VEC_HOLE_GAPS = [(0x0007, 0x0030 - 0x0007), (0x003B, 0x0040 - 0x003B), (0x7FE8, 0x8000 - 0x7FE8)]
+#   0x00D1..0x0100  между `jp START` загрузчика и началом кода игры (ORG 0x0100).
+VEC_HOLE_GAPS = [(0x0007, 0x0030 - 0x0007), (0x003B, 0x0040 - 0x003B),
+                 (0x00D1, 0x0100 - 0x00D1), (0x7FE8, 0x8000 - 0x7FE8)]
 # Хвост ВЕРХНЕГО региона: между концом build_lookup_tbls и таблицами сдвига остаётся добивка
 # (разрез спрайтов VEC_SPLIT кладёт наверх целые спрайты по ~150 Б, точно в потолок не попасть).
 # Её размер считает vec_walk, класть туда можно что угодно: блоки идут ПОСЛЕ `ret`
@@ -3347,6 +3366,7 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
             b = blocks[k]
             if not (b['data'] and b['size'] > 0 and not b['after_org'] and b['name'] not in exclude
                     and b['org'] is not None and 0x0100 <= b['org'] < 0x8000
+                    and b['name'] in VEC_HOLE_DATA
                     and nrefs[b['name']] > 0 and b['name'] not in sens):
                 k += 1
                 continue
@@ -3365,12 +3385,15 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
     # внизу, с заглушкой на 3 меньше); (3) крупные вперёд — плотнее укладка.
     cand.sort(key=lambda b: (b['i0'] < lastbig, bool(b.get('stub')), -b['size'], b['name']))
 
-    def lay(holes):
+    def lay(holes, ycap=None):
         free = [[h['a'], h['sz']] for h in holes]
-        placed, moved = [[] for _ in holes], 0
+        placed, moved, ytot = [[] for _ in holes], 0, 0
         for b in cand:
             if need >= 0 and moved >= need:
                 break
+            above = b['i0'] < lastbig
+            if above and ycap is not None and ytot + b['size'] > ycap:
+                continue                                # квота на снятое ВЫШЕ ALIGN'а (см. ниже)
             best = -1
             for j, (a, sz) in enumerate(free):         # ПЛОТНАЯ укладка: самый тесный подходящий
                 if sz < b['size'] or b['i0'] <= holes[j]['min']:   # остаток, иначе крошки расползаются
@@ -3386,33 +3409,71 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
                 free[best][0] += b['size']
             free[best][1] -= b['size']
             moved += b['size'] - (3 if b.get('stub') else 0)
+            if above:
+                ytot += b['size']
         return placed, moved
 
     # Размер добивки ALIGN'а зависит от того, сколько снято ВЫШЕ него, а это результат раскладки:
-    # ищем неподвижную точку (обычно 2-3 шага). Промах стоит только места: лишнее уйдёт на
-    # следующую страницу, недобор останется добивкой, — поведение не меняется ни при каком исходе.
-    holes, placed, moved = list(base), None, 0
-    for _ in range(8):
-        hn = list(base)
+    # ищем неподвижную точку. Добивка, объявленная РОВНО по факту раскладки, — согласованная:
+    # сколько объявили, столько и влезет. Промах стоит только места (лишнее уедет на следующую
+    # страницу, недобор останется добивкой) — поведение не меняется ни при каком исходе.
+    def pads_for(holes, placed):
+        """Сколько байт добивки будет у каждого ALIGN при такой раскладке."""
+        out = []
         for i, a, n in aligns:
             shift = 0
             if placed:
                 for j, h in enumerate(holes):
                     for b in placed[j]:
-                        if b['i0'] < i:
-                            shift -= b['size']         # блок уехал из региона выше ALIGN'а
+                        if b['i0'] < i:                # блок уехал из региона выше ALIGN'а
+                            shift -= b['size'] - (3 if b.get('stub') else 0)   # заглушка осталась
                         if h['ins'] is not None and h['ins'] < i:
                             shift += b['size']         # ... или, наоборот, приехал в добивку выше
-            pad = (-(a + shift)) % n
-            if pad >= 8:
-                hn.append({'a': a + shift, 'sz': pad, 'ins': i, 'min': i})
-        pl, mv = lay(hn)
-        stable = (mv == moved and len(hn) == len(holes))
-        holes, placed, moved = hn, pl, mv
-        if stable:
-            break
+            out.append((i, a + shift, (-(a + shift)) % n))
+        return out
+    # КВОТА НА СНЯТОЕ ВЫШЕ ALIGN'а. Конец нижнего региона = E0 − увезено + Σ(новая добивка −
+    # старая). Блок, снятый ВЫШЕ ALIGN'а, ровно на свой размер удлиняет добивку — выигрыш ноль,
+    # ПОКА добивка не перевалит через страницу: тогда разом −256 Б. Поэтому перебираем квоту
+    # y ≡ (адрес ALIGN'а) mod n: на ней добивка обращается в ноль, а вся ёмкость дыр достаётся
+    # блокам снизу. Оценка E считается точно (формула выше), лучший вариант и берём.
+    p0 = {i: pad for i, _, pad in pads_for(base, None)}
+
+    def attempt(ycap):
+        holes, placed, moved = list(base), None, 0
+        for _ in range(12):
+            hn = list(base)
+            want = pads_for(holes, placed)
+            for i, a, pad in want:
+                if pad >= 8:
+                    hn.append({'a': a, 'sz': pad, 'ins': i, 'min': i})
+            pl, mv = lay(hn, ycap)
+            holes, placed, moved = hn, pl, mv
+            if pads_for(hn, pl) == want:               # объявленная добивка = фактическая
+                break
+        end = -moved + sum(pad - p0[i] for i, _, pad in pads_for(holes, placed))
+        return end, holes, placed, moved
+
+    ycaps = [None]
+    if aligns:
+        n0 = aligns[0][2]
+        ycaps += [(aligns[0][1] % n0) + k * n0 for k in range(24)]
+    tries = [attempt(y) + (y,) for y in ycaps]
+    if __import__('os').environ.get('KL_HOLE_DEBUG'):
+        import sys as _s
+        print('DBGQ ' + ' '.join('%s:%d' % (t[4], t[0]) for t in tries), file=_s.stderr)
+    best = min(tries, key=lambda r: (r[0], r[4] is not None))
+    if __import__('os').environ.get('KL_HOLE_DEBUG'):
+        import sys as _s
+        print('DBG квота %s: конец нижнего %+d Б, увезено %d' % (best[4], best[0], best[3]), file=_s.stderr)
+    _, holes, placed, moved = best[:4]
     if not moved:
         return src, 0, 0
+    if __import__('os').environ.get('KL_HOLE_DEBUG'):   # что именно уехало (для разведения причин)
+        import sys as _s
+        for j, h in enumerate(holes):
+            for b in placed[j]:
+                print('DBG %-28s %3d Б -> %s%s' % (b['name'], b['size'], '%#06x' % h['a'],
+                      ' (таблица)' if b.get('page') else (' (+jp)' if b.get('stub') else '')), file=_s.stderr)
     drop, stubs = set(), {}
     for lst in placed:
         for b in lst:
