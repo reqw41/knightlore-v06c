@@ -1,16 +1,23 @@
 #!/usr/bin/env node
-// ГЕЙТ «панель не затирают»: ни один блит/заливка объектов не пишет в строки HUD (32..63) плоскости 0
-// и в маску плоскости 2. Панель живёт ТОЛЬКО на экране: после update_screen строки 32..63 буфера
-// нулевые, поэтому любое окно объекта, попавшее в эти строки, копирует на панель нули (клип
-// blit_to_screen режет окна, ПЕРЕСЕКАЮЩИЕ границу; окно ЦЕЛИКОМ внутри HUD не режется — это и
-// проверяем).
+// ГЕЙТ «панель не затирают»: ни один блит/заливка объектов не пишет в ПАНЕЛЬ плоскости 0 и в маску
+// плоскости 2. Панель живёт ТОЛЬКО на экране: после update_screen её строки в буфере нулевые,
+// поэтому любое окно объекта, попавшее в них, копирует на панель нули, и дыра держится до следующей
+// смены комнаты.
+// ЗОНА ПАНЕЛИ СНИМАЕТСЯ ЗАМЕРОМ, а не задана константой (§30): кроме полосы строк 32..63 панель
+// занимает боковые колонны и ЛЕСТНИЦУ, обходящую нижние углы ромба комнаты (столбцы 0..8 и 23..31,
+// до строки 95). Зона = адреса, куда процедуры панели (display_panel, print_lives*, display_day,
+// print_days, display_objects, display_sun_moon_frame) кладут НЕНУЛЕВЫЕ байты в буфер при
+// перерисовке панели; снимается один раз на комнату и замораживается на первом update_screen.
 //   node tools/hudguard_vec.js <rom> <sld> [итераций=40] [комнаты: a-b|список|all]
 // Ключи: KLDIRS=l,r,u,d,n  какие направления держать в каждой комнате (n = покой), по умолчанию все;
 //        KLFORCE=1         дополнительно ПРИНУДИТЕЛЬНО ставить героя в крайние X/Y/Z комнаты
 //                          (сетка углов из KLGRID2, по умолчанию замеренные пределы ходьбы);
+//        комната «start»   НЕ подменять номер комнаты: только так герой РЕАЛЬНО ходит и выходит
+//                          через арки (подменённая комната ставит его в середину чужой комнаты,
+//                          где он упирается в препятствие и перебирает ногами на месте);
 //        KLCSV=файл        таблица по комнатам.
 // Что меряется на каждый вызов blit_to_screen: HL = адрес окна в буфере (L = строка), B = строк,
-// C = столбцов, адрес возврата = ХОЗЯИН окна. Плюс поимённый учёт ВСЕХ записей в строки 32..63
+// C = столбцов, адрес возврата = ХОЗЯИН окна. Плюс поимённый учёт ВСЕХ записей В ЗОНУ ПАНЕЛИ
 // плоскостей 0 и 2 (владелец = последняя вошедшая процедура-писатель экрана).
 // Код возврата: 1, если есть окно-нарушитель или запись в HUD не от процедуры панели.
 "use strict";
@@ -31,6 +38,16 @@ const BLIT=L.blit_to_screen, USCR=L.update_screen, HMASK=L.vec_hud_mask, HOFF=L.
 // .copy_loop — ЕДИНСТВЕННЫЙ путь объектов в блит. Окно берётся со стека (ещё ДО клипа), поэтому
 // видно и то, что клип отрезал: на входе SP -> [ширина/высота][источник][приёмник].
 const CLOOP=L["loc_D653.copy_loop"];
+// ЗАМЕР ЗОНЫ идёт от входа в display_panel до update_screen — это ровно хвост блока перерисовки
+// панели (display_panel -> знак солнца -> DAY -> счётчик дней -> фигурка и цифры жизней -> выгрузка
+// на экран), то есть всё, что панель рисует ВЫШЕ строки 63 (строки 32..63 в зоне всегда).
+// СТОРОЖИТЬ НАДО ИМЕННО display_panel, и только его: у него ровно один вызыватель, и он живёт
+// только в этом блоке. Ловушки, каждая из которых красила гейт на ИСПРАВНОЙ сборке (§30.5):
+//   display_objects — в него ПРОВАЛИВАЕТСЯ display_objects_carried из объектного рендера;
+//   print_lives — второй вызыватель сидит в player_dies, а с KLFORCE герой гибнет постоянно.
+// В обоих случаях «фаза панели» включалась посреди отрисовки объектов, и в зону уезжали их пиксели
+// по всему полю (замер: комната 10, строки 124..137 столбца 14).
+const PDRAW=[L.display_panel].filter(x=>x!==undefined);
 for(const [n,v] of [["blit_to_screen",BLIT],["update_screen",USCR],["vec_hud_mask",HMASK]])
   if(v===undefined)throw new Error("нет метки "+n);
 const lst=fs.readFileSync(ROM.replace(/\.r0m$/,".lst"),"latin1").split("\n");
@@ -62,9 +79,13 @@ const HUD0=32, HUD1=63;                        // строки памяти, г�
 // clr_byte и update_screen <- loc_BA79 — экраны БЕЗ панели (game over, финал): там строки 32..63
 // чистит и перерисовывает сама игра, а маску снимает vec_hud_off из print_border (§17.5.1).
 const PANEL=/^(display_frame\+|loc_BF91\+|blit_2x8\+|update_screen( |$)|vec_hud_mask$|kl_unbar\+|clr_byte|вход в комнату)/;
+// «start» — НЕ подменять номер комнаты. Это единственный сценарий, в котором герой РЕАЛЬНО ходит:
+// при подмене номера игра ставит его в середину чужой комнаты, где он чаще всего упирается в
+// препятствие и только перебирает ногами на месте (замер §30 — из-за этого прежний прогон по 128
+// комнатам ни разу не довёл окно объекта до кромки комнаты).
 const rooms = !ROOMS||ROOMS==="all" ? [...Array(256).keys()]
   : ROOMS.includes("-") ? (([a,b])=>Array.from({length:b-a+1},(_,i)=>a+i))(ROOMS.split("-").map(Number))
-  : ROOMS.split(",").map(Number);
+  : ROOMS.split(",").map(x=>x==="start"?-1:Number(x));
 const DIRS=(process.env.KLDIRS||"n,left,right,up,down").split(",");
 const FORCE=!!process.env.KLFORCE;
 // KLFORCEZ=список — принудительно занижать ТОЛЬКО Z героя (падение в яму/провал пола), X и Y
@@ -78,7 +99,7 @@ for(const y of [0x20,0x28,0xE0,0xD8]) for(const x of [0x20,0x28,0xE0,0xD8]) for(
 // --- сводные счётчики ---
 const S={blits:0, hudBlits:0, clipped:0, insideHud:0, writesHud:0, badBlits:new Map(), owners:new Map(),
          writeOwners:new Map(), minRow:255, minRowOwner:"", roomsOk:0, roomsBad:0, plane2:0,
-         objMinL:255, objMinTop:255, objMinTopWin:"", objHud:0, objClip:0, objSkip:0};
+         objMinL:255, objMinTop:255, objMinTopWin:"", objHud:0, objClip:0, objSkip:0, exits:0, footAbove:0, exitBy:new Map()};
 const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
 
 function runRoom(room){
@@ -90,14 +111,22 @@ function runRoom(room){
   if(L.vec_snd_force!==undefined)ow(L.vec_snd_force,process.env.KL_SND==="vi"?2:1,false);
   cpu.pc=0;cpu.sp=0xC000;cpu.iff=false;for(let r=0;r<8;r++)keyboard.matrix[r]=0;
   let phase="menu",iter=0,roomSet=false,steps=0,owner="?",pos=0,curPC=0,scripted=false;
-  const r={room, blits:0, hud:0, clip:0, inside:0, wr:0, minRow:255, bad:0, objTop:255};
+  // след панели: 1 = сюда панель кладёт своё (кроме полосы 32..63, она в зоне всегда)
+  const foot=new Uint8Array(32*256); let panelPhase=false, footFrozen=false;
+  const r={room, blits:0, hud:0, clip:0, inside:0, wr:0, minRow:255, bad:0, objTop:255, exits:0};
   memory.write=function(a,w,s){a&=0xffff;
     if(phase==="menu"&&cpu.pc===SYNC){ow(L.seed_1,0x34,false);ow(L.seed_1+1,0x12,false);ow(L.seed_2,0x78,false);ow(L.seed_2+1,0x56,false);ow(L.seed_3,0x9A,false);phase="init";}
-    if(phase==="init"&&!roomSet&&a>=0xA000&&a<0xC000){roomSet=true;ow(OBJ+8,room,false);ow(OBJ+40,room,false);}
+    if(phase==="init"&&!roomSet&&a>=0xA000&&a<0xC000){roomSet=true;
+      if(room>=0){ow(OBJ+8,room,false);ow(OBJ+40,room,false);}}   // room < 0 — стартовая комната как есть
     if(a===ROOM&&phase==="init"){phase="game";key("0",false);}
+    // След панели в буфере: считаем только БИТЫ, КОТОРЫЕ ПАНЕЛЬ ДОБАВИЛА (w & ~старое). print_sprite
+    // кладёт спрайт по ИЛИ, и если под панелью в буфере уже лежал объект, запись «ненулевая» даже
+    // там, где у самой панели точек нет: прогон с принудительной сеткой ловил на этом 3 ложных
+    // нарушителя (зона раздувалась пикселями объектов, и законный блит объекта попадал в неё).
+    if(panelPhase&&a>=0xA000&&a<0xC000&&(w&~rd(a)&0xFF))foot[(((a>>8)&0x1F)<<8)|(a&0xFF)]=1;
     if(phase==="game"){
-      const row=a&0xFF;
-      if(row>=HUD0&&row<=HUD1&&((a>=0x8000&&a<0xA000)||(a>=0xC000&&a<0xE000))){
+      const row=a&0xFF, col=(a>>8)&0x1F;
+      if(((row>=HUD0&&row<=HUD1)||foot[(col<<8)|row])&&((a>=0x8000&&a<0xA000)||(a>=0xC000&&a<0xE000))){
         r.wr++; S.writesHud++; bump(S.writeOwners, (scripted?(/^(bts_|us_|vhm_|vfw_)/.test(nameOf(curPC))?owner:nameOf(curPC))
                              :"вход в комнату (первый показ, до сценария)")+(a>=0xC000?" [p2]":""), 1);
         if(a>=0xC000)S.plane2++;
@@ -113,12 +142,14 @@ function runRoom(room){
   let guard=0; while(phase!=="game"&&guard++<4000)v06c.oneInterrupt(true);
   if(phase!=="game")return null;                       // номер комнаты невалиден
   scripted=true;
-  let frc=0,tacc=0,start=iter,dir=0,held=null;
+  let frc=0,tacc=0,start=iter,dir=0,held=null,curRoom=rd(OBJ+8);
   const stepLimit=3e8;
   const step=()=>{
     if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
     // ---- инструментовка: вход в процедуры-писатели экрана ----
     const pc=cpu.pc;
+    if(!footFrozen&&PDRAW.includes(pc))panelPhase=true;
+    if(pc===USCR){panelPhase=false;if(scripted)footFrozen=true;}   // первый показ комнаты — конец замера следа
     if(pc===BLIT){
       // ХОЗЯИН окна — МЕСТО ВЫЗОВА (PC предыдущей инструкции), а не адрес возврата: display_frame
       // и blit_2x8 уходят в блит через `jp`, и на стеке лежит уже их собственный вызыватель.
@@ -150,6 +181,17 @@ function runRoom(room){
     if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
     if(cpu.last_opcode===0xd3)io.commit();
   };
+  // ЗАМЕР ЗОНЫ ПАНЕЛИ. Первый показ комнаты идёт ДО сценария (через oneInterrupt, там инструментовки
+  // нет), поэтому панель заставляем перерисоваться ещё раз: render_status_info != 0 — это и есть
+  // признак «нарисовать панель и выгрузить буфер на экран». Ненулевые записи её процедур в буфер
+  // за эти две итерации и дают зону; дальше зона заморожена.
+  if(L.render_status_info!==undefined){
+    ow(L.render_status_info, 1, false);
+    for(let k=0;k<2;k++){const it0=iter; while(iter===it0&&steps<stepLimit)step();}
+  }
+  footFrozen=true;
+  { let n=0; for(let v=0;v<32*256;v++)if(foot[v]&&(v&0xFF)>HUD1)n++; r.footAbove=n; S.footAbove=n; }
+
   for(const d of DIRS){
     if(held){key(held,false);held=null;}
     if(d!=="n"){key(d,true);held=d;}
@@ -160,6 +202,8 @@ function runRoom(room){
         ow(OBJ+1,x,false);ow(OBJ+2,y,false);ow(OBJ+3,z,false);
         ow(OBJ+33,x,false);ow(OBJ+34,y,false);ow(OBJ+35,(z+12)&0xff,false);}
       const it0=iter; while(iter===it0&&steps<stepLimit)step();
+      if(process.env.KLLIVES)ow(L.lives,5,false);
+      const rr=rd(OBJ+8); if(rr!==curRoom){bump(S.exitBy,`${d}: ${curRoom}->${rr}`,1);curRoom=rr;r.exits++;S.exits++;}   // РЕАЛЬНЫЙ выход через арку
     }
     dir++;
   }
@@ -173,13 +217,15 @@ const csv=["room,blits,hud_blits,clipped,inside_hud,hud_writes,min_row,obj_min_t
 let valid=0;
 for(const room of rooms){
   const r=runRoom(room);
-  if(!r){csv.push(`${room},,,,,,,невалидная`);continue;}
+  if(!r){csv.push(`${room<0?"start":room},,,,,,,невалидная`);continue;}
   valid++;
-  csv.push(`${r.room},${r.blits},${r.hud},${r.clip},${r.inside},${r.wr},${r.minRow},${r.objTop},${r.bad}`);
+  csv.push(`${r.room<0?"start":r.room},${r.blits},${r.hud},${r.clip},${r.inside},${r.wr},${r.minRow},${r.objTop},${r.bad}`);
   if(r.bad)console.log(`комната ${room}: НАРУШЕНИЙ ${r.bad}`);
 }
 fs.writeFileSync(process.env.KLCSV||"build/hudguard.csv",csv.join("\n")+"\n");
-console.log(`комнат валидных ${valid} из ${rooms.length}, направлений ${DIRS.join("/")} по ${N} итераций${FORCE?", + принудительные крайние X/Y/Z":""}`);
+console.log(`комнат валидных ${valid} из ${rooms.length}, направлений ${DIRS.join("/")} по ${N} итераций, РЕАЛЬНЫХ выходов через арки ${S.exits}${FORCE?", + принудительные крайние X/Y/Z":""}`);
+console.log(`зона панели выше строки 63 (замер): ${S.footAbove} байт`);
+if(S.exitBy.size)console.log("выходы через арки (направление: комната -> комната): "+[...S.exitBy].map(([k,v])=>k+(v>1?" x"+v:"")).join(", "));
 console.log(`блитов всего ${S.blits}; окон, достающих до строк HUD (<=63): ${S.hudBlits}; из них ОТКЛИПАНО (пересекали границу) ${S.clipped}, целиком внутри HUD ${S.insideHud}`);
 console.log(`окна ОБЪЕКТОВ на входе .copy_loop (ДО клипа): достают до строк панели ${S.objHud}, из них ОБРЕЗАНО по строке 64: ${S.objClip}, ПРОПУЩЕНО целиком (окно внутри панели): ${S.objSkip}`);
 console.log(`   самое нижнее окно объекта ДО клипа: начало ${S.objMinL}, верх ${S.objMinTop} (${S.objMinTopWin}) -> запас до полосы панели ${S.objMinTop-63} строк`);
