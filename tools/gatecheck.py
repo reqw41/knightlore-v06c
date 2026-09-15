@@ -86,16 +86,27 @@ MUTS = [
          old="DB\t\t0xC4, 2, 64,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71",
          new="DB\t\t0xC4, 2, 68,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71"),
     dict(name="hudclip", gate="hudguard",
-         why="снят клип по границе HUD — окно объекта, пересекающее границу, затирает панель",
-         file="tools/kl_native_logic.py",
-         old='"\\t\\t\\t\\tld\\t\\ta, l\\n\\t\\t\\t\\tcp\\t\\t64\\n\\t\\t\\t\\tjp\\t\\tnc, .kcl_go\\n"',
-         new='"\\t\\t\\t\\tld\\t\\ta, l\\n\\t\\t\\t\\tcp\\t\\t64\\n\\t\\t\\t\\tjp\\t\\t.kcl_go\\n"'),
-    dict(name="hudinside", gate="hudguard", env={"KLFORCEZ": "0,4,8,12,16,20"},
-         why="окно объекта ЦЕЛИКОМ внутри полосы панели снова копируется (состояние до §29): "
-             "герой с низким Z (падение) затирает панель",
-         file="tools/kl_native_logic.py",
-         old='"\\t\\t\\t\\tjp\\t\\tc, .kcl_next\\t\\t\\t; окно целиком в строках панели — не копировать вовсе\\n"',
-         new='"\\t\\t\\t\\tjp\\t\\tc, .kcl_go\\t\\t\\t; окно целиком в строках панели — не копировать вовсе\\n"'),
+         why="клип по краю панели снят целиком — окно объекта затирает полосу 32..63",
+         file="tools/kl_z80_to_8080.py",
+         old="\t\t\t\tcp\t\t96\n\t\t\t\tjp\t\tnc, blit_to_screen\t; окно выше всей лестницы",
+         new="\t\t\t\tcp\t\t96\n\t\t\t\tjp\t\tblit_to_screen\t; окно выше всей лестницы"),
+    dict(name="hudstair", gate="hudguard_exit", env={"KLDIRS": "down", "KLLIVES": "1"},
+         why="верхний край панели вырождается в строку 64 (состояние до §30): лестницу по нижним "
+             "углам ромба затирает шаг героя за кромку комнаты",
+         file="tools/kl_z80_to_8080.py",
+         old="\t\t\t\tadd\t\ta, 10\t\t\t\t; 9 - m, перенос при m <= 9",
+         new="\t\t\t\tadd\t\ta, 0\t\t\t\t; 9 - m, перенос при m <= 9"),
+    dict(name="hudmin", gate="hudguard_exit", env={"KLDIRS": "down", "KLLIVES": "1"},
+         why="из двух краёв окна берётся не тот: граница считается по ПРАВОМУ краю всегда, "
+             "и левый край окна проходит под лестницей",
+         file="tools/kl_z80_to_8080.py",
+         old=".kh2:\t\t\tcp\t\te\n\t\t\t\tjp\t\tc, khc_3",
+         new=".kh2:\t\t\tcp\t\te\n\t\t\t\tjp\t\tkhc_3"),
+    dict(name="hudrow", gate="hudguard_exit", env={"KLDIRS": "down", "KLLIVES": "1"},
+         why="обрезанное окно копируется на ИСХОДНУЮ строку приёмника, а не на первую строку поля",
+         file="tools/kl_z80_to_8080.py",
+         old="\t\t\t\tld\t\te, a\t\t\t\t; копировать с первой строки поля",
+         new="\t\t\t\tld\t\te, l\t\t\t\t; копировать с первой строки поля"),
     dict(name="tune", gate="tunecheck",
          why="команда END потока мелодии не распознаётся — проигрыватель не кончает мелодию",
          file="tools/kl_sound_ay.py",
@@ -129,6 +140,10 @@ GATES = {
     "hudcolor": None,          # особый: снять дамп и прогнать hudcolor.py
     "hudguard": ["node", "tools/hudguard_vec.js", "build/knightlore_vec.r0m",
                  "build/knightlore_vec.sld", "120", "1-4"],
+    # сценарий РЕАЛЬНОГО выхода через арки: комната «start» (номер не подменять) — только там
+    # герой ходит по-настоящему и доводит окно объекта до кромки комнаты, к лестнице панели (§30)
+    "hudguard_exit": ["node", "tools/hudguard_vec.js", "build/knightlore_vec.r0m",
+                      "build/knightlore_vec.sld", "120", "start"],
     "palcheck": None,          # особый: свой набор ключей сценария
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
