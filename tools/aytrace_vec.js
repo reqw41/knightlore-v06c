@@ -8,6 +8,8 @@
 //     --vi=файл          журнал OUT в ВИ53: «кадр порт значение» (порты 0x08..0x0B) -> tools/vicheck.py
 //     --key0=кадр        нажать «0» (старт игры) в этом кадре; N = число КАДРОВ (режим мелодий)
 //     --keys=кадр:клавиша:down|up,...   расписание нажатий (z x a q 0 space)
+//   НАЖИМАТЬ НЕ РАНЬШЕ КАДРА 90 (проверено 200): цикл меню заводится только к кадру ~87, до
+//   него клавиша пропадает молча. Стенд это ловит сам и выходит с rc=1 (см. сторож в конце, §28).
 //     --inputs=файл      сценарий ходьбы (inputs_alive.txt): N = число ИТЕРАЦИЙ игрового цикла,
 //                        стенд как в screendiff_vec.js (сид зафиксирован, ряды ZX кладутся
 //                        на границе итерации). Без этого режима в игре стенд разбегается —
@@ -79,10 +81,21 @@ io.output = function (port, w8) {
 };
 
 const MSXWR = L.msx_wr;
+// Сторож «нажатие дошло до игры» (§28). Нажатие ДО старта цикла меню (кадр < ~87) пропадает
+// молча: журнал остаётся журналом мотива меню, а сверщик прежде сверял его с моделью просимой
+// мелодии и печатал осмысленное на вид число расхождений. Признак «игра увидела клавишу» разный
+// у двух целей и НИКОГДА не совпадает с «звук заведён»: мотив меню сам перезаводится в
+// msx_play_tune по концу, поэтому по нему судить нельзя.
+//   jukebox: вход в jb_hit — таблица клавиш джукбокса опознала клавишу;
+//   vec + --key0: запись в curr_room_attrib — игра дошла до комнаты.
+const JBHIT = L.jb_hit, ROOMATTR = L.curr_room_attrib;
+const hits = [];     // кадры, в которых игра ОТРЕАГИРОВАЛА на клавишу
+let lastKeyFrame = -1;
 let steps = 0, frc = 0, tacc = 0;
 // ВИ53 тикает вдвое медленнее CPU (1.5 МГц): без этого секундомер бюджета di стоит на месте
 const step = () => {
   if (cpu.pc === MSXWR) log.push([frame, cpu.regs[1] & 0x0F, cpu.regs[0] & 0xFF]);
+  if (JBHIT !== undefined && cpu.pc === JBHIT) hits.push(frame);
   cpu.instruction(); const c = cpu.vcycles; steps++; frc += c;
   tacc += c; if (tacc > 1) { const tn = tacc >> 1; tacc -= tn * 2; timer.Count(tn); }
   if (cpu.last_opcode === 0xd3) io.commit();
@@ -104,12 +117,18 @@ if (!INPUTS) {
     if (m) (sched[+m[1]] = sched[+m[1]] || []).push([m[2], m[3] === "down"]);
   }
   const key0 = KEY0 === undefined ? -1 : +KEY0;
+  if (key0 >= 0) {   // «игра дошла до комнаты» — единственный надёжный признак, что «0» сработал
+    memory.write = function (a, w, s) {
+      if ((a & 0xffff) === ROOMATTR) hits.push(frame);
+      return ow(a & 0xffff, w, s);
+    };
+  }
   while (frame < NARG && steps < 4e8) {
     if (frc >= 59904) {
       frc -= 59904; frame++;
-      if (frame === key0) key("0", true);
+      if (frame === key0) { key("0", true); lastKeyFrame = Math.max(lastKeyFrame, frame); }
       if (frame === key0 + 3) key("0", false);
-      for (const [k, d] of (sched[frame] || [])) key(k, d);
+      for (const [k, d] of (sched[frame] || [])) { key(k, d); if (d) lastKeyFrame = Math.max(lastKeyFrame, frame); }
       v06c.irq = true; v06c.checkInterrupt();
     }
     step();
@@ -163,3 +182,18 @@ if (OUT) fs.writeFileSync(OUT, txt);
 if (VIOUT) fs.writeFileSync(VIOUT, vilog.map(r => r.join(" ")).join("\n") + "\n");
 process.stdout.write(`# режим ${SND}, кадров ${frame}${INPUTS ? ", итераций " + iters : ""}, инструкций ${steps}, записей AY ${log.length}, OUT в ВИ53 ${vilog.length}\n`);
 if (!OUT) process.stdout.write(txt);
+// Сторож нажатий (§28): было расписание — значит игра обязана была на него отреагировать.
+if (!INPUTS && lastKeyFrame >= 0 && (JBHIT !== undefined || KEY0 !== undefined)) {
+  const what = JBHIT !== undefined ? "jb_hit — опознание клавиши джукбокса" : "записи в curr_room_attrib";
+  const after = hits.filter(f => f >= lastKeyFrame);
+  if (!after.length) {
+    process.stderr.write(
+      `НАЖАТИЕ НЕ ДОШЛО ДО ИГРЫ: последнее нажатие в кадре ${lastKeyFrame}, после него ни одной реакции\n` +
+      `игры (признак: ${what})\n` +
+      `(всего ${hits.length}${hits.length ? ", кадры " + hits.slice(0, 8).join(",") : ""}).\n` +
+      `Цикл меню начинается только к кадру ~87: нажимать с кадра 90 и позже (проверено 200).\n` +
+      `Журнал записан, но он НЕ про нажатую клавишу — сверять его aycheck'ом бессмысленно.\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`# нажатие в кадре ${lastKeyFrame} дошло: реакция игры в кадре ${after[0]}\n`);
+}

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Сверка журнала записей в AY (tools/aytrace_vec.js) с эталонной моделью MSX.
 
-    python3 tools/aycheck.py <журнал.txt> <мелодия> <кадр старта> [--mode=a,b,c]
+    python3 tools/aycheck.py <журнал.txt> <мелодия> [<кадр старта>] [--mode=a,b,c]
 
 Мелодия: start_game | game_over | game_complete | menu | blip.
 --mode: режимы громкости каналов 0,1,2, оставшиеся от ПРЕДЫДУЩЕЙ мелодии (play_tune их не
@@ -10,6 +10,14 @@
 сразу с ноты. Играла menu -> --mode=0,1,2; играла start_game -> --mode=0,2,2.
 «Кадр старта» — кадр, в котором Вектор записал список инициализации PSG
 (R8=0 R9=0 R10=0 R7=0x38 R11=0 R12=8); первый тик мелодии приходится на следующий кадр.
+Без него берётся ПЕРВЫЙ кусок журнала, длина которого совпала с моделью просимой мелодии
+(а если такого нет — первый кусок вообще, и сверка краснеет «НЕ ТА МЕЛОДИЯ»).
+
+ОПОЗНАНИЕ МЕЛОДИИ (§28). Журнал режется на куски по собственным границам мелодии: начало —
+список инициализации PSG, конец — четвёрка глушения R7=0xBF R8=0 R9=0 R10=0. Длина куска
+сравнивается с длиной модели ДО поканальной сверки. Без этого сверщик молча брал первый
+попавшийся кусок и первые len(модель) записей из него: журнал с мелодией МЕНЮ, сверенный
+с моделью start_game, давал «76 расхождений» — число, которое не значит ничего.
 
 Эталон — msx_psg_model.py из ~/projects/knightlore-research/msx (проверен поэлементно
 против прогона настоящего кода игры на Z80-интерпретаторе, verify_log.txt).
@@ -44,13 +52,41 @@ def split(writes, key):
 
 
 INIT_PAT = [(8, 0), (9, 0), (10, 0), (7, 0x38), (11, 0), (12, 8)]   # список инициализации PSG
+STOP_REGS = [7, 8, 9, 10]                                          # глушение: R7=0xBF, громкости 0
+STOP_VALS = [None, 0, 0, 0]                                        # им кончается КАЖДАЯ из пяти мелодий
+
+
+def segments(raw):
+    """Куски журнала «мелодия целиком»: [(индекс начала, кадр начала, число записей, кадр конца)].
+
+    Начало — список инициализации PSG, конец — четвёрка глушения включительно. Кусок без
+    глушения (мелодия ещё играет в конце прогона) даёт длину до конца журнала и конец None.
+    """
+    out = []
+    i = 0
+    while i < len(raw) - 6:
+        if [(r, v) for _, r, v in raw[i:i + 6]] != INIT_PAT:
+            i += 1
+            continue
+        end = None
+        j = i + 6
+        while j < len(raw) - 3:
+            if ([r for _, r, _ in raw[j:j + 4]] == STOP_REGS
+                    and [v for _, _, v in raw[j + 1:j + 4]] == [0, 0, 0]):
+                end = j + 4
+                break
+            j += 1
+        out.append((i, raw[i][0], (end if end is not None else len(raw)) - i,
+                    raw[end - 1][0] if end is not None else None))
+        i = end if end is not None else len(raw)
+    return out
 
 
 def main():
     argv = [a for a in sys.argv[1:] if not a.startswith('--')]
     modes = next((a.split('=', 1)[1] for a in sys.argv[1:] if a.startswith('--mode=')), None)
     logf, name = argv[0], argv[1]
-    after = int(argv[2]) if len(argv) > 2 else 0
+    after = int(argv[2]) if len(argv) > 2 else None
     p = M.Player(HEADERS[name])
     if modes:
         # Поле «режим громкости» канала MSX play_tune НЕ обнуляет (SOUND.md, «Замечание о дефекте»):
@@ -68,14 +104,48 @@ def main():
             continue
         a, b, c = line.split()
         raw.append((int(a), int(b), int(c)))
-    # найти список инициализации PSG — это старт мелодии
-    start = None
-    for i in range(len(raw) - 6):
-        if raw[i][0] >= after and [(r, v) for _, r, v in raw[i:i + 6]] == INIT_PAT:
-            start = i
-            break
-    assert start is not None, 'в журнале не найден список инициализации PSG после кадра %d' % after
-    f0 = raw[start][0]
+    # порезать журнал на куски «мелодия целиком» и ОПОЗНАТЬ нужный по длине куска (§28)
+    segs = segments(raw)
+    if not segs:
+        print('в журнале нет ни одной мелодии (не найден список инициализации PSG)')
+        return 1
+    print('кусков «мелодия целиком» в журнале: %d' % len(segs))
+    for i0, fs, ln, fe in segs:
+        print('  запись %4d, кадры %4d..%-5s записей %4d%s'
+              % (i0, fs, ('%d' % fe) if fe is not None else '?', ln,
+                 '' if fe is not None else '   (глушения нет — мелодия не кончилась в журнале)'))
+    if after is None:
+        cand = [s for s in segs if s[2] == len(p.writes)]
+        seg = cand[0] if cand else segs[0]
+    else:
+        cand = [s for s in segs if s[1] >= after]
+        if not cand:
+            print('в журнале нет мелодии, начинающейся с кадра %d или позже' % after)
+            return 1
+        seg = cand[0]
+    start, f0, seg_len = seg[0], seg[1], seg[2]
+    if seg_len != len(p.writes):
+        # СТОП ДО СВЕРКИ: иначе сверщик возьмёт первые len(модель) записей чужой мелодии и
+        # напечатает осмысленное на вид число расхождений, которое не значит ничего (§28).
+        lens = {}
+        for n, h in HEADERS.items():
+            q = M.Player(h)
+            q.run()
+            lens[n] = len(q.writes)
+        who = [n for n, l in lens.items() if l == seg_len]
+        print('НЕ ТА МЕЛОДИЯ: просили %s (модель %d записей), а в куске журнала %d.'
+              % (name, len(p.writes), seg_len))
+        if who:
+            print('  по длине это %s. Длины моделей: %s'
+                  % (' или '.join(who), ', '.join('%s %d' % kv for kv in sorted(lens.items()))))
+        else:
+            print('  ни одна из пяти моделей такой длины не даёт (мелодия оборвана клавишей'
+                  ' или журнал кончился раньше). Длины моделей: %s'
+                  % ', '.join('%s %d' % kv for kv in sorted(lens.items())))
+        print('  Стенд: клавишу нажимать ПОСЛЕ старта цикла меню (кадр >= 90; проверено 200),'
+              ' иначе нажатие пропадает и в журнале остаётся только мотив меню.')
+        print('ИТОГ: НЕ ТА МЕЛОДИЯ')
+        return 1
     # берём ровно столько записей, сколько даёт модель: любая посторонняя запись,
     # вклинившаяся в мелодию, сразу проявится расхождением значения
     got_all = raw[start:start + len(p.writes)]
