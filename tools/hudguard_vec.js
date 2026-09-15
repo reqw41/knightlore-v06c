@@ -18,7 +18,9 @@ const fs=require("fs"),vm=require("vm");
 const base="/Users/boris/projects/vector06js";
 const [ROM,SLD,NS,ROOMS]=process.argv.slice(2); const N=+NS||40;
 const L={};
-for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}}
+for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");
+  if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}
+  if(p.length>=8&&p[6]==="F"){const n=p[7].trim();if(n&&!(n in L))L[n]=+p[5];}}   // .локальные метки (loc_D653.copy_loop)
 // имя по адресу: ближайшая предыдущая метка (без внутренних .локальных)
 const fn=Object.entries(L).filter(([n,a])=>a>=0x80&&!/^\./.test(n)).sort((x,y)=>x[1]-y[1]);
 const fa=fn.map(x=>x[1]), fnm=fn.map(x=>x[0]);
@@ -26,6 +28,9 @@ function nameOf(pc){let lo=0,hi=fa.length-1,r=-1;while(lo<=hi){const m=(lo+hi)>>
   return r<0?("?"+pc.toString(16)):(fnm[r]+(pc-fa[r]?"+"+(pc-fa[r]):""));}
 const SEED2HI=L.seed_2+1, ROOM=L.curr_room_attrib, VKBD=L.vkbd, OBJ=L.graphic_objs_tbl;
 const BLIT=L.blit_to_screen, USCR=L.update_screen, HMASK=L.vec_hud_mask, HOFF=L.vec_hud_off;
+// .copy_loop — ЕДИНСТВЕННЫЙ путь объектов в блит. Окно берётся со стека (ещё ДО клипа), поэтому
+// видно и то, что клип отрезал: на входе SP -> [ширина/высота][источник][приёмник].
+const CLOOP=L["loc_D653.copy_loop"];
 for(const [n,v] of [["blit_to_screen",BLIT],["update_screen",USCR],["vec_hud_mask",HMASK]])
   if(v===undefined)throw new Error("нет метки "+n);
 const lst=fs.readFileSync(ROM.replace(/\.r0m$/,".lst"),"latin1").split("\n");
@@ -73,7 +78,7 @@ for(const y of [0x20,0x28,0xE0,0xD8]) for(const x of [0x20,0x28,0xE0,0xD8]) for(
 // --- сводные счётчики ---
 const S={blits:0, hudBlits:0, clipped:0, insideHud:0, writesHud:0, badBlits:new Map(), owners:new Map(),
          writeOwners:new Map(), minRow:255, minRowOwner:"", roomsOk:0, roomsBad:0, plane2:0,
-         objMinL:255, objMinTop:255, objMinTopWin:""};
+         objMinL:255, objMinTop:255, objMinTopWin:"", objHud:0, objClip:0, objSkip:0};
 const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
 
 function runRoom(room){
@@ -123,11 +128,6 @@ function runRoom(room){
       if(b>0&&c>0&&h>=0xA0&&h<0xC0){                   // окно в буфере (иначе vec_clip_cols его выбросит)
         const top=l+b-1;
         if(l<r.minRow){r.minRow=l;}
-        if(!PANEL.test(owner)){            // ЗАПАС ОБЪЕКТОВ: насколько низко доходит окно НЕ панели
-          if(l<S.objMinL)S.objMinL=l;
-          if(top<S.objMinTop){S.objMinTop=top;S.objMinTopWin=`${owner} ${h.toString(16)}:${l}..${top} x${c}`;}
-          if(top<r.objTop)r.objTop=top;
-        }
         if(l<=HUD1){                                    // окно достаёт до строк панели
           S.hudBlits++; r.hud++; bump(S.owners, (top<=HUD1?"целиком в HUD: ":"пересекает границу: ")+owner+` ${h.toString(16)}:${l}..${top} x${c}`, 1);
           if(top<=HUD1){ S.insideHud++; r.inside++;      // ЦЕЛИКОМ внутри HUD — клип его не тронет
@@ -136,6 +136,13 @@ function runRoom(room){
           else { S.clipped++; r.clip++; }
         }
       }
+    } else if(pc===CLOOP){                     // окно объекта ДО клипа
+      const sp=cpu.sp&0xffff, b=rd(sp+1), l=rd(sp+2);
+      if(b>0){ const top=l+b-1;
+        if(l<S.objMinL)S.objMinL=l;
+        if(top<S.objMinTop){S.objMinTop=top;S.objMinTopWin=`${rd(sp+3).toString(16)}:${l}..${top} x${rd(sp)}`;}
+        if(top<r.objTop)r.objTop=top;
+        if(l<=HUD1){ S.objHud++; if(top<=HUD1)S.objSkip++; else S.objClip++; } }
     } else if(pc===USCR){ owner="update_screen <- "+nameOf(curPC); }
     else if(pc===HMASK||pc===HOFF){ owner="vec_hud_mask"; }
     curPC=pc;
@@ -174,8 +181,8 @@ for(const room of rooms){
 fs.writeFileSync(process.env.KLCSV||"build/hudguard.csv",csv.join("\n")+"\n");
 console.log(`комнат валидных ${valid} из ${rooms.length}, направлений ${DIRS.join("/")} по ${N} итераций${FORCE?", + принудительные крайние X/Y/Z":""}`);
 console.log(`блитов всего ${S.blits}; окон, достающих до строк HUD (<=63): ${S.hudBlits}; из них ОТКЛИПАНО (пересекали границу) ${S.clipped}, целиком внутри HUD ${S.insideHud}`);
-console.log(`окна ОБЪЕКТОВ (не панели): самая нижняя строка начала ${S.objMinL}, самая нижняя ВЕРХНЯЯ строка ${S.objMinTop} (${S.objMinTopWin})`);
-console.log(`   порог: окно объекта, у которого и начало, и верх ниже 64, клип НЕ режет — значит запас = ${S.objMinTop-63} строк`);
+console.log(`окна ОБЪЕКТОВ на входе .copy_loop (ДО клипа): достают до строк панели ${S.objHud}, из них ОБРЕЗАНО по строке 64: ${S.objClip}, ПРОПУЩЕНО целиком (окно внутри панели): ${S.objSkip}`);
+console.log(`   самое нижнее окно объекта ДО клипа: начало ${S.objMinL}, верх ${S.objMinTop} (${S.objMinTopWin}) -> запас до полосы панели ${S.objMinTop-63} строк`);
 console.log(`записей в строки 32..63 плоскостей 0/2: ${S.writesHud} (в плоскость 2: ${S.plane2}); самая нижняя строка окна за прогон: ${S.minRow}`);
 console.log("окна, достающие до строк HUD (место вызова blit_to_screen, окно = страница:строки xстолбцов):");
 for(const [k,v] of [...S.owners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
