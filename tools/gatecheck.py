@@ -85,6 +85,11 @@ MUTS = [
          file="tools/kl_z80_to_8080.py",
          old="DB\t\t0xC4, 2, 64,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71",
          new="DB\t\t0xC4, 2, 68,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71"),
+    dict(name="hudclip", gate="hudguard",
+         why="снят клип блита по границе HUD — окно объекта у нижней кромки затирает панель",
+         file="tools/kl_z80_to_8080.py",
+         old=T*4 + "cp" + T*2 + "65\n" + T*4 + "jp" + T*2 + "c, bts_yok\n",
+         new=T*4 + "cp" + T*2 + "65\n" + T*4 + "jp" + T*2 + "bts_yok\n"),
     dict(name="tune", gate="tunecheck",
          why="команда END потока мелодии не распознаётся — проигрыватель не кончает мелодию",
          file="tools/kl_sound_ay.py",
@@ -116,6 +121,8 @@ GATES = {
     "inputcheck": ["node", "tools/inputcheck_vec.js", "build/knightlore_vec.r0m", "build/knightlore_vec.sld"],
     "tunecheck": ["node", "tools/tunecheck_vec.js", "build/knightlore_vec.r0m", "build/knightlore_vec.sld", "3000"],
     "hudcolor": None,          # особый: снять дамп и прогнать hudcolor.py
+    "hudguard": ["node", "tools/hudguard_vec.js", "build/knightlore_vec.r0m",
+                 "build/knightlore_vec.sld", "120", "1-4"],
     "palcheck": None,          # особый: свой набор ключей сценария
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
