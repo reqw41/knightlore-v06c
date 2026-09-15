@@ -38,10 +38,13 @@ const BLIT=L.blit_to_screen, USCR=L.update_screen, HMASK=L.vec_hud_mask, HOFF=L.
 // .copy_loop — ЕДИНСТВЕННЫЙ путь объектов в блит. Окно берётся со стека (ещё ДО клипа), поэтому
 // видно и то, что клип отрезал: на входе SP -> [ширина/высота][источник][приёмник].
 const CLOOP=L["loc_D653.copy_loop"];
-// ПРОЦЕДУРЫ, РИСУЮЩИЕ ПАНЕЛЬ В БУФЕР (блок перерисовки панели, render_status_info != 0): по их
-// ненулевым записям снимается зона панели. colour_* на Векторе пусты, но в списке не мешают.
-const PDRAW=["display_panel","print_lives_gfx","print_lives","display_day","print_days",
-             "display_objects","display_sun_moon_frame"].map(n=>L[n]).filter(x=>x!==undefined);
+// ПРОЦЕДУРЫ, РИСУЮЩИЕ ПАНЕЛЬ ВЫШЕ СТРОКИ 63: по их записям снимается зона (строки 32..63 в зоне
+// всегда, мерить их не нужно). Список УЗКИЙ намеренно: `display_objects` сюда класть НЕЛЬЗЯ — в
+// него ПРОВАЛИВАЕТСЯ display_objects_carried из объектного рендера, и тогда «фаза панели»
+// включалась бы посреди отрисовки объектов, а в зону попадали бы их пиксели (ловушка: гейт
+// краснел на исправной сборке, см. §30.5). display_sun_moon_frame, print_days и display_day
+// рисуют только внутри полосы 32..63 — они тоже не нужны.
+const PDRAW=["display_panel","print_lives_gfx","print_lives"].map(n=>L[n]).filter(x=>x!==undefined);
 for(const [n,v] of [["blit_to_screen",BLIT],["update_screen",USCR],["vec_hud_mask",HMASK]])
   if(v===undefined)throw new Error("нет метки "+n);
 const lst=fs.readFileSync(ROM.replace(/\.r0m$/,".lst"),"latin1").split("\n");
