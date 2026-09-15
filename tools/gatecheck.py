@@ -86,10 +86,16 @@ MUTS = [
          old="DB\t\t0xC4, 2, 64,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71",
          new="DB\t\t0xC4, 2, 68,  8, 0xFF\t; цифры жизней: столбцы 4..5, строки 64..71"),
     dict(name="hudclip", gate="hudguard",
-         why="снят клип блита по границе HUD — окно объекта у нижней кромки затирает панель",
-         file="tools/kl_z80_to_8080.py",
-         old=T*4 + "cp" + T*2 + "65\n" + T*4 + "jp" + T*2 + "c, bts_yok\n",
-         new=T*4 + "cp" + T*2 + "65\n" + T*4 + "jp" + T*2 + "bts_yok\n"),
+         why="снят клип по границе HUD — окно объекта, пересекающее границу, затирает панель",
+         file="tools/kl_native_logic.py",
+         old='"\\t\\t\\t\\tld\\t\\ta, l\\n\\t\\t\\t\\tcp\\t\\t64\\n\\t\\t\\t\\tjp\\t\\tnc, .kcl_go\\n"',
+         new='"\\t\\t\\t\\tld\\t\\ta, l\\n\\t\\t\\t\\tcp\\t\\t64\\n\\t\\t\\t\\tjp\\t\\t.kcl_go\\n"'),
+    dict(name="hudinside", gate="hudguard", env={"KLFORCEZ": "0,4,8,12,16,20"},
+         why="окно объекта ЦЕЛИКОМ внутри полосы панели снова копируется (состояние до §29): "
+             "герой с низким Z (падение) затирает панель",
+         file="tools/kl_native_logic.py",
+         old='"\\t\\t\\t\\tjp\\t\\tc, .kcl_next\\t\\t\\t; окно целиком в строках панели — не копировать вовсе\\n"',
+         new='"\\t\\t\\t\\tjp\\t\\tc, .kcl_go\\t\\t\\t; окно целиком в строках панели — не копировать вовсе\\n"'),
     dict(name="tune", gate="tunecheck",
          why="команда END потока мелодии не распознаётся — проигрыватель не кончает мелодию",
          file="tools/kl_sound_ay.py",
@@ -189,7 +195,7 @@ def main():
     for m in MUTS:
         if want and m["name"] not in want:
             continue
-        env = {}
+        env = dict(m.get("env") or {})
         if m["name"] == "plane2":
             env["KL_GATECHECK_PLANE2"] = "1"
         if m["name"] == "i8080":

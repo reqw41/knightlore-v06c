@@ -54,12 +54,17 @@ const HUD0=32, HUD1=63;                        // строки памяти, г�
 // display_frame+  рамка и знак солнца/луны;  loc_BF91+  блит ячейки предмета (display_object);
 // blit_2x8+       счётчик дней и цифры жизней;  update_screen  копия буфера на экран в блоке
 // перерисовки панели и при смене комнаты;  vec_hud_mask  маска плоскости 2;  kl_unbar  выход из меню.
-const PANEL=/^(display_frame\+|loc_BF91\+|blit_2x8\+|update_screen( |$)|vec_hud_mask$|kl_unbar\+|вход в комнату)/;
+// clr_byte и update_screen <- loc_BA79 — экраны БЕЗ панели (game over, финал): там строки 32..63
+// чистит и перерисовывает сама игра, а маску снимает vec_hud_off из print_border (§17.5.1).
+const PANEL=/^(display_frame\+|loc_BF91\+|blit_2x8\+|update_screen( |$)|vec_hud_mask$|kl_unbar\+|clr_byte|вход в комнату)/;
 const rooms = !ROOMS||ROOMS==="all" ? [...Array(256).keys()]
   : ROOMS.includes("-") ? (([a,b])=>Array.from({length:b-a+1},(_,i)=>a+i))(ROOMS.split("-").map(Number))
   : ROOMS.split(",").map(Number);
 const DIRS=(process.env.KLDIRS||"n,left,right,up,down").split(",");
 const FORCE=!!process.env.KLFORCE;
+// KLFORCEZ=список — принудительно занижать ТОЛЬКО Z героя (падение в яму/провал пола), X и Y
+// оставлены игре: так проверяется случай, до которого ходьба по комнате может не дойти.
+const FZ=(process.env.KLFORCEZ||"").split(",").filter(Boolean).map(Number);
 // Сетка принудительных положений героя: крайние X/Y комнаты (стены Knight Lore стоят по 0x20/0xE0)
 // и два Z — пол и прыжок. Порядок обхода — по одной позиции на итерацию.
 const GRID=[];
@@ -143,6 +148,7 @@ function runRoom(room){
     if(d!=="n"){key(d,true);held=d;}
     const to=iter+N;
     while(iter<to&&steps<stepLimit){
+      if(FZ.length){const z=FZ[pos++%FZ.length];ow(OBJ+3,z,false);ow(OBJ+35,(z+12)&0xff,false);}
       if(FORCE){const [x,y,z]=GRID[pos++%GRID.length];
         ow(OBJ+1,x,false);ow(OBJ+2,y,false);ow(OBJ+3,z,false);
         ow(OBJ+33,x,false);ow(OBJ+34,y,false);ow(OBJ+35,(z+12)&0xff,false);}
@@ -175,9 +181,9 @@ console.log("окна, достающие до строк HUD (место выз
 for(const [k,v] of [...S.owners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
 console.log("владельцы записей в строки 32..63 плоскостей 0 и 2:");
 for(const [k,v] of [...S.writeOwners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
-if(S.badBlits.size){console.log("НАРУШИТЕЛИ (окно целиком в строках HUD, хозяин — не процедура панели):");
-  for(const [k,v] of [...S.badBlits].sort((a,b)=>b[1]-a[1]).slice(0,40))console.log(`   ${String(v).padStart(7)}  ${k}`);}
 for(const [k,v] of S.writeOwners) if(!PANEL.test(k.replace(/ \[p2\]$/,""))) bump(S.badBlits,"записи в строки HUD не от панели: "+k,v);
+if(S.badBlits.size){console.log("НАРУШИТЕЛИ:");
+  for(const [k,v] of [...S.badBlits].sort((a,b)=>b[1]-a[1]).slice(0,40))console.log(`   ${String(v).padStart(7)}  ${k}`);}
 const bad=S.badBlits.size;
 console.log(bad?`ГЕЙТ КРАСНЫЙ: нарушителей ${bad}`:"ГЕЙТ ЗЕЛЁНЫЙ: панель не затирает никто, кроме процедур панели");
 process.exit(bad?1:0);

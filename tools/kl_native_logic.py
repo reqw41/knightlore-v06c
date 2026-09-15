@@ -2830,6 +2830,22 @@ def apply(src, attrs_cut=False):
                        'снятие exx у вызывателя display_text_list (' + lbl + ')')
         # loc_D653/.copy_loop: счётчик копий жил в AF' (2 x ex af,af' = 42 Б после трансляции).
         # Стек занят параметрами blit_to_screen (pop bc/hl/de), поэтому счётчик — в ячейку kl_cpcnt.
+        # КЛИП ПО ГРАНИЦЕ HUD (переехал сюда из blit_to_screen, §29). Полоса панели — строки 32..63
+        # раскладки Вектора. Панель живёт ТОЛЬКО на экране: update_screen копирует буфер и тут же
+        # его обнуляет, поэтому окно объекта, попавшее в строки панели, копирует на неё нули.
+        # Окно, ПЕРЕСЕКАЮЩЕЕ границу, обрезается до строки 64; окно ЦЕЛИКОМ внутри полосы не
+        # копируется вовсе. В blit_to_screen эту проверку держать было нельзя: туда же приходят
+        # окна самой панели (рамка солнца 32..62, ячейки предметов 32..55, счётчик дней 32..39),
+        # и «целиком внутри» для них — норма. Через .copy_loop окна панели не идут ни одно.
+        src = _sub(src, r"(?m)^[ \t]*; copy object from video buffer to screen\r?\n[ \t]*call[ \t]+blit_to_screen[^\n]*\r?\n",
+                   "\t\t\t\tld\t\ta, l\n\t\t\t\tcp\t\t64\n\t\t\t\tjp\t\tnc, .kcl_go\n"
+                   "\t\t\t\tadd\t\ta, b\n\t\t\t\tcp\t\t65\n"
+                   "\t\t\t\tjp\t\tc, .kcl_next\t\t\t; окно целиком в строках панели — не копировать вовсе\n"
+                   "\t\t\t\tsub\t\t64\n\t\t\t\tld\t\tb, a\n\t\t\t\tld\t\tl, 64\n\t\t\t\tld\t\te, 64\n"
+                   ".kcl_go:\t\t; copy object from video buffer to screen\n"
+                   "\t\t\t\tcall    blit_to_screen\n"
+                   ".kcl_next:\n",
+                   'loc_D653 .copy_loop: клип по границе HUD')
         src = _sub(src, r"(?m)^\.copy_loop:[ \t]*ex[ \t]+af,[ \t]*af'[^\n]*\n",
                    "\t\t\t\t; счётчик копий: blit_to_screen портит A, а стек занят параметрами\n"
                    ".copy_loop:\t\tld\t\t(kl_cpcnt), a\n", 'loc_D653 .copy_loop вход')
