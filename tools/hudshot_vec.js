@@ -139,10 +139,18 @@ const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const pal=[];for(let i=0;i<16;i++){const w=rd(L.vec_pal+i);
   const b=(w&0xc0)>>6,gr=(w&0x38)>>3,r=(w&0x07);
   pal.push([r<<5,gr<<5,b<<6]);}
+if(L.sun_moon_scratchpad!==undefined&&L.days!==undefined)
+  console.log(`знак: спрайт ${rd(L.sun_moon_scratchpad).toString(16)} (58 = солнце, 59 = луна), X ${rd(L.sun_moon_scratchpad+26)}, days ${rd(L.days).toString(16)}, жизней ${L.lives!==undefined?rd(L.lives):"?"}`);
 console.log("vec_pal: "+[...Array(16)].map((_,i)=>i.toString(16)+"="+rd(L.vec_pal+i).toString(16).padStart(2,"0")).join(" "));
 
 // KLDUMP=файл: плоскости 0 и 2 строками памяти (строка = "<строка памяти> <256 символов>"), для разбора зон
-if(process.env.KLDUMP){const out=["pal "+[...Array(16)].map((_,i)=>rd(L.vec_pal+i).toString(16).padStart(2,"0")).join(" ")];let r0=32,r1=95;if(process.env.KLDROWS){const m=process.env.KLDROWS.split(",");r0=+m[0];r1=+m[1];}
+if(process.env.KLDUMP){const out=["pal "+[...Array(16)].map((_,i)=>rd(L.vec_pal+i).toString(16).padStart(2,"0")).join(" ")];
+  // ЗОНЫ HUD ИЗ ОБРАЗА, а не константой в разборщике: vec_hudcols — маска плоскости 2 (где перо
+  // HUD вместо цвета комнаты), vec_hudbuf — ЖЁЛТЫЕ зоны (там vec_hud_p1 держит p1 = p0, §32).
+  // Запись 5 байт: страница приёмника (0xC0+столбец или 0xA0+столбец), столбцов, первая строка,
+  // строк, значение. Конец — нулевая страница.
+  for(const lbl of ["vec_hudcols","vec_hudbuf"]){ if(L[lbl]===undefined)continue;
+    for(let a=L[lbl]; rd(a); a+=5) out.push(`zone ${lbl} ${rd(a)} ${rd(a+1)} ${rd(a+2)} ${rd(a+3)} ${rd(a+4)}`); }let r0=32,r1=95;if(process.env.KLDROWS){const m=process.env.KLDROWS.split(",");r0=+m[0];r1=+m[1];}
   for(let mrow=r1;mrow>=r0;mrow--){let s0="",s1="",s2="",s3="";
     for(let col=0;col<32;col++){const b0=rd(0x8000+(col<<8)+mrow),b1=rd(0xA000+(col<<8)+mrow),b2=rd(0xC000+(col<<8)+mrow),b3=rd(0xE000+(col<<8)+mrow);
       for(let bit=7;bit>=0;bit--){s0+=((b0>>bit)&1)?"#":".";s1+=((b1>>bit)&1)?"#":".";s2+=((b2>>bit)&1)?"#":".";s3+=((b3>>bit)&1)?"#":".";}}

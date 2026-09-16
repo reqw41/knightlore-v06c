@@ -107,6 +107,25 @@ MUTS = [
          file="tools/kl_z80_to_8080.py",
          old="\t\t\t\tld\t\te, a\t\t\t\t; копировать с первой строки поля",
          new="\t\t\t\tld\t\te, l\t\t\t\t; копировать с первой строки поля"),
+    # --- ВТОРОЕ ПЕРО HUD (§32) ---
+    dict(name="hudpen", gate="hudguard_items", env={"KLDIRS": "down", "KLITEMS": "1", "KLLIVES": "1"},
+         why="vec_hud_p1 берёт силуэт не из плоскости 0, а из чужой страницы — под жёлтыми зонами "
+             "p1 расходится с картинкой, предметы и знак красятся наполовину",
+         file="tools/kl_z80_to_8080.py",
+         old="\t\t\t\tld\t\ta, 0x20\t\t\t\t; приёмник 0xA0+столбец (буфер), источник 0x80+столбец",
+         new="\t\t\t\tld\t\ta, 0x40\t\t\t\t; приёмник 0xA0+столбец (буфер), источник 0x80+столбец"),
+    dict(name="hudcsb", gate="hudguard_items", env={"KLDIRS": "down", "KLITEMS": "1", "KLLIVES": "1"},
+         why="clear_scrn_buffer не возвращает p1 после обнуления буфера — на итерации смены комнаты "
+             "предметы выходят белыми (ловится ТОЛЬКО сценарием реального выхода через арку)",
+         file="tools/kl_z80_to_8080.py",
+         old="\\t\\t\\t\\tjp      vec_hud_p1\\t\\t\\t\\t; буфер под жёлтыми зонами обнулён -> вернуть p1 := p0 (§32)",
+         new="\\t\\t\\t\\tret\\t\\t\\t\\t; буфер под жёлтыми зонами обнулён -> вернуть p1 := p0 (§32)"),
+    dict(name="hud2x8", gate="hudcolor_day",
+         why="blit_2x8 оставляет цифры в буфере — после смены дня счётчик красится вторым пером "
+             "(дефект 1 из 2cdd694)",
+         file="tools/kl_z80_to_8080.py",
+         old="        '\\t\\t\\t\\tjp      vidbuf_fill_window\\n', src, count=1)",
+         new="        '\\t\\t\\t\\tret\\n', src, count=1)"),
     dict(name="tune", gate="tunecheck",
          why="команда END потока мелодии не распознаётся — проигрыватель не кончает мелодию",
          file="tools/kl_sound_ay.py",
@@ -144,6 +163,11 @@ GATES = {
     # герой ходит по-настоящему и доводит окно объекта до кромки комнаты, к лестнице панели (§30)
     "hudguard_exit": ["node", "tools/hudguard_vec.js", "build/knightlore_vec.r0m",
                       "build/knightlore_vec.sld", "120", "start"],
+    # тот же сценарий, но с предметами в инвентаре: без них ЖЁЛТАЯ зона предметов пуста,
+    # и инвариант второго пера (§32) по ней ничего не проверяет
+    "hudguard_items": ["node", "tools/hudguard_vec.js", "build/knightlore_vec.r0m",
+                       "build/knightlore_vec.sld", "120", "start"],
+    "hudcolor_day": None,      # особый: снимок ПОСЛЕ смены дня (счётчик печатает blit_2x8)
     "palcheck": None,          # особый: свой набор ключей сценария
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
@@ -182,6 +206,20 @@ def gate_result(gate, env=None):
         e.update(env or {})
         r = run(["node", "tools/palcheck_vec.js", "build/knightlore_vec.r0m",
                  "build/knightlore_vec.sld", "500"], e)
+        return r.returncode, (r.stdout + r.stderr)[-400:]
+    if gate == "hudcolor_day":
+        # СМЕНА ДНЯ БЕЗ ТЫСЯЧИ ИТЕРАЦИЙ: знак идёт по арке на 1 точку за 8 итераций и меняет
+        # день, дойдя до X=225. Кладём X=224 дважды (первый переход — на луну, день растёт на
+        # втором), и счётчик перепечатывается через print_days + blit_2x8 уже к итерации 60.
+        b = build("vec", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        e = {"KLGAG": "1", "KLLIVES": "1", "KLDUMP": "build/gc_dump.txt",
+             "KLPOKE": "sun_moon_scratchpad+26=224@5;sun_moon_scratchpad+26=224@30"}
+        e.update(env or {})
+        run(["node", "tools/hudshot_vec.js", "build/knightlore_vec.r0m", "build/knightlore_vec.sld",
+             "60", "build/gc.png"], e)
+        r = run(["python3", "tools/hudcolor.py", "build/gc_dump.txt"], env)
         return r.returncode, (r.stdout + r.stderr)[-400:]
     if gate == "hudcolor":
         b = build("vec", env)

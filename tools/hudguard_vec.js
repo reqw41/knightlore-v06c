@@ -93,11 +93,26 @@ const FORCE=!!process.env.KLFORCE;
 const FZ=(process.env.KLFORCEZ||"").split(",").filter(Boolean).map(Number);
 // Сетка принудительных положений героя: крайние X/Y комнаты (стены Knight Lore стоят по 0x20/0xE0)
 // и два Z — пол и прыжок. Порядок обхода — по одной позиции на итерацию.
-const GRID=[];
-for(const y of [0x20,0x28,0xE0,0xD8]) for(const x of [0x20,0x28,0xE0,0xD8]) for(const z of [0x20,0x30,0x50]) GRID.push([x,y,z]);
+// KLGRID2=x-список/y-список/z-список (шестнадцатеричные, через запятую) — сузить сетку до
+// ДОСТИЖИМЫХ ходьбой положений: 0x20 и 0xE0 — это сами стены, туда герой сам не заходит.
+const GRID=[]; {const d=(process.env.KLGRID2||"20,28,E0,D8/20,28,E0,D8/20,30,50").split("/")
+  .map(t=>t.split(",").map(v=>parseInt(v,16)));
+  for(const y of d[1]) for(const x of d[0]) for(const z of d[2]) GRID.push([x,y,z]);}
 
 // --- сводные счётчики ---
+// ---- ВТОРОЕ ПЕРО HUD (§32): цвет внутри зон маски выбирает p1 (буфер рендера) ----
+// Зоны читаются ИЗ ОБРАЗА: vec_hudcols — вся маска HUD, vec_hudbuf — ЖЁЛТЫЕ зоны (предметы и знак
+// солнца/луны). Инвариант, который здесь сторожится НА КАЖДОЙ ГРАНИЦЕ ИТЕРАЦИИ:
+//   в ЖЁЛТОЙ зоне  p0=1 -> p1=1  (иначе элемент выйдет белым: буфер под ним потеряли);
+//   в БЕЛОЙ  зоне  p0=1 -> p1=0  (иначе цифра выйдет жёлтой: под ней осталась копия в буфере).
+// Байт целиком лежит внутри зоны или вне её (зоны нарезаны по столбцам), поэтому проверка побайтная.
+function readZones(base){const z=[];if(L[base]===undefined)return z;
+  for(let a=L[base];rd(a);a+=5)z.push({pg:rd(a),nc:rd(a+1),r0:rd(a+2),nr:rd(a+3)});return z;}
+function zoneBytes(z,base){const s=new Set();
+  for(const e of z)for(let c=e.pg-base;c<e.pg-base+e.nc;c++)for(let r=e.r0;r<e.r0+e.nr;r++)s.add((c<<8)|r);
+  return s;}
 const S={blits:0, hudBlits:0, clipped:0, insideHud:0, writesHud:0, badBlits:new Map(), owners:new Map(),
+         xyz:{x0:255,x1:0,y0:255,y1:0,z0:255,z1:0}, penBad:0, penFrames:0, penWorst:new Map(), penIter:new Map(), penKill:new Map(),
          writeOwners:new Map(), minRow:255, minRowOwner:"", roomsOk:0, roomsBad:0, plane2:0,
          objMinL:255, objMinTop:255, objMinTopWin:"", objHud:0, objClip:0, objSkip:0, exits:0, footAbove:0, exitBy:new Map()};
 const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
@@ -124,6 +139,11 @@ function runRoom(room){
     // там, где у самой панели точек нет: прогон с принудительной сеткой ловил на этом 3 ложных
     // нарушителя (зона раздувалась пикселями объектов, и законный блит объекта попадал в неё).
     if(panelPhase&&a>=0xA000&&a<0xC000&&(w&~rd(a)&0xFF))foot[(((a>>8)&0x1F)<<8)|(a&0xFF)]=1;
+    // КТО ГАСИТ ВТОРОЕ ПЕРО: запись в буфер, которая снимает p1 там, где в плоскости 0 точка есть,
+    // внутри ЖЁЛТОЙ зоны (элемент побелеет). Имя — последняя вошедшая процедура-писатель экрана.
+    if(g.ZY&&phase==="game"&&a>=0xA000&&a<0xC000){const k=(((a>>8)&0x1F)<<8)|(a&0xFF);
+      if(g.ZY.has(k)){const lost=rd(a)&~w&rd(0x8000+((a&0x1F00))+(a&0xFF))&0xFF;
+        if(lost)bump(S.penKill, nameOf(curPC), 1);}}
     if(phase==="game"){
       const row=a&0xFF, col=(a>>8)&0x1F;
       if(((row>=HUD0&&row<=HUD1)||foot[(col<<8)|row])&&((a>=0x8000&&a<0xA000)||(a>=0xC000&&a<0xE000))){
@@ -142,6 +162,18 @@ function runRoom(room){
   let guard=0; while(phase!=="game"&&guard++<4000)v06c.oneInterrupt(true);
   if(phase!=="game")return null;                       // номер комнаты невалиден
   scripted=true;
+  // зоны второго пера — из образа (см. выше); маска минус жёлтые = белые зоны
+  const ZY=zoneBytes(readZones("vec_hudbuf"),0xA0), ZM=zoneBytes(readZones("vec_hudcols"),0xC0); g.ZY=ZY;
+  // KLNOPEN=1 — НЕ проверять второе перо. Нужно ровно для прогона с ПОЛНОЙ сеткой KLFORCE:
+  // она ставит героя на 0x30..0x60 НИЖЕ пола (естественная высота Z = 0x80), и стирание объекта
+  // законно трёт буфер под ячейками предметов — инвариант второго пера там неприменим (§32).
+  const penCheck=ZY.size>0&&ZM.size>0&&!process.env.KLNOPEN;
+  function checkPen(){ S.penFrames++;
+    for(const k of ZM){ const col=k>>8, row=k&0xFF;
+      const b0=rd(0x8000+(col<<8)+row), b1=rd(0xA000+(col<<8)+row);
+      const bad = ZY.has(k) ? (b0&~b1&0xFF) : (b0&b1&0xFF);
+      if(bad){ S.penBad++; bump(S.penWorst, `${ZY.has(k)?"жёлтая":"белая"} зона, столбец ${col} строка ${row}`, 1);
+               bump(S.penIter, `итерация ${iter}`, 1); } } }
   let frc=0,tacc=0,start=iter,dir=0,held=null,curRoom=rd(OBJ+8);
   const stepLimit=3e8;
   const step=()=>{
@@ -201,7 +233,17 @@ function runRoom(room){
       if(FORCE){const [x,y,z]=GRID[pos++%GRID.length];
         ow(OBJ+1,x,false);ow(OBJ+2,y,false);ow(OBJ+3,z,false);
         ow(OBJ+33,x,false);ow(OBJ+34,y,false);ow(OBJ+35,(z+12)&0xff,false);}
+      // KLITEMS=1 — три предмета в инвентаре с первой же итерации: без них ЖЁЛТАЯ зона предметов
+      // пуста (p0=0), и проверка второго пера по ней ничего не проверяет.
+      if(process.env.KLITEMS&&L.objects_carried!==undefined&&rd(L.objects_carried)!==96){
+        ow(L.objects_carried,96,false);ow(L.objects_carried+4,97,false);ow(L.objects_carried+8,98,false);
+        ow(L.objects_carried_changed,1,false);}
       const it0=iter; while(iter===it0&&steps<stepLimit)step();
+      { const x=rd(OBJ+1),y=rd(OBJ+2),z=rd(OBJ+3);   // ДИАПАЗОН ХОДЬБЫ героя (для выбора сетки KLFORCE)
+        S.xyz.x0=Math.min(S.xyz.x0,x);S.xyz.x1=Math.max(S.xyz.x1,x);
+        S.xyz.y0=Math.min(S.xyz.y0,y);S.xyz.y1=Math.max(S.xyz.y1,y);
+        S.xyz.z0=Math.min(S.xyz.z0,z);S.xyz.z1=Math.max(S.xyz.z1,z); }
+      if(penCheck)checkPen();
       if(process.env.KLLIVES)ow(L.lives,5,false);
       const rr=rd(OBJ+8); if(rr!==curRoom){bump(S.exitBy,`${d}: ${curRoom}->${rr}`,1);curRoom=rr;r.exits++;S.exits++;}   // РЕАЛЬНЫЙ выход через арку
     }
@@ -235,6 +277,13 @@ for(const [k,v] of [...S.owners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String
 console.log("владельцы записей в строки 32..63 плоскостей 0 и 2:");
 for(const [k,v] of [...S.writeOwners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
 for(const [k,v] of S.writeOwners) if(!PANEL.test(k.replace(/ \[p2\]$/,""))) bump(S.badBlits,"записи в строки HUD не от панели: "+k,v);
+console.log(`герой за прогон: X ${S.xyz.x0.toString(16)}..${S.xyz.x1.toString(16)}, Y ${S.xyz.y0.toString(16)}..${S.xyz.y1.toString(16)}, Z ${S.xyz.z0.toString(16)}..${S.xyz.z1.toString(16)} (шестнадцатеричные)`);
+console.log(process.env.KLNOPEN?"второе перо (p1 под зонами маски): НЕ ПРОВЕРЯЛОСЬ (KLNOPEN=1)"
+  :`второе перо (p1 под зонами маски): проверено границ итераций ${S.penFrames}, байт-нарушителей ${S.penBad}`);
+if(S.penKill.size)console.log("   кто гасит p1 под жёлтой зоной: "+[...S.penKill].sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>k+" x"+v).join(", "));
+if(S.penBad){console.log("   по итерациям: "+[...S.penIter].map(([k,v])=>k+" x"+v).join(", ").slice(0,600));
+  for(const [k,v] of [...S.penWorst].sort((a,b)=>b[1]-a[1]).slice(0,10))console.log(`   ${String(v).padStart(7)}  ${k}`);
+  bump(S.badBlits,`p1 под зонами маски разошёлся с ожиданием: ${S.penBad} байт`,S.penBad);}
 if(S.badBlits.size){console.log("НАРУШИТЕЛИ:");
   for(const [k,v] of [...S.badBlits].sort((a,b)=>b[1]-a[1]).slice(0,40))console.log(`   ${String(v).padStart(7)}  ${k}`);}
 const bad=S.badBlits.size;
