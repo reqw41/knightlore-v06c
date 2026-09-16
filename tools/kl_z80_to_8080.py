@@ -874,47 +874,167 @@ _PRO_AF2 = ["ld (il_tmp2),hl", "push af", "pop hl", "ld (il_f),hl", "pop hl", "l
 _PRO_A2  = ["ld (il_tmp2),hl", "ld (il_a),a", "pop hl", "ld a,(hl)", "ld (il_tmp),a",
             "inc hl", "ld a,(hl)", "ld (il_tmp+1),a", "inc hl", "push hl", "ld a,(il_tmp)"]
 
+# ---------------------------------------------------------------------------
+# ОБЩИЕ ПРОЛОГ/ЭПИЛОГ ХЕЛПЕРОВ (§31.2). Каждая форма несла СВОЮ копию одной и той же
+# работы: сохранить HL и AF вызывателя, снять inline-байт(ы) из-под адреса возврата,
+# посчитать адрес ячейки = (z80_ix) + d, вернуть флаги. Это 27..49 Б на форму при 23
+# формах. Теперь общая часть вынесена, а тело формы — `call il_pro[2]_(ix|iy)` +
+# сама операция + `jp il_epi...` (7..13 Б). Семантика та же байт в байт: те же ячейки,
+# тот же порядок сохранения, те же флаги на выходе; цена — два лишних call/ret на
+# обращение (хелперы холодные: ~7 исполнений на итерацию по tools/ilhot_vec.js).
+# Ячейки НЕ новые: адрес возврата в тело хелпера кладётся в il_tmp, смещение и второй
+# inline-байт — в il_a и il_a+1. Конфликта с встроенными развёртками (_ixiy, push/pop ix,
+# out (c),a), которые тоже пользуются il_tmp/il_a, нет: те развёртки прямолинейны и
+# внутри себя хелперов не зовут. Прерыванию это тоже не мешает: vec_isr не трогает ни
+# одной ячейки il_* и не зовёт хелперов, а между `pop` и `push` адресов возврата оба
+# значения уже лежат в HL и il_tmp — ISR кладёт свои регистры НИЖЕ SP и их не задевает.
+# СТЕК В ПРОЛОГЕ ТРЁХЭТАЖНЫЙ: [возврат в обёртку][возврат в тело хелпера][возврат в игру].
+# Пролог обязан снять все три и вернуть все три на место, иначе inline-байтом окажется
+# кусок собственного адреса возврата (симптом: игра виснет, не дойдя до первой комнаты).
+# Средний адрес не требует своей ячейки: `ex (sp),hl` (XTHL, 1 Б) меняет верх стека с HL.
+# ---------------------------------------------------------------------------
+_ALU_OPS = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,',
+            'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}
+_IX_TWO = ('stn', 'set', 'res', 'bit')          # формы с ДВУМЯ inline-байтами (d и маска/значение)
+
+
 def _ix_helper(px, form):
-    C = 'z80_' + px
-    A = [x.replace('{C}', C) for x in _ADDR]
-    body = None
+    """Тело формы: пролог общий, дальше своя операция над (hl) и общий эпилог."""
+    pro = "call il_pro%s_%s" % ('2' if form in _IX_TWO else '', px)
     if form == 'lda':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_a),a", "ld hl,(il_f)", "push hl", "pop af", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
+        body = [pro, "ld a,(hl)", "ld (il_a),a", "jp il_epi_a"]
     elif form in ('ldb', 'ldc', 'ldd', 'lde'):
-        body = _PRO_AF + A + [f"ld {form[2]},(hl)"] + _EPI_AF
+        body = [pro, f"ld {form[2]},(hl)", "jp il_epi"]
     elif form == 'ldl':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2),a"] + _EPI_AF
+        body = [pro, "ld a,(hl)", "ld (il_tmp2),a", "jp il_epi"]          # L вернёт эпилог
     elif form == 'ldh':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2+1),a"] + _EPI_AF
+        body = [pro, "ld a,(hl)", "ld (il_tmp2+1),a", "jp il_epi"]
     elif form == 'sta':
-        body = _PRO_AF + A + ["ld a,(il_f+1)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_f+1)", "ld (hl),a", "jp il_epi"]           # A вызывателя = старший байт il_f
     elif form in ('stb', 'stc', 'std', 'ste'):
-        body = _PRO_AF + A + [f"ld (hl),{form[2]}"] + _EPI_AF
+        body = [pro, f"ld (hl),{form[2]}", "jp il_epi"]
     elif form == 'stl':
-        body = _PRO_AF + A + ["ld a,(il_tmp2)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_tmp2)", "ld (hl),a", "jp il_epi"]
     elif form == 'sth':
-        body = _PRO_AF + A + ["ld a,(il_tmp2+1)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_tmp2+1)", "ld (hl),a", "jp il_epi"]
     elif form == 'stn':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "ld (hl),a"] + _EPI_AF
-    elif form in ('inc', 'dec'):
-        body = _PRO_A + A + [f"{form} (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
-    elif form == 'bit':
-        body = _PRO_A2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
-    elif form == 'res':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_a+1)", "ld (hl),a", "jp il_epi"]
     elif form == 'set':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "or (hl)", "ld (hl),a"] + _EPI_AF
-    elif form in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
-        alu = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,', 'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[form]
-        body = _PRO_A + A + ["ld a,(il_a)", f"{alu}(hl)", "ld hl,(il_tmp2)", "ret"]
-    assert body, form
+        body = [pro, "ld a,(il_a+1)", "or (hl)", "ld (hl),a", "jp il_epi"]
+    elif form == 'res':
+        body = [pro, "ld a,(il_a+1)", "and (hl)", "ld (hl),a", "jp il_epi"]
+    elif form == 'bit':
+        # флаги = результат AND (как у Z80 bit n,(ix+d), кроме переноса — см. check_ixflags.py),
+        # A вызывателя возвращается ПОСЛЕ операции: ld a,(nn) флагов не трогает
+        body = [pro, "ld a,(il_a+1)", "and (hl)", "ld a,(il_f+1)", "jp il_ret_hl"]
+    elif form in ('inc', 'dec'):
+        body = [pro, f"{form} (hl)", "ld a,(il_f+1)", "jp il_ret_hl"]
+    elif form in _ALU_OPS:
+        body = [pro, "ld a,(il_f+1)", f"{_ALU_OPS[form]}(hl)", "jp il_ret_hl"]
+    else:
+        assert False, form
     sfx = "_b" if (px, form) in _IX_RST else ""      # у формы с RST-вектором метка вектора занята
     return f"il_{px}_{form}{sfx}:\n" + "\n".join("\t" + x for x in body) + "\n"
+
+
+_IL_INFRA = {
+    'il_pro1': """il_pro1:	; сохранить HL и AF вызывателя, снять ОДИН inline-байт (смещение d) в A
+	ld (il_tmp2),hl
+	push af
+	pop hl
+	ld (il_f),hl
+	pop hl
+	ld (il_tmp),hl		; возврат в обёртку il_pro_(ix|iy)
+	pop hl			; возврат в тело хелпера
+	ex (sp),hl		; на стеке возврат в тело, HL = возврат в игру (inline-байты)
+	ld a,(hl)
+	inc hl
+	ex (sp),hl		; на стеке возврат в игру за байтом, HL = возврат в тело
+	push hl
+	ld hl,(il_tmp)
+	push hl
+	ret
+""",
+    'il_pro2': """il_pro2:	; то же, но inline-байтов два: смещение в A, второй (маска/значение) в il_a+1
+	ld (il_tmp2),hl
+	push af
+	pop hl
+	ld (il_f),hl
+	pop hl
+	ld (il_tmp),hl		; возврат в обёртку
+	pop hl			; возврат в тело хелпера
+	ex (sp),hl		; на стеке возврат в тело, HL = возврат в игру
+	ld a,(hl)
+	ld (il_a),a
+	inc hl
+	ld a,(hl)
+	ld (il_a+1),a
+	inc hl
+	ex (sp),hl
+	push hl
+	ld hl,(il_tmp)
+	push hl
+	ld a,(il_a)
+	ret
+""",
+    'il_adr': """il_adr:	; HL = ячейка индекса + A (перенос из младшего байта — как было у каждой формы)
+	add a,l
+	ld l,a
+	ld a,h
+	adc a,0
+	ld h,a
+	ret
+""",
+    'il_ret_hl': """il_ret_hl:	; вернуть HL вызывателя (флаги не трогаются)
+	ld hl,(il_tmp2)
+	ret
+""",
+    'il_epi': """il_epi:	; вернуть AF и HL вызывателя
+	ld hl,(il_f)
+	push hl
+	pop af
+	jp il_ret_hl
+""",
+    'il_epi_a': """il_epi_a:	; вернуть флаги вызывателя и HL, A = прочитанный байт
+	ld hl,(il_f)
+	push hl
+	pop af
+	ld a,(il_a)
+	jp il_ret_hl
+""",
+}
+
+
+def _il_wrap(px, two):
+    return ("il_pro%s_%s:\n	call il_pro%s\n	ld hl,(z80_%s)\n	jp il_adr\n"
+            % ('2' if two else '', px, '2' if two else '1', px))
+
 
 def ix_helpers_text():
     if not _ix_used:
         return ""
     out = ["\n; ===== компактные IX/IY-хелперы (только использованные формы) ====="]
+    need = set()
+    for px, form in sorted(_ix_used):
+        two = form in _IX_TWO
+        need.add(('w', px, two))
+        need.add(('il_pro2' if two else 'il_pro1',))
+        need.add(('il_adr',))
+        need.add(('il_ret_hl',))
+        if form == 'lda':
+            need.add(('il_epi_a',))
+        elif form not in ('inc', 'dec', 'bit') and form not in _ALU_OPS:
+            need.add(('il_epi',))
+    for key in ('il_pro1', 'il_pro2'):
+        if (key,) in need:
+            out.append(_IL_INFRA[key])
+    for px in ('ix', 'iy'):
+        for two in (False, True):
+            if ('w', px, two) in need:
+                out.append(_il_wrap(px, two))
+    for key in ('il_adr', 'il_ret_hl', 'il_epi', 'il_epi_a'):
+        if (key,) in need:
+            out.append(_IL_INFRA[key])
     for px, form in sorted(_ix_used):
         out.append(_ix_helper(px, form))
     return "\n".join(out) + "\n"
