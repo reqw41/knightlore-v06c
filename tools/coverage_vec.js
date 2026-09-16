@@ -33,6 +33,11 @@ const cpu=new ctx.I8080(memory,io),tape={advance:()=>{},sample:0,reset:()=>{}},v
 v06c.bmp=new Uint32Array(576*288);v06c.displayFrame=()=>{};v06c.check_breakpoint=()=>false;v06c.dbg=null;
 const IMG=new Uint8Array(fs.readFileSync(ROM)).subarray(0,0x10000);
 const cov=new Uint8Array(0x10000);
+// ОБЪЕДИНЁННОЕ ПОКРЫТИЕ (§31.3): KLCOVU=<файл> — читать карту при старте и дописывать в неё
+// (побитовое ИЛИ). Так покрытие копится по многим прогонам: все комнаты, ночь, котёл, смерть,
+// финал, пауза, раскладки, джойстик. KLCOVQ=1 — без таблицы процедур (только карта).
+const UNION=process.env.KLCOVU;
+if(UNION&&fs.existsSync(UNION)){const u=fs.readFileSync(UNION);for(let i=0;i<0x10000;i++)if(u[i])cov[i]=1;}
 
 function runRoom(room){
   memory.init_from_array(IMG,0);
@@ -57,7 +62,8 @@ function runRoom(room){
 }
 const rooms=(ROOMS||"start,39,163,133,31,3").split(",").map(s=>s.trim()==="start"?null:+s.trim());
 for(const r of rooms){const ok=runRoom(r);console.log(`${r===null?"стартовая":"комната "+r}: ${ok?"ок":"НЕ ДОШЛИ"}`);}
-fs.writeFileSync("build/coverage.bin",Buffer.from(cov));
+fs.writeFileSync(UNION||"build/coverage.bin",Buffer.from(cov));
+if(process.env.KLCOVQ){console.log(`покрыто байт: ${cov.reduce((a,b)=>a+b,0)}`);process.exit(0);}
 
 // --- таблица по процедурам (границы из .lst, как в sizemap_vec.py) ---
 const RE_B=/^\s*\d+\+?\s+([0-9A-Fa-f]{4})\s((?:\s?[0-9A-Fa-f]{2}){1,4})\s*(.*)$/;

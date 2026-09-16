@@ -726,6 +726,91 @@ def _axis_prep(pre, src_s, src_sz):
             ) % (src_s, pre, src_sz, pre)
 
 
+
+# ---------------------------------------------------------------------------
+# «Редкая» ветка осей (объекты пересеклись) НАТИВНО (§31.2). Она не такая уж редкая:
+# tools/ilhot_vec.js в комнате 163 даёт 59 из 66 исполнений хелперов (ix+d)/(iy+d) на
+# итерацию именно здесь (adz_rt 5.5 прохода на итерацию по 8..14 обращений). Через
+# хелперы одно обращение стоит ~300..480 тактов, здесь всё делается двумя указателями:
+# HL и DE ходят по полям объектов, а BC занят (B — счётчик объектов, C — dX) и стек
+# держит dY/dZ, поэтому obj2+13 на время расчёта obj1 уходит в стек (push/pop).
+# Порядок чтений и записей сохранён ДОСЛОВНО (объекты 1 и 2 могут совпасть только
+# в теории, но переставлять обращения всё равно не нужно).
+# Цена: +7 Б (adz) и +12 Б (adx, ady) кода против -5.5 % тактов в комнате 163.
+# ---------------------------------------------------------------------------
+
+
+def _axis_hit(pre, oobbit, copyoff, exitlbl, zflag=False, dycopy=False):
+    """Нативная ветка «объекты пересеклись» для оси pre (adx/ady/adz).
+       oobbit — бит OOB в поле 12 объекта 1; copyoff — поле, которое копируется;
+       zflag — ось Z: ещё и `set 3,(iy+13)`, подвижность смотрится у объекта 1,
+       копия идёт ИЗ объекта 2 В объект 1 и только если поле уже нулевое."""
+    T = "\t\t\t\t"
+    o = []
+    o.append(T + "ld\t\t(z80_iy), hl\t\t\t\t\t\t; IY = объект 2 (как в оригинале)")
+    o.append(T + "ld\t\tde, 13")
+    o.append(T + "add\t\thl, de\t\t\t\t\t\t\t\t; obj2+13")
+    o.append(T + "push\thl\t\t\t\t\t\t\t\t\t; BC занят (счётчик и dX) — obj2+13 на стек")
+    o.append(T + "ld\t\thl, (z80_ix)")
+    o.append(T + "add\t\thl, de\t\t\t\t\t\t\t\t; obj1+13")
+    o.append(T + "dec\t\thl\t\t\t\t\t\t\t\t\t; obj1+12")
+    o.append(T + "ld\t\ta, (hl)")
+    o.append(T + "or\t\t%d\t\t\t\t\t\t\t\t\t; set %d,(ix+12): ось вышла за границу" % (1 << oobbit, oobbit))
+    o.append(T + "ld\t\t(hl), a")
+    o.append(T + "inc\t\thl\t\t\t\t\t\t\t\t\t; obj1+13")
+    o.append(T + "ld\t\ta, (hl)")
+    o.append(T + "rrca")
+    o.append(T + "and\t\t0x40\t\t\t\t\t\t\t\t; бит 7 -> 6")
+    o.append(T + "ex\t\tde, hl\t\t\t\t\t\t\t\t; DE = obj1+13")
+    o.append(T + "pop\t\thl\t\t\t\t\t\t\t\t\t; HL = obj2+13")
+    o.append(T + "or\t\t(hl)\t\t\t\t\t\t\t\t; объект 2 разрушен?")
+    o.append(T + "ld\t\t(hl), a")
+    o.append(T + "rlca")
+    o.append(T + "and\t\t0x40\t\t\t\t\t\t\t\t; бит 5 -> 6")
+    o.append(T + "ex\t\tde, hl\t\t\t\t\t\t\t\t; HL = obj1+13, DE = obj2+13")
+    o.append(T + "or\t\t(hl)\t\t\t\t\t\t\t\t; объект 1 разрушен?")
+    o.append(T + "ld\t\t(hl), a")
+    if zflag:
+        o.append(T + "ld\t\ta, (de)")
+        o.append(T + "or\t\t8\t\t\t\t\t\t\t\t\t; set 3,(iy+13): сработало (падение, рассыпание)")
+        o.append(T + "ld\t\t(de), a")
+        o.append("\n".join([T + "dec\t\tde"] * 4) + "\t\t\t\t\t\t\t; obj2+9 (нужен обоим путям)")
+        # подвижность смотрится у объекта 1 (ix+7): HL = obj1+13 -> -6
+        o.append("\n".join([T + "dec\t\thl"] * 6) + "\t\t\t\t\t\t\t; obj1+7")
+        o.append(T + "ld\t\ta, (hl)")
+        o.append(T + "and\t\t4\t\t\t\t\t\t\t\t\t; bit 2,(ix+7): подвижен?")
+        o.append(T + "jp\t\tz, %s_hlx" % pre)
+        o.append("\n".join([T + "inc\t\thl"] * 2) + "\t\t\t\t\t\t\t; obj1+9")
+        o.append(T + "ld\t\ta, (hl)")
+        o.append(T + "and\t\ta\t\t\t\t\t\t\t\t\t; dX ненулевой?")
+        o.append(T + "jp\t\tnz, %s_c1" % pre)
+        o.append(T + "ld\t\ta, (de)")
+        o.append(T + "ld\t\t(hl), a\t\t\t\t\t\t\t\t; копия dX от объекта 2")
+        o.append("%s_c1:\t\tinc\t\tde\t\t\t\t\t\t\t\t; obj2+10" % pre)
+        o.append(T + "inc\t\thl\t\t\t\t\t\t\t\t\t; obj1+10")
+        o.append(T + "ld\t\ta, (hl)")
+        o.append(T + "and\t\ta\t\t\t\t\t\t\t\t\t; движется по Y?")
+        o.append(T + "jp\t\tnz, %s_hlx" % pre)
+        o.append(T + "ld\t\ta, (de)")
+        o.append(T + "ld\t\t(hl), a\t\t\t\t\t\t\t\t; копия dY от объекта 2")
+    else:
+        # подвижность смотрится у объекта 2 (iy+7): DE = obj2+13 -> -6
+        o.append("\n".join([T + "dec\t\tde"] * 6) + "\t\t\t\t\t\t\t; obj2+7")
+        o.append(T + "ld\t\ta, (de)")
+        o.append(T + "and\t\t4\t\t\t\t\t\t\t\t\t; bit 2,(iy+7): подвижен?")
+        o.append(T + "jp\t\tz, %s_hlx" % pre)
+        o.append("\n".join([T + "dec\t\thl"] * (13 - copyoff)) + "\t\t\t\t\t\t\t; obj1+%d" % copyoff)
+        o.append(T + "ld\t\ta, (hl)")
+        o.append("\n".join([T + "inc\t\tde"] * (copyoff - 7)) + "\t\t\t\t\t\t\t; obj2+%d" % copyoff)
+        o.append(T + "ld\t\t(de), a\t\t\t\t\t\t\t\t; копия d%s объекту 2" % ('X' if copyoff == 9 else 'Y'))
+    # ХВОСТ. Оба выхода ветки обязаны вернуть HL = УКАЗАТЕЛЬ ОБЪЕКТА 2: loc_CC28/loc_CC8D
+    # меняют его со стеком (`ex (sp),hl`), а adx_rt идёт с ним на следующий do_objs_intersect.
+    # Оригинал держал указатель в HL всю ветку (обращения шли через хелперы (ix+d)/(iy+d),
+    # а те HL восстанавливают); нативная ветка HL расходует, поэтому база берётся из z80_iy.
+    # Цена ошибки: указатель цикла уезжал в поле объекта — локстеп разошёлся на 78-й итерации.
+    o.append("%s_hlx:\t\tld\t\thl, (z80_iy)\t\t\t\t\t; вернуть указатель объекта 2" % pre)
+    return "\n".join(o) + "\n"
+
 N_ADJ_DX_LOOP = """adj_dX_for_obj_intersect:	; C = dX (правится), HL = dY/dZ; прижать dX к другим объектам
 				call	doi_prep
 """ + _axis_prep('adx', 'doiy_s', 'doiy_d') + """				push	hl									; dY/dZ — на стек, HL под указатель
@@ -737,22 +822,7 @@ adx_nb:			ld		b, 40								; иммедиат: занятые записи та�
 
 adx_rt:			call    do_objs_intersect_on_x
 				jp		nc, adx_nx
-				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
-				set     0, (ix+12)                               ; set X OOB
-				ld      a, (ix+13)
-				rrca
-				and     0x40 ; '@'                             ; bit 7->6
-				or      (iy+13)                                  ; obj2 destroyed?
-				ld      (iy+13), a
-				rlca
-				and     0x40 ; '@'                             ; bit 5->6
-				or      (ix+13)                                  ; obj1 destroyed?
-				ld      (ix+13), a
-				bit     2, (iy+7)                                ; moveable?
-				jr      Z, loc_CBD9                             ; no, skip
-				ld      a, (ix+9)
-				ld      (iy+9), a                                ; copy dX
-
+""" + _axis_hit('adx', 0, 9, 'loc_CBD9') + """
 loc_CBD9:		ld		a, c
 				call    adj_d_for_out_of_bounds
 				ld		d, a								; новый dX
@@ -781,22 +851,7 @@ ady_nb:			ld		b, 40								; иммедиат: занятые записи та�
 
 ady_rt:			call    do_objs_intersect_on_y
 				jp		nc, ady_nx
-				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
-				set     1, (ix+12)                               ; set Y OOB
-				ld      a, (ix+13)
-				rrca
-				and     0x40 ; '@'                             ; bit 7->6
-				or      (iy+13)                                  ; obj2 destroyed?
-				ld      (iy+13), a
-				rlca
-				and     0x40 ; '@'                             ; bit 5->6
-				or      (ix+13)                                  ; obj1 destroyed?
-				ld      (ix+13), a
-				bit     2, (iy+7)                                ; moveable?
-				jr      Z, loc_CC28                             ; no, skip
-				ld      a, (ix+10)
-				ld      (iy+10), a                               ; copy dY
-
+""" + _axis_hit('ady', 1, 10, 'loc_CC28') + """
 loc_CC28:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
 				ld		a, l
 				call    adj_d_for_out_of_bounds
@@ -827,33 +882,7 @@ adz_nb:			ld		b, 40								; иммедиат: занятые записи та�
 
 adz_rt:			call    do_objs_intersect_on_z
 				jp		nc, adz_nx
-				ld		(z80_iy), hl						; редкая ветка — через хелперы (iy+n)
-				set     2, (ix+12)                               ; set Z OOB
-				ld      a, (ix+13)
-				rrca
-				and     0x40 ; '@'                             ; bit 7->6
-				or      (iy+13)                                  ; obj2 destroyed?
-				ld      (iy+13), a
-				rlca
-				and     0x40 ; '@'                             ; bit 5->6
-				or      (ix+13)                                  ; obj1 destroyed?
-				ld      (ix+13), a
-				set     3, (iy+13)                               ; triggered (falling, collapsing blocks)
-				bit     2, (ix+7)                                ; moveable?
-				jr      Z, loc_CC8D                             ; no, skip
-				ld      a, (ix+9)                                ; dX
-				and     a                                       ; zero?
-				jr      NZ, loc_CC81                            ; no, skip
-				ld      a, (iy+9)
-				ld      (ix+9), a                                ; copy dX
-
-loc_CC81:                                                       ; objdY
-				ld      a, (ix+10)
-				and     a                                       ; moving along Y?
-				jr      NZ, loc_CC8D                            ; yes, skip
-				ld      a, (iy+10)
-				ld      (ix+10), a                               ; copy dY
-
+""" + _axis_hit('adz', 2, 9, 'loc_CC8D', zflag=True) + """
 loc_CC8D:		ex		(sp), hl							; HL = dY/dZ, указатель — на стек
 				ld		a, h
 				call    adj_d_for_out_of_bounds

@@ -715,12 +715,63 @@ _IX_INLINE_FUNCS = {'print_sprite', 'wipe_next_object', 'is_near_to', 'is_object
 _cur_func = ['']
 
 _ix_form_cnt = {}
-# Редкую форму дешевле развернуть на месте, чем держать хелпер: тело 27..46 байт против
-# 4 байт на `call+db` плюс 13..18 на развёртку. Порог выбран замером (низ региона):
-#   N<=0: 0x7514 (все компактные)  N<=1: 0x74BB  N<=2: 0x7439  N<=3: 0x7597  N<=4: 0x7597
-# То есть выгодно разворачивать формы с 1-2 обращениями; с 3 и более уже дороже.
-# Побочный эффект — темп: развёртка быстрее call+хелпер.
-_IX_RARE = int(__import__('os').environ.get('KL_IX_RARE', '2'))
+# Порог «редкой формы»: форму, встречающуюся не более N раз, дешевле развернуть на месте,
+# чем держать под неё хелпер. Порог ПЕРЕСЧИТАН после §31 (RST-векторы + общие пролог/эпилог):
+# тело формы стало 7..13 Б вместо 27..49, а место вызова частой формы — 2 Б вместо 4, и
+# развёртка (13..18 Б на обращение) перестала окупаться. Замер по свободной памяти цели vec
+# (низ + дыры), сборка от 7271aa4:
+#   N<=0: 1201 Б   N<=1: 1164 Б   N<=2: 1072 Б   N<=3: 913 Б   N<=4: 654 Б
+# Темп (KLGAG, 300 итер) при N=0 против N=2: старт +0.1 %, комната 39 +0.1 %, 163 0.0 %,
+# 133 +0.1 % — то есть 129 Б стоят одной десятой процента.
+_IX_RARE = int(__import__('os').environ.get('KL_IX_RARE', '0'))
+
+# ---------------------------------------------------------------------------
+# RST-ВЕКТОРЫ ДЛЯ САМЫХ ЧАСТЫХ ФОРМ (цель vec, §31.1). Обращение (ix+d) стоит
+# `call il_xxx` (3 Б) + байт смещения. У i8080 есть восемь однобайтовых вызовов RST,
+# и адрес возврата они кладут на стек ТОЧНО ТАК ЖЕ, как call, — хелпер, читающий
+# inline-байт за адресом возврата, работает без единой правки. Каждое место вызова
+# частой формы становится 2 Б вместо 4.
+# Свободны шесть векторов: 0x00 занят загрузчиком (PC=0 по сбросу), 0x38 — кадровым
+# прерыванием. 0x30 оставлен гейтам kbcheck/inputcheck (они паркуют там CPU).
+# В векторе стоит `jp тело` (3 Б), тело живёт там же, где и раньше (дыры/нижний регион).
+_IX_RST_SLOTS = [0x08, 0x10, 0x18, 0x20, 0x28]
+_IX_RST = {}          # (px, form) -> адрес RST-вектора
+_IX_RST_ON = [False]  # включается только для цели vec (в остальных целях нулевая страница чужая)
+
+
+def pick_ix_rst():
+    """Раздать RST-векторы самым частым компактным формам (после count_ix_forms)."""
+    _IX_RST.clear()
+    if not _IX_RST_ON[0]:
+        return
+    cand = sorted(((c, f) for f, c in _ix_form_cnt.items() if c > _IX_RARE),
+                  key=lambda x: (-x[0], x[1]))
+    for slot, (_c, f) in zip(_IX_RST_SLOTS, cand):
+        _IX_RST[f] = slot
+
+
+def ix_rst_text():
+    """Векторы RST: ORG на адрес вектора + jp в тело хелпера."""
+    if not _IX_RST:
+        return ""
+    out = ["\t\t\t\tASSERT $ <= %#06x\t; RST-векторы компактных хелперов (ix+d)" % min(_IX_RST.values())]
+    for (px, form), slot in sorted(_IX_RST.items(), key=lambda kv: kv[1]):
+        assert (px, form) in _ix_used, 'RST-вектор для неиспользованной формы'
+        out.append("\t\t\t\tORG\t\t%#06x\nil_%s_%s:\tjp\t\til_%s_%s_b\t\t; RST-вектор: %d обращений"
+                   % (slot, px, form, px, form, _ix_form_cnt[(px, form)]))
+    return "\n".join(out) + "\n"
+
+
+def ix_rst_gaps():
+    """Что осталось от дыры 0x0007..0x0030 после расстановки векторов (по 3 Б на вектор)."""
+    if not _IX_RST:
+        return [(0x0007, 0x0030 - 0x0007)]
+    gaps, pos = [], 0x0007
+    for slot in sorted(_IX_RST.values()) + [0x0030]:
+        if slot > pos:
+            gaps.append((pos, slot - pos))
+        pos = slot + 3
+    return gaps
 
 
 def _ix_form(mn, ops, idxinfo):
@@ -793,7 +844,8 @@ def _ixiy_compact(mn, ops, idxinfo):
     def use(form, *extra):
         name = f"il_{px}_{form}"
         _ix_used.add((px, form))
-        return [f"call {name}", "db " + ", ".join([disp] + list(extra))]
+        op = "rst" if (px, form) in _IX_RST else "call"
+        return [f"{op} {name}", "db " + ", ".join([disp] + list(extra))]
     if mn == 'ld':
         if midx == 1:
             r = ops[0].lower()
@@ -825,46 +877,167 @@ _PRO_AF2 = ["ld (il_tmp2),hl", "push af", "pop hl", "ld (il_f),hl", "pop hl", "l
 _PRO_A2  = ["ld (il_tmp2),hl", "ld (il_a),a", "pop hl", "ld a,(hl)", "ld (il_tmp),a",
             "inc hl", "ld a,(hl)", "ld (il_tmp+1),a", "inc hl", "push hl", "ld a,(il_tmp)"]
 
+# ---------------------------------------------------------------------------
+# ОБЩИЕ ПРОЛОГ/ЭПИЛОГ ХЕЛПЕРОВ (§31.2). Каждая форма несла СВОЮ копию одной и той же
+# работы: сохранить HL и AF вызывателя, снять inline-байт(ы) из-под адреса возврата,
+# посчитать адрес ячейки = (z80_ix) + d, вернуть флаги. Это 27..49 Б на форму при 23
+# формах. Теперь общая часть вынесена, а тело формы — `call il_pro[2]_(ix|iy)` +
+# сама операция + `jp il_epi...` (7..13 Б). Семантика та же байт в байт: те же ячейки,
+# тот же порядок сохранения, те же флаги на выходе; цена — два лишних call/ret на
+# обращение (хелперы холодные: ~7 исполнений на итерацию по tools/ilhot_vec.js).
+# Ячейки НЕ новые: адрес возврата в тело хелпера кладётся в il_tmp, смещение и второй
+# inline-байт — в il_a и il_a+1. Конфликта с встроенными развёртками (_ixiy, push/pop ix,
+# out (c),a), которые тоже пользуются il_tmp/il_a, нет: те развёртки прямолинейны и
+# внутри себя хелперов не зовут. Прерыванию это тоже не мешает: vec_isr не трогает ни
+# одной ячейки il_* и не зовёт хелперов, а между `pop` и `push` адресов возврата оба
+# значения уже лежат в HL и il_tmp — ISR кладёт свои регистры НИЖЕ SP и их не задевает.
+# СТЕК В ПРОЛОГЕ ТРЁХЭТАЖНЫЙ: [возврат в обёртку][возврат в тело хелпера][возврат в игру].
+# Пролог обязан снять все три и вернуть все три на место, иначе inline-байтом окажется
+# кусок собственного адреса возврата (симптом: игра виснет, не дойдя до первой комнаты).
+# Средний адрес не требует своей ячейки: `ex (sp),hl` (XTHL, 1 Б) меняет верх стека с HL.
+# ---------------------------------------------------------------------------
+_ALU_OPS = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,',
+            'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}
+_IX_TWO = ('stn', 'set', 'res', 'bit')          # формы с ДВУМЯ inline-байтами (d и маска/значение)
+
+
 def _ix_helper(px, form):
-    C = 'z80_' + px
-    A = [x.replace('{C}', C) for x in _ADDR]
-    body = None
+    """Тело формы: пролог общий, дальше своя операция над (hl) и общий эпилог."""
+    pro = "call il_pro%s_%s" % ('2' if form in _IX_TWO else '', px)
     if form == 'lda':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_a),a", "ld hl,(il_f)", "push hl", "pop af", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
+        body = [pro, "ld a,(hl)", "ld (il_a),a", "jp il_epi_a"]
     elif form in ('ldb', 'ldc', 'ldd', 'lde'):
-        body = _PRO_AF + A + [f"ld {form[2]},(hl)"] + _EPI_AF
+        body = [pro, f"ld {form[2]},(hl)", "jp il_epi"]
     elif form == 'ldl':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2),a"] + _EPI_AF
+        body = [pro, "ld a,(hl)", "ld (il_tmp2),a", "jp il_epi"]          # L вернёт эпилог
     elif form == 'ldh':
-        body = _PRO_AF + A + ["ld a,(hl)", "ld (il_tmp2+1),a"] + _EPI_AF
+        body = [pro, "ld a,(hl)", "ld (il_tmp2+1),a", "jp il_epi"]
     elif form == 'sta':
-        body = _PRO_AF + A + ["ld a,(il_f+1)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_f+1)", "ld (hl),a", "jp il_epi"]           # A вызывателя = старший байт il_f
     elif form in ('stb', 'stc', 'std', 'ste'):
-        body = _PRO_AF + A + [f"ld (hl),{form[2]}"] + _EPI_AF
+        body = [pro, f"ld (hl),{form[2]}", "jp il_epi"]
     elif form == 'stl':
-        body = _PRO_AF + A + ["ld a,(il_tmp2)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_tmp2)", "ld (hl),a", "jp il_epi"]
     elif form == 'sth':
-        body = _PRO_AF + A + ["ld a,(il_tmp2+1)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_tmp2+1)", "ld (hl),a", "jp il_epi"]
     elif form == 'stn':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "ld (hl),a"] + _EPI_AF
-    elif form in ('inc', 'dec'):
-        body = _PRO_A + A + [f"{form} (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
-    elif form == 'bit':
-        body = _PRO_A2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld a,(il_a)", "ld hl,(il_tmp2)", "ret"]
-    elif form == 'res':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "and (hl)", "ld (hl),a"] + _EPI_AF
+        body = [pro, "ld a,(il_a+1)", "ld (hl),a", "jp il_epi"]
     elif form == 'set':
-        body = _PRO_AF2 + A + ["ld a,(il_tmp+1)", "or (hl)", "ld (hl),a"] + _EPI_AF
-    elif form in ('add', 'adc', 'sub', 'sbc', 'and', 'xor', 'or', 'cp'):
-        alu = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,', 'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[form]
-        body = _PRO_A + A + ["ld a,(il_a)", f"{alu}(hl)", "ld hl,(il_tmp2)", "ret"]
-    assert body, form
-    return f"il_{px}_{form}:\n" + "\n".join("\t" + x for x in body) + "\n"
+        body = [pro, "ld a,(il_a+1)", "or (hl)", "ld (hl),a", "jp il_epi"]
+    elif form == 'res':
+        body = [pro, "ld a,(il_a+1)", "and (hl)", "ld (hl),a", "jp il_epi"]
+    elif form == 'bit':
+        # флаги = результат AND (как у Z80 bit n,(ix+d), кроме переноса — см. check_ixflags.py),
+        # A вызывателя возвращается ПОСЛЕ операции: ld a,(nn) флагов не трогает
+        body = [pro, "ld a,(il_a+1)", "and (hl)", "ld a,(il_f+1)", "jp il_ret_hl"]
+    elif form in ('inc', 'dec'):
+        body = [pro, f"{form} (hl)", "ld a,(il_f+1)", "jp il_ret_hl"]
+    elif form in _ALU_OPS:
+        body = [pro, "ld a,(il_f+1)", f"{_ALU_OPS[form]}(hl)", "jp il_ret_hl"]
+    else:
+        assert False, form
+    sfx = "_b" if (px, form) in _IX_RST else ""      # у формы с RST-вектором метка вектора занята
+    return f"il_{px}_{form}{sfx}:\n" + "\n".join("\t" + x for x in body) + "\n"
+
+
+_IL_INFRA = {
+    'il_pro1': """il_pro1:	; сохранить HL и AF вызывателя, снять ОДИН inline-байт (смещение d) в A
+	ld (il_tmp2),hl
+	push af
+	pop hl
+	ld (il_f),hl
+	pop hl
+	ld (il_tmp),hl		; возврат в обёртку il_pro_(ix|iy)
+	pop hl			; возврат в тело хелпера
+	ex (sp),hl		; на стеке возврат в тело, HL = возврат в игру (inline-байты)
+	ld a,(hl)
+	inc hl
+	ex (sp),hl		; на стеке возврат в игру за байтом, HL = возврат в тело
+	push hl
+	ld hl,(il_tmp)
+	push hl
+	ret
+""",
+    'il_pro2': """il_pro2:	; то же, но inline-байтов два: смещение в A, второй (маска/значение) в il_a+1
+	ld (il_tmp2),hl
+	push af
+	pop hl
+	ld (il_f),hl
+	pop hl
+	ld (il_tmp),hl		; возврат в обёртку
+	pop hl			; возврат в тело хелпера
+	ex (sp),hl		; на стеке возврат в тело, HL = возврат в игру
+	ld a,(hl)
+	ld (il_a),a
+	inc hl
+	ld a,(hl)
+	ld (il_a+1),a
+	inc hl
+	ex (sp),hl
+	push hl
+	ld hl,(il_tmp)
+	push hl
+	ld a,(il_a)
+	ret
+""",
+    'il_adr': """il_adr:	; HL = ячейка индекса + A (перенос из младшего байта — как было у каждой формы)
+	add a,l
+	ld l,a
+	ld a,h
+	adc a,0
+	ld h,a
+	ret
+""",
+    'il_ret_hl': """il_ret_hl:	; вернуть HL вызывателя (флаги не трогаются)
+	ld hl,(il_tmp2)
+	ret
+""",
+    'il_epi': """il_epi:	; вернуть AF и HL вызывателя
+	ld hl,(il_f)
+	push hl
+	pop af
+	jp il_ret_hl
+""",
+    'il_epi_a': """il_epi_a:	; вернуть флаги вызывателя и HL, A = прочитанный байт
+	ld hl,(il_f)
+	push hl
+	pop af
+	ld a,(il_a)
+	jp il_ret_hl
+""",
+}
+
+
+def _il_wrap(px, two):
+    return ("il_pro%s_%s:\n	call il_pro%s\n	ld hl,(z80_%s)\n	jp il_adr\n"
+            % ('2' if two else '', px, '2' if two else '1', px))
+
 
 def ix_helpers_text():
     if not _ix_used:
         return ""
     out = ["\n; ===== компактные IX/IY-хелперы (только использованные формы) ====="]
+    need = set()
+    for px, form in sorted(_ix_used):
+        two = form in _IX_TWO
+        need.add(('w', px, two))
+        need.add(('il_pro2' if two else 'il_pro1',))
+        need.add(('il_adr',))
+        need.add(('il_ret_hl',))
+        if form == 'lda':
+            need.add(('il_epi_a',))
+        elif form not in ('inc', 'dec', 'bit') and form not in _ALU_OPS:
+            need.add(('il_epi',))
+    for key in ('il_pro1', 'il_pro2'):
+        if (key,) in need:
+            out.append(_IL_INFRA[key])
+    for px in ('ix', 'iy'):
+        for two in (False, True):
+            if ('w', px, two) in need:
+                out.append(_il_wrap(px, two))
+    for key in ('il_adr', 'il_ret_hl', 'il_epi', 'il_epi_a'):
+        if (key,) in need:
+            out.append(_IL_INFRA[key])
     for px, form in sorted(_ix_used):
         out.append(_ix_helper(px, form))
     return "\n".join(out) + "\n"
@@ -881,6 +1054,7 @@ def has_idx(body):
 
 def translate(src):
     count_ix_forms(src)
+    pick_ix_rst()
     out = []
     inserted_scratch = False
     for line in src.split('\n'):
@@ -3423,6 +3597,11 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
     base = [{'a': a, 'sz': sz, 'ins': None, 'min': -1} for a, sz in holes]
     if len(at) > uas and at[uas] is not None:          # хвост верхнего региона до таблиц сдвига
         base.append({'a': at[uas], 'sz': VEC_UPPER_TOP - at[uas], 'ins': uas, 'min': -1})
+    # ХВОСТ НУЛЕВОЙ СТРАНИЦЫ: от конца scratch-ячеек до vec_boot (0x00A0). Размер зависит от
+    # того, сколько ячеек снялось как мёртвые (§31.3), поэтому берётся по факту, а не константой.
+    zas = next((i for i, l in enumerate(lines) if 'ASSERT $ <= 0x00A0' in l), None)
+    if zas is not None and len(at) > zas and at[zas] is not None and at[zas] < 0x00A0:
+        base.append({'a': at[zas], 'sz': 0x00A0 - at[zas], 'ins': zas, 'min': -1})
     rpa = next((i for i, l in enumerate(lines) if l.startswith('vec_rptab:')), end)
     # ALIGN 8/16 стоят копейки (добивка < модуля), а вот ALIGN 256 перед kl_optr — сотни байт.
     # Добивку ПОСЛЕДНЕГО ALIGN (перед vec_rptab) не трогаем: это и есть запас внизу.
@@ -3628,6 +3807,7 @@ def main():
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='latin-1').read()
     if target == 'vec':
+        _IX_RST_ON[0] = True                  # нулевая страница наша: RST-векторы под частые формы (ix+d)
         src = kl_vec_glue(src, translate_later=True)
         src = kl_no_delay(src)
         src, pace_desc = kl_pace(src)
@@ -3636,6 +3816,11 @@ def main():
         src = kl_native_logic.apply(src, attrs_cut=True)   # атрибуты ZX вырезаны -> второй набор регистров не нужен
         src, exx_pairs = _classify_exx(src)
         src = translate(src)
+        # RST-векторы частых форм (ix+d) — в нулевую страницу, перед вектором прерывания
+        rstv = ix_rst_text()
+        if rstv:
+            src, n = re.subn(r'(?m)^(\t+ORG\t+0x0038\n)', lambda m: rstv + m.group(1), src, count=1)
+            assert n == 1, "место для RST-векторов"
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
@@ -3645,9 +3830,19 @@ def main():
         assert n == 1, "ASSERT верхнего региона"
         # Второй набор регистров в цели vec больше не используется ни разу (последние exx ушли
         # вместе с атрибутами ZX в печати строк) — ячейки обмена мертвы, а scratch до 0x00A0 тесен.
-        for cell in ('z80_bc_alt', 'z80_de_alt', 'z80_hl_alt', 'z80_af_alt'):
-            if len(re.findall(r'\b' + cell + r'\b', src)) == 1:      # только объявление
-                src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+2[^\n]*\n', '', src, count=1)
+        # Мёртвые ячейки нулевой страницы (§31.3): снимается ровно та, на чьё имя в готовом тексте
+        # БЕЗ КОММЕНТАРИЕВ не осталось ни одной ссылки, кроме собственного объявления. Проверка
+        # по тексту без комментариев — иначе упоминание в комментарии держит ячейку вечно.
+        #   z80_*_alt   — второй набор регистров (последние exx ушли вместе с атрибутами ZX);
+        #   kl_e/kl_d/kl_lo/kl_hh — объединённый прямоугольник перекрытия: остаток раунда §18
+        #     («точный тест задет»), его считатель закрыт;
+        #   kl_seed0    — затравка seed_1 через clr_mem: START читает 0x5C78 ПОСЛЕ очистки (§11);
+        #   il_outstub  — стек-заглушка `out (c),a; ret` в ОЗУ: в игре нет ни одного out (c),a.
+        _nc0 = '\n'.join(l.split(';')[0] for l in src.split('\n'))
+        for cell in ('z80_bc_alt', 'z80_de_alt', 'z80_hl_alt', 'z80_af_alt',
+                     'kl_e', 'kl_d', 'kl_lo', 'kl_hh', 'kl_seed0', 'il_outstub'):
+            if len(re.findall(r'\b' + cell + r'\b', _nc0)) == 1:      # только объявление
+                src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+\d+[^\n]*\n', '', src, count=1)
                 assert n == 1, 'снятие мёртвой ячейки ' + cell
         # МЁРТВЫЙ КОД И ДАННЫЕ ЦЕЛИ VEC (§30). Снимаются ровно те блоки, на метку которых в готовом
         # тексте (без комментариев) не осталось НИ ОДНОЙ ссылки, кроме собственного объявления:
@@ -3677,7 +3872,8 @@ def main():
             _dead += sum(_db_len(' '.join(l.split(';')[0].split())) or 0
                          for l in _m.group(0).split('\n') if re.match(r'^[ \t]*D[BCW]\b', l.split(':')[-1]))
             src = src[:_m.start()] + src[_m.end():]
-        src, moved, nblk = vec_pack_holes(src, VEC_HOLES, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
+        holes = [h for b in VEC_HOLE_PLANES for h in vec_holes(b)] + ix_rst_gaps() + VEC_HOLE_GAPS[1:]
+        src, moved, nblk = vec_pack_holes(src, holes, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
         rom = 'build/knightlore_jukebox.r0m' if kl_sound_ay.JUKEBOX_ON else 'build/knightlore_vec.r0m'
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "%s", 0, 0x10000' % rom, src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)
