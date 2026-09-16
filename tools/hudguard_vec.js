@@ -164,7 +164,10 @@ function runRoom(room){
   scripted=true;
   // зоны второго пера — из образа (см. выше); маска минус жёлтые = белые зоны
   const ZY=zoneBytes(readZones("vec_hudbuf"),0xA0), ZM=zoneBytes(readZones("vec_hudcols"),0xC0); g.ZY=ZY;
-  const penCheck=ZY.size>0&&ZM.size>0;
+  // KLNOPEN=1 — НЕ проверять второе перо. Нужно ровно для прогона с ПОЛНОЙ сеткой KLFORCE:
+  // она ставит героя на 0x30..0x60 НИЖЕ пола (естественная высота Z = 0x80), и стирание объекта
+  // законно трёт буфер под ячейками предметов — инвариант второго пера там неприменим (§32).
+  const penCheck=ZY.size>0&&ZM.size>0&&!process.env.KLNOPEN;
   function checkPen(){ S.penFrames++;
     for(const k of ZM){ const col=k>>8, row=k&0xFF;
       const b0=rd(0x8000+(col<<8)+row), b1=rd(0xA000+(col<<8)+row);
@@ -275,7 +278,8 @@ console.log("владельцы записей в строки 32..63 плоск
 for(const [k,v] of [...S.writeOwners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
 for(const [k,v] of S.writeOwners) if(!PANEL.test(k.replace(/ \[p2\]$/,""))) bump(S.badBlits,"записи в строки HUD не от панели: "+k,v);
 console.log(`герой за прогон: X ${S.xyz.x0.toString(16)}..${S.xyz.x1.toString(16)}, Y ${S.xyz.y0.toString(16)}..${S.xyz.y1.toString(16)}, Z ${S.xyz.z0.toString(16)}..${S.xyz.z1.toString(16)} (шестнадцатеричные)`);
-console.log(`второе перо (p1 под зонами маски): проверено границ итераций ${S.penFrames}, байт-нарушителей ${S.penBad}`);
+console.log(process.env.KLNOPEN?"второе перо (p1 под зонами маски): НЕ ПРОВЕРЯЛОСЬ (KLNOPEN=1)"
+  :`второе перо (p1 под зонами маски): проверено границ итераций ${S.penFrames}, байт-нарушителей ${S.penBad}`);
 if(S.penKill.size)console.log("   кто гасит p1 под жёлтой зоной: "+[...S.penKill].sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>k+" x"+v).join(", "));
 if(S.penBad){console.log("   по итерациям: "+[...S.penIter].map(([k,v])=>k+" x"+v).join(", ").slice(0,600));
   for(const [k,v] of [...S.penWorst].sort((a,b)=>b[1]-a[1]).slice(0,10))console.log(`   ${String(v).padStart(7)}  ${k}`);
