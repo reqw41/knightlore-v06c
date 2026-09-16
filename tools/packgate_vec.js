@@ -183,6 +183,23 @@ function dismiss(mode) {
   console.log(`     ${mode}: гашение ${r1.frames + rA.frames} кадров, распаковка ${r2.unpack}, штатный старт игры ${r2.boot}`);
   return r2;
 }
+// ---- 3а. образ загрузили с ЗАЖАТОЙ клавишей: заставка обязана дождаться нового нажатия
+{
+  const m = machine(TITLE);
+  key(m, "q", true);                                  // клавиша зажата с нулевого кадра
+  let started = -1;
+  const step = (n, f) => runSteps(m, { maxFrames: n, onFrame: f });
+  step(TITLE_FRAMES, null);
+  key(m, "q", false);                                 // отпустили на кадре TITLE_FRAMES
+  const r = runSteps(m, { untilPC: 0xF100, maxFrames: 30 });
+  say(!r.hit, "зажатая при загрузке клавиша заставку не снимает (ждём нового нажатия)");
+  key(m, "q", true);
+  runSteps(m, { maxFrames: 10 });
+  key(m, "q", false);                                 // t_go ждёт отпускания (антидребезг)
+  const r2 = runSteps(m, { untilPC: 0xF100, maxFrames: 40 });
+  say(r2.hit, "после отпускания новое нажатие заставку снимает");
+}
+
 const fKey = dismiss("key");
 const fJoy = dismiss("joy");
 if (fKey) {
