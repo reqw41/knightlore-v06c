@@ -38,18 +38,20 @@ for line in open(LST, encoding='latin1'):
     if m:
         rows.append((int(m.group(1), 16), 0, m.group(2)))
 
-blocks = []         # [имя, адрес, байт, провал_из_предыдущего, исходник блока]
+blocks = []         # [имя, адрес, байт, провал_из_предыдущего, исходник, данные?, холодных байт, строки]
 cur = None
 prev_fall = False
 for addr, nb, src in rows:
     body = src.split(';')[0].rstrip()
     lm = re.match(r'^([A-Za-z_][\w]*):', body.strip())
     if lm and not INNER.match(lm[1]):
-        blocks.append([lm[1], addr, 0, prev_fall, [], False])
+        blocks.append([lm[1], addr, 0, prev_fall, [], False, 0, []])
         cur = blocks[-1]
         prev_fall = True
     if cur is not None:
         cur[2] += nb
+        if nb:
+            cur[7].append((addr, nb))
         if body.strip():
             cur[4].append(body)
         if nb:
@@ -76,6 +78,10 @@ for i, b in enumerate(blocks):
 cov = None
 if COV:
     cov = open(COV, 'rb').read()
+    # карта отмечает ТОЛЬКО байт опкода (cov[pc]), поэтому холодные байты считаются по
+    # строкам листинга: строка холодная целиком, если её первый байт ни разу не исполнялся
+    for b in blocks:
+        b[6] = sum(nb for a, nb in b[7] if not cov[a])
 
 # достижимость: блок живой, если на него есть ссылка ИЗ ЖИВОГО блока или провал из живого.
 # Корни — блоки, которые исполнялись (по покрытию), либо (без покрытия) вообще все.
@@ -97,13 +103,13 @@ while changed:
             live.add(i)
             changed = True
 
-print("блок                                адрес  байт  ссылок  холодный  вердикт")
+print("блок                                адрес  байт  холодн  ссылок  вердикт")
 dead = cold_live = 0
 for i, b in enumerate(blocks):
     if not b[2]:
         continue
     nref = len(refs[b[0]] - {i})
-    hot = cov is None or any(cov[a] for a in range(b[1], b[1] + b[2]))
+    hot = cov is None or b[6] < b[2]
     if hot and not ALL:
         continue
     kind = 'данные, ' if b[5] else ''
@@ -111,7 +117,7 @@ for i, b in enumerate(blocks):
                       ('МЁРТВ: нет ссылок' if nref == 0 and not b[3] else 'МЁРТВ: ссылки только из мёртвых'))
     if i not in live:
         dead += b[2]
-    elif not hot:
-        cold_live += b[2]
-    print(f"{b[0]:34} {b[1]:04x} {b[2]:5} {nref:6}  {'нет' if hot else 'ДА ':8} {verdict}")
-print(f"\nмёртвых байт: {dead}; холодных, но достижимых: {cold_live}")
+    else:
+        cold_live += b[6]
+    print(f"{b[0]:34} {b[1]:04x} {b[2]:5} {b[6]:6} {nref:6}  {verdict}")
+print(f"\nмёртвых байт: {dead}; холодных (ни разу не исполненных) байт в живых блоках: {cold_live}")

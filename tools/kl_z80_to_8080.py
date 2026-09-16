@@ -3594,6 +3594,11 @@ def vec_pack_holes(src, holes, need=-1, exclude=()):
     base = [{'a': a, 'sz': sz, 'ins': None, 'min': -1} for a, sz in holes]
     if len(at) > uas and at[uas] is not None:          # хвост верхнего региона до таблиц сдвига
         base.append({'a': at[uas], 'sz': VEC_UPPER_TOP - at[uas], 'ins': uas, 'min': -1})
+    # ХВОСТ НУЛЕВОЙ СТРАНИЦЫ: от конца scratch-ячеек до vec_boot (0x00A0). Размер зависит от
+    # того, сколько ячеек снялось как мёртвые (§31.3), поэтому берётся по факту, а не константой.
+    zas = next((i for i, l in enumerate(lines) if 'ASSERT $ <= 0x00A0' in l), None)
+    if zas is not None and len(at) > zas and at[zas] is not None and at[zas] < 0x00A0:
+        base.append({'a': at[zas], 'sz': 0x00A0 - at[zas], 'ins': zas, 'min': -1})
     rpa = next((i for i, l in enumerate(lines) if l.startswith('vec_rptab:')), end)
     # ALIGN 8/16 стоят копейки (добивка < модуля), а вот ALIGN 256 перед kl_optr — сотни байт.
     # Добивку ПОСЛЕДНЕГО ALIGN (перед vec_rptab) не трогаем: это и есть запас внизу.
@@ -3822,9 +3827,19 @@ def main():
         assert n == 1, "ASSERT верхнего региона"
         # Второй набор регистров в цели vec больше не используется ни разу (последние exx ушли
         # вместе с атрибутами ZX в печати строк) — ячейки обмена мертвы, а scratch до 0x00A0 тесен.
-        for cell in ('z80_bc_alt', 'z80_de_alt', 'z80_hl_alt', 'z80_af_alt'):
-            if len(re.findall(r'\b' + cell + r'\b', src)) == 1:      # только объявление
-                src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+2[^\n]*\n', '', src, count=1)
+        # Мёртвые ячейки нулевой страницы (§31.3): снимается ровно та, на чьё имя в готовом тексте
+        # БЕЗ КОММЕНТАРИЕВ не осталось ни одной ссылки, кроме собственного объявления. Проверка
+        # по тексту без комментариев — иначе упоминание в комментарии держит ячейку вечно.
+        #   z80_*_alt   — второй набор регистров (последние exx ушли вместе с атрибутами ZX);
+        #   kl_e/kl_d/kl_lo/kl_hh — объединённый прямоугольник перекрытия: остаток раунда §18
+        #     («точный тест задет»), его считатель закрыт;
+        #   kl_seed0    — затравка seed_1 через clr_mem: START читает 0x5C78 ПОСЛЕ очистки (§11);
+        #   il_outstub  — стек-заглушка `out (c),a; ret` в ОЗУ: в игре нет ни одного out (c),a.
+        _nc0 = '\n'.join(l.split(';')[0] for l in src.split('\n'))
+        for cell in ('z80_bc_alt', 'z80_de_alt', 'z80_hl_alt', 'z80_af_alt',
+                     'kl_e', 'kl_d', 'kl_lo', 'kl_hh', 'kl_seed0', 'il_outstub'):
+            if len(re.findall(r'\b' + cell + r'\b', _nc0)) == 1:      # только объявление
+                src, n = re.subn(r'(?m)^' + cell + r':[ \t]*DS[ \t]+\d+[^\n]*\n', '', src, count=1)
                 assert n == 1, 'снятие мёртвой ячейки ' + cell
         # МЁРТВЫЙ КОД И ДАННЫЕ ЦЕЛИ VEC (§30). Снимаются ровно те блоки, на метку которых в готовом
         # тексте (без комментариев) не осталось НИ ОДНОЙ ссылки, кроме собственного объявления:
