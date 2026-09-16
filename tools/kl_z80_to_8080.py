@@ -722,6 +722,54 @@ _ix_form_cnt = {}
 # Побочный эффект — темп: развёртка быстрее call+хелпер.
 _IX_RARE = int(__import__('os').environ.get('KL_IX_RARE', '2'))
 
+# ---------------------------------------------------------------------------
+# RST-ВЕКТОРЫ ДЛЯ САМЫХ ЧАСТЫХ ФОРМ (цель vec, §31.1). Обращение (ix+d) стоит
+# `call il_xxx` (3 Б) + байт смещения. У i8080 есть восемь однобайтовых вызовов RST,
+# и адрес возврата они кладут на стек ТОЧНО ТАК ЖЕ, как call, — хелпер, читающий
+# inline-байт за адресом возврата, работает без единой правки. Каждое место вызова
+# частой формы становится 2 Б вместо 4.
+# Свободны шесть векторов: 0x00 занят загрузчиком (PC=0 по сбросу), 0x38 — кадровым
+# прерыванием. 0x30 оставлен гейтам kbcheck/inputcheck (они паркуют там CPU).
+# В векторе стоит `jp тело` (3 Б), тело живёт там же, где и раньше (дыры/нижний регион).
+_IX_RST_SLOTS = [0x08, 0x10, 0x18, 0x20, 0x28]
+_IX_RST = {}          # (px, form) -> адрес RST-вектора
+_IX_RST_ON = [False]  # включается только для цели vec (в остальных целях нулевая страница чужая)
+
+
+def pick_ix_rst():
+    """Раздать RST-векторы самым частым компактным формам (после count_ix_forms)."""
+    _IX_RST.clear()
+    if not _IX_RST_ON[0]:
+        return
+    cand = sorted(((c, f) for f, c in _ix_form_cnt.items() if c > _IX_RARE),
+                  key=lambda x: (-x[0], x[1]))
+    for slot, (_c, f) in zip(_IX_RST_SLOTS, cand):
+        _IX_RST[f] = slot
+
+
+def ix_rst_text():
+    """Векторы RST: ORG на адрес вектора + jp в тело хелпера."""
+    if not _IX_RST:
+        return ""
+    out = ["\t\t\t\tASSERT $ <= %#06x\t; RST-векторы компактных хелперов (ix+d)" % min(_IX_RST.values())]
+    for (px, form), slot in sorted(_IX_RST.items(), key=lambda kv: kv[1]):
+        assert (px, form) in _ix_used, 'RST-вектор для неиспользованной формы'
+        out.append("\t\t\t\tORG\t\t%#06x\nil_%s_%s:\tjp\t\til_%s_%s_b\t\t; RST-вектор: %d обращений"
+                   % (slot, px, form, px, form, _ix_form_cnt[(px, form)]))
+    return "\n".join(out) + "\n"
+
+
+def ix_rst_gaps():
+    """Что осталось от дыры 0x0007..0x0030 после расстановки векторов (по 3 Б на вектор)."""
+    if not _IX_RST:
+        return [(0x0007, 0x0030 - 0x0007)]
+    gaps, pos = [], 0x0007
+    for slot in sorted(_IX_RST.values()) + [0x0030]:
+        if slot > pos:
+            gaps.append((pos, slot - pos))
+        pos = slot + 3
+    return gaps
+
 
 def _ix_form(mn, ops, idxinfo):
     """(px, form) для обращения к (ix+d)/(iy+d) или None, если форма не компактная."""
@@ -793,7 +841,8 @@ def _ixiy_compact(mn, ops, idxinfo):
     def use(form, *extra):
         name = f"il_{px}_{form}"
         _ix_used.add((px, form))
-        return [f"call {name}", "db " + ", ".join([disp] + list(extra))]
+        op = "rst" if (px, form) in _IX_RST else "call"
+        return [f"{op} {name}", "db " + ", ".join([disp] + list(extra))]
     if mn == 'ld':
         if midx == 1:
             r = ops[0].lower()
@@ -859,7 +908,8 @@ def _ix_helper(px, form):
         alu = {'add': 'add a,', 'adc': 'adc a,', 'sub': 'sub ', 'sbc': 'sbc a,', 'and': 'and ', 'xor': 'xor ', 'or': 'or ', 'cp': 'cp '}[form]
         body = _PRO_A + A + ["ld a,(il_a)", f"{alu}(hl)", "ld hl,(il_tmp2)", "ret"]
     assert body, form
-    return f"il_{px}_{form}:\n" + "\n".join("\t" + x for x in body) + "\n"
+    sfx = "_b" if (px, form) in _IX_RST else ""      # у формы с RST-вектором метка вектора занята
+    return f"il_{px}_{form}{sfx}:\n" + "\n".join("\t" + x for x in body) + "\n"
 
 def ix_helpers_text():
     if not _ix_used:
@@ -881,6 +931,7 @@ def has_idx(body):
 
 def translate(src):
     count_ix_forms(src)
+    pick_ix_rst()
     out = []
     inserted_scratch = False
     for line in src.split('\n'):
@@ -3628,6 +3679,7 @@ def main():
     inp, outp = pos[0], pos[1]
     src = open(inp, encoding='latin-1').read()
     if target == 'vec':
+        _IX_RST_ON[0] = True                  # нулевая страница наша: RST-векторы под частые формы (ix+d)
         src = kl_vec_glue(src, translate_later=True)
         src = kl_no_delay(src)
         src, pace_desc = kl_pace(src)
@@ -3636,6 +3688,11 @@ def main():
         src = kl_native_logic.apply(src, attrs_cut=True)   # атрибуты ZX вырезаны -> второй набор регистров не нужен
         src, exx_pairs = _classify_exx(src)
         src = translate(src)
+        # RST-векторы частых форм (ix+d) — в нулевую страницу, перед вектором прерывания
+        rstv = ix_rst_text()
+        if rstv:
+            src, n = re.subn(r'(?m)^(\t+ORG\t+0x0038\n)', lambda m: rstv + m.group(1), src, count=1)
+            assert n == 1, "место для RST-векторов"
         helpers = ix_helpers_text()
         # хелперы — в нижний регион (после блока Вектора, до стека 0x8000): в верхнем они упирались в таблицы 0xF100,
         # которые build_lookup_tbls перезаписывает (IY-хелперы стирались -> старт игры уходил в мусор)
@@ -3677,7 +3734,8 @@ def main():
             _dead += sum(_db_len(' '.join(l.split(';')[0].split())) or 0
                          for l in _m.group(0).split('\n') if re.match(r'^[ \t]*D[BCW]\b', l.split(':')[-1]))
             src = src[:_m.start()] + src[_m.end():]
-        src, moved, nblk = vec_pack_holes(src, VEC_HOLES, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
+        holes = [h for b in VEC_HOLE_PLANES for h in vec_holes(b)] + ix_rst_gaps() + VEC_HOLE_GAPS[1:]
+        src, moved, nblk = vec_pack_holes(src, holes, VEC_HOLE_BYTES, VEC_HOLE_SKIP)
         rom = 'build/knightlore_jukebox.r0m' if kl_sound_ay.JUKEBOX_ON else 'build/knightlore_vec.r0m'
         src = re.sub(r'^\s*SAVESNA[^\n]*$', '\t\t\t\tSAVEBIN "%s", 0, 0x10000' % rom, src, flags=re.M)
         open(outp, 'w', encoding='utf-8').write(src)

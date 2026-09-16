@@ -36,7 +36,9 @@ hits = 0
 for path in sys.argv[1:]:
     lines = open(path, encoding='latin-1').read().split('\n')
     for i, raw in enumerate(lines):
-        m = re.match(r'^call\s+(il_[a-z_0-9]+)', body(raw))
+        # компактная форма зовётся `call il_xxx`, а самые частые — однобайтовым `rst il_xxx`
+        # (RST-вектор, §31.1): гейт обязан видеть обе записи, иначе он молча ослепнет
+        m = re.match(r'^(?:call|rst)\s+(il_[a-z_0-9]+)', body(raw))
         if not m or m.group(1) not in BAD:
             continue
         for j in range(i + 1, min(i + 24, len(lines))):

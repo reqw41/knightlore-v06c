@@ -117,11 +117,17 @@ let guard=0; while(phase!=="game"&&guard++<3000)v06c.oneInterrupt(true);
 if(phase!=="game")throw new Error("не дошли до комнаты");
 const startIter=iter;
 let frc=0,tacc=0;
+// ОБЪЕДИНЁННОЕ ПОКРЫТИЕ (§31.3): KLCOVU=<файл> — карта исполненных байт, ИЛИ с прежней
+// (сценарий ходьбы со сменой комнат и сменой дня/ночи добирает то, куда покой не доходит)
+const COVU=process.env.KLCOVU; let cov=null;
+if(COVU){cov=new Uint8Array(0x10000);if(fs.existsSync(COVU)){const u=fs.readFileSync(COVU);for(let i=0;i<0x10000;i++)if(u[i])cov[i]=1;}}
 while(iter-startIter<N&&steps<4e8){
   if(frc>=59904){frc-=59904;v06c.irq=true;v06c.checkInterrupt();}
+  if(cov)cov[cpu.pc]=1;
   const c=(cpu.instruction(),cpu.vcycles);steps++;frc+=c;
   tacc+=c;if(tacc>1){const tn=tacc>>1;tacc-=tn*2;timer.Count(tn);}
   if(cpu.last_opcode===0xd3)io.commit();}
+if(cov)fs.writeFileSync(COVU,Buffer.from(cov));
 fs.writeFileSync(OUT,lines.join("\n")+"\n");
 fs.writeFileSync(OUT.replace(/\.txt$/,"")+".bin",Buffer.concat(recs));
 fs.writeFileSync(OUT.replace(/\.txt$/,"")+".map",names.map(([n,a])=>`${a-VARS0} ${n}`).join("\n")+"\n"+`REC ${REC}\n`);
