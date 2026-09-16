@@ -2222,7 +2222,7 @@ csb_r:\t\t\tld      (hl), a
 \t\t\t\tld      l, 32
 \t\t\t\tdec     b
 \t\t\t\tjp      nz, csb_col
-\t\t\t\tret
+\t\t\t\tjp      vec_hud_p1\t\t\t\t; буфер под жёлтыми зонами обнулён -> вернуть p1 := p0 (§32)
 """
 
 VEC_SCREEN = """
@@ -3268,7 +3268,7 @@ hp_rel2:		ld      a, (vec_kbmat+0)
     src, n_b8 = re.subn(
         r'blit_2x8:\r?\n(\t+call    screen_calc_addr_de\r?\n\t+call    vidbuf_calc_addr_in_hl\r?\n)'
         r'\t+ld      bc, 0x802\r?\n\t+jp      blit_to_screen\r?\n',
-        'blit_2x8:\n\g<1>'
+        'blit_2x8:\n\\g<1>'
         '\t\t\t\tpush    hl                                      ; окно цифр в буфере\n'
         '\t\t\t\tld      bc, 0x802\n'
         '\t\t\t\tcall    blit_to_screen\n'

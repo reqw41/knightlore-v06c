@@ -97,7 +97,19 @@ const GRID=[];
 for(const y of [0x20,0x28,0xE0,0xD8]) for(const x of [0x20,0x28,0xE0,0xD8]) for(const z of [0x20,0x30,0x50]) GRID.push([x,y,z]);
 
 // --- сводные счётчики ---
+// ---- ВТОРОЕ ПЕРО HUD (§32): цвет внутри зон маски выбирает p1 (буфер рендера) ----
+// Зоны читаются ИЗ ОБРАЗА: vec_hudcols — вся маска HUD, vec_hudbuf — ЖЁЛТЫЕ зоны (предметы и знак
+// солнца/луны). Инвариант, который здесь сторожится НА КАЖДОЙ ГРАНИЦЕ ИТЕРАЦИИ:
+//   в ЖЁЛТОЙ зоне  p0=1 -> p1=1  (иначе элемент выйдет белым: буфер под ним потеряли);
+//   в БЕЛОЙ  зоне  p0=1 -> p1=0  (иначе цифра выйдет жёлтой: под ней осталась копия в буфере).
+// Байт целиком лежит внутри зоны или вне её (зоны нарезаны по столбцам), поэтому проверка побайтная.
+function readZones(base){const z=[];if(L[base]===undefined)return z;
+  for(let a=L[base];rd(a);a+=5)z.push({pg:rd(a),nc:rd(a+1),r0:rd(a+2),nr:rd(a+3)});return z;}
+function zoneBytes(z,base){const s=new Set();
+  for(const e of z)for(let c=e.pg-base;c<e.pg-base+e.nc;c++)for(let r=e.r0;r<e.r0+e.nr;r++)s.add((c<<8)|r);
+  return s;}
 const S={blits:0, hudBlits:0, clipped:0, insideHud:0, writesHud:0, badBlits:new Map(), owners:new Map(),
+         penBad:0, penFrames:0, penWorst:new Map(), penIter:new Map(),
          writeOwners:new Map(), minRow:255, minRowOwner:"", roomsOk:0, roomsBad:0, plane2:0,
          objMinL:255, objMinTop:255, objMinTopWin:"", objHud:0, objClip:0, objSkip:0, exits:0, footAbove:0, exitBy:new Map()};
 const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
@@ -142,6 +154,15 @@ function runRoom(room){
   let guard=0; while(phase!=="game"&&guard++<4000)v06c.oneInterrupt(true);
   if(phase!=="game")return null;                       // номер комнаты невалиден
   scripted=true;
+  // зоны второго пера — из образа (см. выше); маска минус жёлтые = белые зоны
+  const ZY=zoneBytes(readZones("vec_hudbuf"),0xA0), ZM=zoneBytes(readZones("vec_hudcols"),0xC0);
+  const penCheck=ZY.size>0&&ZM.size>0;
+  function checkPen(){ S.penFrames++;
+    for(const k of ZM){ const col=k>>8, row=k&0xFF;
+      const b0=rd(0x8000+(col<<8)+row), b1=rd(0xA000+(col<<8)+row);
+      const bad = ZY.has(k) ? (b0&~b1&0xFF) : (b0&b1&0xFF);
+      if(bad){ S.penBad++; bump(S.penWorst, `${ZY.has(k)?"жёлтая":"белая"} зона, столбец ${col} строка ${row}`, 1);
+               bump(S.penIter, `итерация ${iter}`, 1); } } }
   let frc=0,tacc=0,start=iter,dir=0,held=null,curRoom=rd(OBJ+8);
   const stepLimit=3e8;
   const step=()=>{
@@ -201,7 +222,13 @@ function runRoom(room){
       if(FORCE){const [x,y,z]=GRID[pos++%GRID.length];
         ow(OBJ+1,x,false);ow(OBJ+2,y,false);ow(OBJ+3,z,false);
         ow(OBJ+33,x,false);ow(OBJ+34,y,false);ow(OBJ+35,(z+12)&0xff,false);}
+      // KLITEMS=1 — три предмета в инвентаре с первой же итерации: без них ЖЁЛТАЯ зона предметов
+      // пуста (p0=0), и проверка второго пера по ней ничего не проверяет.
+      if(process.env.KLITEMS&&L.objects_carried!==undefined&&rd(L.objects_carried)!==96){
+        ow(L.objects_carried,96,false);ow(L.objects_carried+4,97,false);ow(L.objects_carried+8,98,false);
+        ow(L.objects_carried_changed,1,false);}
       const it0=iter; while(iter===it0&&steps<stepLimit)step();
+      if(penCheck)checkPen();
       if(process.env.KLLIVES)ow(L.lives,5,false);
       const rr=rd(OBJ+8); if(rr!==curRoom){bump(S.exitBy,`${d}: ${curRoom}->${rr}`,1);curRoom=rr;r.exits++;S.exits++;}   // РЕАЛЬНЫЙ выход через арку
     }
@@ -235,6 +262,10 @@ for(const [k,v] of [...S.owners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String
 console.log("владельцы записей в строки 32..63 плоскостей 0 и 2:");
 for(const [k,v] of [...S.writeOwners].sort((a,b)=>b[1]-a[1]))console.log(`   ${String(v).padStart(9)}  ${k}`);
 for(const [k,v] of S.writeOwners) if(!PANEL.test(k.replace(/ \[p2\]$/,""))) bump(S.badBlits,"записи в строки HUD не от панели: "+k,v);
+console.log(`второе перо (p1 под зонами маски): проверено границ итераций ${S.penFrames}, байт-нарушителей ${S.penBad}`);
+if(S.penBad){console.log("   по итерациям: "+[...S.penIter].map(([k,v])=>k+" x"+v).join(", ").slice(0,600));
+  for(const [k,v] of [...S.penWorst].sort((a,b)=>b[1]-a[1]).slice(0,10))console.log(`   ${String(v).padStart(7)}  ${k}`);
+  bump(S.badBlits,`p1 под зонами маски разошёлся с ожиданием: ${S.penBad} байт`,S.penBad);}
 if(S.badBlits.size){console.log("НАРУШИТЕЛИ:");
   for(const [k,v] of [...S.badBlits].sort((a,b)=>b[1]-a[1]).slice(0,40))console.log(`   ${String(v).padStart(7)}  ${k}`);}
 const bad=S.badBlits.size;
