@@ -141,6 +141,26 @@ MUTS = [
          file="tools/kl_native_logic.py",
          old="\t\t\t\tjp\t\tnc, loc_C1EE\t\t\t\t\t\t; не рядом — пропустить",
          new="\tcall il_ix_dec\n\tdb 4\n\t\t\t\tjp\t\tnc, loc_C1EE\t\t\t\t\t\t; не рядом — пропустить"),
+    dict(name="packlen", gate="packgate",
+         why="распаковщик теряет последний байт каждой копии с новым смещением (длина на 1 меньше)",
+         file="tools/mkrelease.py",
+         old="dz_lend:\tinc\thl\n\t\tcall\tdz_copy",
+         new="dz_lend:\tcall\tdz_copy"),
+    dict(name="packmargin", gate="packgate",
+         why="запас для распаковки «на месте» меньше delta: поток нижнего региона обгонит запись",
+         file="tools/mkrelease.py",
+         old="TAIL = 256                       # хвост потока B, уезжающий в плоскость 0",
+         new="TAIL = 1                         # хвост потока B, уезжающий в плоскость 0"),
+    dict(name="packtune", gate="packgate",
+         why="зеркало регистров AY не переносится в ВИ53 — на заставке тишина",
+         file="tools/mkrelease.py",
+         old="\t\tcall\tmsx_viflush\t\t; зеркало регистров AY -> ВИ53",
+         new="\t\t;call\tmsx_viflush\t\t; зеркало регистров AY -> ВИ53"),
+    dict(name="packarm", gate="packgate",
+         why="флаг «всё отпущено» взводится не глядя на матрицу: зажатая при загрузке клавиша снимет заставку",
+         file="tools/mkrelease.py",
+         old="\t\tor\ta\n\t\tret\tnz\t\t\t; что-то нажато — взводить нельзя",
+         new="\t\tor\ta"),
     dict(name="i8080", gate="check_i8080",
          why="одна инструкция осталась Z80-only (bit n,r не транслируется)",
          file="tools/kl_z80_to_8080.py",
@@ -172,6 +192,7 @@ GATES = {
     "check_plane2": None,      # особый: гейт живёт внутри build.sh vec
     "check_i8080": None,       # то же
     "check_ixflags": None,     # то же
+    "packgate": None,          # особый: собрать цель release и прогнать tools/packgate_vec.js
 }
 
 
@@ -198,6 +219,12 @@ def gate_result(gate, env=None):
         r = run(["node", "tools/lockstep_vec.js", "build/knightlore_8080.r0m", "build/knightlore_8080.sld",
                  "600", ALIVE + "/inputs_alive.txt", ALIVE + "/zx_states600.bin"], env)
         return r.returncode, (r.stdout + r.stderr)[-300:]
+    if gate == "packgate":
+        b = build("release", env)
+        if b.returncode:
+            return b.returncode, (b.stdout + b.stderr)[-400:]
+        r = run(["node", "tools/packgate_vec.js"], env)
+        return r.returncode, (r.stdout + r.stderr)[-500:]
     if gate == "palcheck":
         b = build("vec", env)
         if b.returncode:

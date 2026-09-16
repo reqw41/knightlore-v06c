@@ -2,6 +2,7 @@
 # Сборка Knight Lore для Вектора.
 #   ./build.sh lockstep  — i8080, логика 1:1, вывод заглушен, гейт check_i8080 + локстеп (tools/lockstep_vec.js)
 #   ./build.sh z80vec    — Z80 для Вектора с Z80-адаптером, ч/б: загрузчик, экран, клавиатура, ВИ53
+#   ./build.sh release   — РЕЛИЗНЫЙ образ: 16-цветная заставка + та же игра, упакованная ZX0 (§33)
 set -e
 cd "$(dirname "$0")"
 TARGET=${1:-lockstep}
@@ -22,6 +23,18 @@ elif [ "$TARGET" = "vec" ]; then
   python3 tools/check_ixflags.py build/knightlore_vec.asm
   python3 tools/check_plane2.py build/knightlore_vec.lst
   ls -la build/knightlore_vec.r0m
+elif [ "$TARGET" = "release" ]; then
+  # Релиз = цель vec, упакованная под заставку. Игру НЕ пересобираем иначе: образ vec
+  # собирается ровно так же, как обычно, и его содержимое уходит в поток целиком.
+  python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_vec.asm --target vec
+  ./tools/sjasmplus --lst=build/knightlore_vec.lst --sld=build/knightlore_vec.sld --fullpath build/knightlore_vec.asm
+  python3 tools/check_i8080.py build/knightlore_vec.lst
+  python3 tools/check_ixflags.py build/knightlore_vec.asm
+  python3 tools/check_plane2.py build/knightlore_vec.lst
+  python3 tools/mkrelease.py build/knightlore_vec.r0m build/knightlore_title.asm
+  ./tools/sjasmplus --lst=build/knightlore_title.lst --fullpath build/knightlore_title.asm
+  python3 tools/check_i8080.py build/knightlore_title.lst
+  ls -la build/knightlore_title.r0m
 elif [ "$TARGET" = "z80vec" ]; then
   python3 tools/kl_z80_to_8080.py src/knightlore_z80.asm build/knightlore_z80.asm --target z80vec
   ./tools/sjasmplus --lst=build/knightlore_z80.lst --sld=build/knightlore_z80.sld --fullpath build/knightlore_z80.asm
