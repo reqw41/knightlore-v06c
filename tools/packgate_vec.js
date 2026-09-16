@@ -161,8 +161,14 @@ function dismiss(mode) {
   if (mode === "key") key(m, "q", true); else m.st.joy = 0xFF & ~0x40;   // FIRE1
   const r1 = runSteps(m, { maxFrames: 10 });
   if (mode === "key") key(m, "q", false); else m.st.joy = 0xFF;
-  const r2 = runSteps(m, { untilPC: MAIN3, maxFrames: 400 });
-  if (!r2.hit) { say(false, `${mode}: распаковка не довела до main+3`); return null; }
+  // три отрезка: гашение экрана -> распаковщик (0xF100) -> штатный старт игры (vec_boot, таблицы)
+  const rA = runSteps(m, { untilPC: 0xF100, maxFrames: 60 });
+  if (!rA.hit) { say(false, `${mode}: распаковщик не запустился`); return null; }
+  const rB = runSteps(m, { untilPC: 0x0000, maxFrames: 400 });
+  if (!rB.hit) { say(false, `${mode}: распаковка не кончилась`); return null; }
+  const rC = runSteps(m, { untilPC: MAIN3, maxFrames: 400 });
+  if (!rC.hit) { say(false, `${mode}: после распаковки игра не дошла до main+3`); return null; }
+  const r2 = { frames: r1.frames + rA.frames + rB.frames + rC.frames, unpack: rB.frames, boot: rC.frames };
   const mem = Buffer.alloc(0x10000); for (let a = 0; a < 0x10000; a++) mem[a] = m.st.rd(a);
   // мёртвый хвост стека под SP: игра и релиз входят в main с одинаковым SP (= clear_start),
   // но сколько раз ISR успел войти до этого — вопрос кадровой фазы, и байты НИЖЕ SP разные.
@@ -174,11 +180,17 @@ function dismiss(mode) {
   }
   say(diff.length === 0, `${mode}: после распаковки память = образу vec байт в байт, кроме мёртвого хвоста стека 0x${DEAD0.toString(16)}..0x${DEAD1.toString(16)} (кадров от нажатия до меню ${r2.frames})`);
   if (diff.length) for (const [a, b] of diff.slice(0, 12)) console.log(`     0x${a.toString(16)}..0x${b.toString(16)} (${b - a + 1} Б): стало ${[...mem.subarray(a, Math.min(b + 1, a + 8))].map(v => v.toString(16)).join(" ")}, надо ${[...refMem.subarray(a, Math.min(b + 1, a + 8))].map(v => v.toString(16)).join(" ")}`);
-  return r2.frames;
+  console.log(`     ${mode}: гашение ${r1.frames + rA.frames} кадров, распаковка ${r2.unpack}, штатный старт игры ${r2.boot}`);
+  return r2;
 }
 const fKey = dismiss("key");
 const fJoy = dismiss("joy");
-if (fKey !== null) say(fKey <= 100, `распаковка укладывается в 2 с: ${fKey} кадров (${(fKey / 50).toFixed(2)} с)`);
+if (fKey) {
+  // порог на РАСПАКОВКУ: очистка плоскости 0 и постройка таблиц сдвига есть и у цели vec,
+  // их пользователь ждёт и при обычной загрузке
+  say(fKey.unpack <= 100, `распаковка укладывается в 2 с: ${fKey.unpack} кадров (${(fKey.unpack / 50).toFixed(2)} с)`);
+  console.log(`     от нажатия до меню ${fKey.frames} кадров (${(fKey.frames / 50).toFixed(2)} с)`);
+}
 
 console.log(bad === 0 ? "packgate: СОВПАДЕНИЕ" : `packgate: РАСХОЖДЕНИЙ ${bad}`);
 process.exit(bad === 0 ? 0 : 1);
