@@ -139,6 +139,8 @@ const rd=a=>memory.bytes[memory.tobank(a&0xffff)];
 const pal=[];for(let i=0;i<16;i++){const w=rd(L.vec_pal+i);
   const b=(w&0xc0)>>6,gr=(w&0x38)>>3,r=(w&0x07);
   pal.push([r<<5,gr<<5,b<<6]);}
+if(L.sun_moon_scratchpad!==undefined&&L.days!==undefined)
+  console.log(`знак: спрайт ${rd(L.sun_moon_scratchpad).toString(16)} (58 = солнце, 59 = луна), X ${rd(L.sun_moon_scratchpad+26)}, days ${rd(L.days).toString(16)}, жизней ${L.lives!==undefined?rd(L.lives):"?"}`);
 console.log("vec_pal: "+[...Array(16)].map((_,i)=>i.toString(16)+"="+rd(L.vec_pal+i).toString(16).padStart(2,"0")).join(" "));
 
 // KLDUMP=файл: плоскости 0 и 2 строками памяти (строка = "<строка памяти> <256 символов>"), для разбора зон
