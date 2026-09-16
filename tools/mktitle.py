@@ -99,6 +99,72 @@ def build_frame(src_path, scale, filt, rows, ox=None, oy=None):
     return np.asarray(canvas, dtype=np.float64), (x0, y0, w, h)
 
 
+# --- кадрирование живописного исходника (второй заход, §8 TITLE.md) ---------
+#
+# Пиксель Вектора шире, чем выше, в 4/3 раза (256x256 = весь кадр 4:3). Значит
+# кусок исходника шириной W и высотой H точек выглядит на экране НЕискажённым,
+# если занять им w экранных столбцов и h строк так, что (w*4/3)/h = W/H.
+# Отсюда два режима:
+#   stretch — растянуть кусок на все 256x256 (годится, когда сам кусок 4:3);
+#   height  — вписать по высоте: h = rows, w = round(rows * (W/H) * 3/4);
+#   width   — вписать по ширине: w = 256, h = round(256 * (H/W) * 4/3).
+# Поля заливаются --bg. Горизонталь и вертикаль масштабируются РАЗНЫМИ
+# коэффициентами — это и есть поправка на неквадратный пиксель, а не искажение.
+
+def build_frame_crop(src_path, crop, fit, filt, rows, bg=(0, 0, 0), ox=None, oy=None):
+    im = Image.open(src_path).convert('RGB')
+    if crop:
+        im = im.crop(crop)
+    W, H = im.size
+    if fit == 'stretch':
+        w, h = 256, rows
+    elif fit == 'height':
+        h = rows
+        w = min(256, int(round(rows * (W / H) * 3.0 / 4.0)))
+    else:                                    # width
+        w = 256
+        h = min(rows, int(round(256 * (H / W) * 4.0 / 3.0)))
+    rf = {'box': Image.BOX, 'lanczos': Image.LANCZOS, 'bilinear': Image.BILINEAR,
+          'nearest': Image.NEAREST}.get(filt, Image.LANCZOS)
+    im = im.resize((w, h), rf)
+    canvas = Image.new('RGB', (256, rows), tuple(bg))
+    x0 = (256 - w) // 2 if ox is None else ox
+    y0 = (rows - h) // 2 if oy is None else oy
+    canvas.paste(im, (x0, y0))
+    return np.asarray(canvas, dtype=np.float64), (x0, y0, w, h)
+
+
+# --- ZX-заставка: 256x192 родных точек, 15 цветов --------------------------
+#
+# Горизонталь ZX и Вектора совпадает точка в точку (256), пиксель ZX квадратный,
+# и 192 строки ZX — это тот же кадр 4:3. Значит пересчёт ровно один: 192 -> 256
+# по вертикали, то есть строго x4/3 (3 исходные строки на 4 экранных), а по
+# горизонтали НИЧЕГО не делается. Единственный источник с родным разрешением.
+
+ZX_PAL = [(0, 0, 0), (0, 0, 205), (205, 0, 0), (205, 0, 205),
+          (0, 205, 0), (0, 205, 205), (205, 205, 0), (205, 205, 205),
+          (0, 0, 0), (0, 0, 255), (255, 0, 0), (255, 0, 255),
+          (0, 255, 0), (0, 255, 255), (255, 255, 0), (255, 255, 255)]
+
+
+def read_scr(path):
+    """.scr 6912 байт -> (256,192) номера цветов 0..15 (8 и 0 — оба чёрный)."""
+    d = np.frombuffer(open(path, 'rb').read(), dtype=np.uint8)
+    if len(d) < 6912:
+        raise SystemExit('ожидался .scr 6912 байт')
+    out = np.zeros((192, 256), dtype=np.int16)
+    for y in range(192):
+        addr = ((y & 0xC0) << 5) | ((y & 7) << 8) | ((y & 0x38) << 2)
+        at = d[6144 + (y >> 3) * 32:6144 + (y >> 3) * 32 + 32]
+        for xb in range(32):
+            b = int(d[addr + xb])
+            a = int(at[xb])
+            br = (a & 0x40) >> 3
+            ink, pap = (a & 7) | br, ((a >> 3) & 7) | br
+            for i in range(8):
+                out[y, xb * 8 + i] = ink if (b >> (7 - i)) & 1 else pap
+    return out
+
 
 # ----------------------------------------------------------------------------
 # восстановление родной сетки C64 и пиксель-арт-пересчёт
@@ -252,6 +318,66 @@ def snap_g(colors_g):
     return np.argmin(d, axis=1)
 
 
+# --- перцептивное пространство OkLab (второй заход, §8 TITLE.md) ------------
+#
+# Зачем: у Вектора на синий ДВА бита (0, 85, 170, 255). Насыщенный оранжевый
+# картон обложки хочет синий ~45, и выбор между 0 и 85 решается метрикой.
+# Взвешенный евклид в гамме (R:G:B = 2:4:3) даёт синему столько веса, что
+# ярким местам картона достаётся 0x56 (218,72,85) — розовый, а соседним
+# 0x15 (182,72,0) — оранжевый: на экране это пятно другого тона (замерено:
+# пятно 90x240 точек слева от логотипа). OkLab меряет уход по цветности
+# отдельно от светлоты и такой обмен запрещает.
+
+def oklab(lin):
+    """Линейный sRGB 0..1 -> OkLab (Bjorn Ottosson, 2020)."""
+    a = np.asarray(lin, dtype=np.float64)
+    l = 0.4122214708 * a[..., 0] + 0.5363325363 * a[..., 1] + 0.0514459929 * a[..., 2]
+    m = 0.2119034982 * a[..., 0] + 0.6806995451 * a[..., 1] + 0.1073969566 * a[..., 2]
+    s = 0.0883024619 * a[..., 0] + 0.2817188376 * a[..., 1] + 0.6299787005 * a[..., 2]
+    l_, m_, s_ = np.cbrt(l), np.cbrt(m), np.cbrt(s)
+    return np.stack([
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    ], axis=-1)
+
+
+VEC_OK = oklab(VEC_LIN)
+SPACE = 'gamma'                              # ставится ключом --space в main()
+
+
+def perc(srgb01):
+    """sRGB 0..1 -> координаты того пространства, в котором меряем расстояния."""
+    return srgb01 if SPACE == 'gamma' else oklab(np.power(np.clip(srgb01, 0, 1), GAMMA))
+
+
+def vec_perc():
+    return VEC_G if SPACE == 'gamma' else VEC_OK
+
+
+def dist2p(a, b):
+    """Расстояние в выбранном пространстве: в гамме — взвешенное, в OkLab — нет
+    (веса каналов уже зашиты в само преобразование)."""
+    if SPACE == 'gamma':
+        return dist2(a, b)
+    d = a[..., None, :] - b[None, ...] if a.ndim == 2 else a[..., None, :] - b
+    return np.einsum('...c,...c->...', d, d)
+
+
+def snap_p(colors_p):
+    return np.argmin(dist2p(np.asarray(colors_p).reshape(-1, 3), vec_perc()), axis=1)
+
+
+def pick_nearest(pal_lin, sub, lin_colors):
+    """Ближайшие цвета палитры к точкам (обе стороны — в линейном свете)."""
+    if SPACE == 'gamma':
+        return sub[np.argmin(dist2(lin_colors, pal_lin[sub]), axis=-1)]
+    a = oklab(lin_colors)
+    b = oklab(np.clip(pal_lin[sub], 0, 1))
+    d = a[..., None, :] - b
+    return sub[np.argmin(np.einsum('...c,...c->...', d, d), axis=-1)]
+
+
 def fit_palette(frame, n, region_limit=None, pins=(), iters=30, seed=1):
     """Подобрать n цветов Вектора под кадр.
 
@@ -265,7 +391,7 @@ def fit_palette(frame, n, region_limit=None, pins=(), iters=30, seed=1):
     Возвращает индексы байт палитры длиной n.
     """
     rng = np.random.default_rng(seed)
-    px = frame.reshape(-1, 3) / 255.0
+    px = perc(frame.reshape(-1, 3) / 255.0)
     npin = len(pins)
     if region_limit is not None:
         rmask = region_limit[0].reshape(-1)
@@ -275,20 +401,20 @@ def fit_palette(frame, n, region_limit=None, pins=(), iters=30, seed=1):
 
     cent = np.zeros((n, 3))
     for i, b in enumerate(pins):
-        cent[i] = VEC_G[b]
+        cent[i] = vec_perc()[b]
     # k-means++ для свободных мест
     have = list(cent[:npin]) if npin else [px[rng.integers(len(px))]]
     start = npin if npin else 1
     if not npin:
         cent[0] = have[0]
     for i in range(start, n):
-        d = np.min(dist2(px, np.array(have)), axis=1)
+        d = np.min(dist2p(px, np.array(have)), axis=1)
         p = d / max(d.sum(), 1e-12)
         cent[i] = px[rng.choice(len(px), p=p)]
         have.append(cent[i])
 
     for it in range(iters):
-        d = dist2(px, cent)
+        d = dist2p(px, cent)
         if rmask is not None:
             d2 = d.copy()
             d2[rmask, k:] = np.inf          # правый регион — только первые k
@@ -303,12 +429,12 @@ def fit_palette(frame, n, region_limit=None, pins=(), iters=30, seed=1):
             else:                            # пустой кластер — перекинуть в худший пиксель
                 new[c] = px[np.argmax(np.min(d, axis=1))]
         if it >= iters - 8:                  # хвост итераций — с привязкой к сетке 3-3-2
-            new[npin:] = VEC_G[snap_g(new[npin:])]
+            new[npin:] = vec_perc()[snap_p(new[npin:])]
         if np.allclose(new, cent):
             cent = new
             break
         cent = new
-    return snap_g(cent)
+    return snap_p(cent)
 
 
 def search_pair(frame, pins, n, step=2):
@@ -360,8 +486,7 @@ def quant_none(img_lin, pal, allowed):
     for a in np.unique(allowed):
         m = allowed == a
         sub = np.flatnonzero(np.array(ALLOW_SETS[a]))
-        d = dist2(img_lin[m], pal[sub])
-        out[m] = sub[np.argmin(d, axis=1)]
+        out[m] = pick_nearest(pal, sub, img_lin[m])
     return out
 
 
@@ -381,7 +506,7 @@ def quant_fs(img_lin, pal, allowed, strength=1.0):
         for x in xs:
             old = buf[y, x]
             sub = subs[allowed[y, x]]
-            i = sub[np.argmin(np.einsum('kc,c->k', (pal[sub] - old) ** 2, W))]
+            i = int(pick_nearest(pal, sub, old[None, :])[0])
             out[y, x] = i
             err = (old - pal[i]) * strength
             if serp:
@@ -594,12 +719,37 @@ def main():
     ap.add_argument('--b53fit', choices=['right-first', 'joint'], default='right-first')
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--no-preview', action='store_true')
+    # --- второй заход: живописные исходники и ZX-заставка (§8 TITLE.md) ------
+    ap.add_argument('--crop', default=None,
+                    help='кусок исходника L,T,R,B в его собственных точках')
+    ap.add_argument('--fit', choices=['stretch', 'height', 'width'], default=None,
+                    help='как вписать кусок в 256xrows с поправкой на пиксель 4/3')
+    ap.add_argument('--bg', default='0,0,0', help='цвет полей при --fit height/width')
+    ap.add_argument('--zx', action='store_true',
+                    help='исходник — .scr ZX-Spectrum 6912 Б: 256 точек по горизонтали '
+                         'один к одному, 192 -> rows по вертикали')
+    ap.add_argument('--zx-resample', dest='zxres', choices=['nearest', 'bilinear'],
+                    default='nearest')
+    ap.add_argument('--space', choices=['gamma', 'oklab'], default='gamma',
+                    help='пространство, в котором подбирается палитра и ищется ближайший цвет')
+    ap.add_argument('--zx-palette', dest='zxpal', choices=['native', 'fit'], default='native',
+                    help='native — 15 цветов ZX, привязанных к сетке 3-3-2 Вектора')
     args = ap.parse_args()
+    globals()['SPACE'] = args.space
 
     os.makedirs(args.out, exist_ok=True)
     tag = args.tag or f'{args.mode}_{args.dither}'
 
-    frame, geom = build_frame(args.src, args.scale, args.filter, args.rows, args.ox, args.oy)
+    if args.zx:
+        return run_zx(args, ap, tag)
+
+    if args.crop or args.fit:
+        crop = tuple(int(v) for v in args.crop.split(',')) if args.crop else None
+        bg = tuple(int(v) for v in args.bg.split(','))
+        frame, geom = build_frame_crop(args.src, crop, args.fit or 'stretch', args.filter,
+                                       args.rows, bg, args.ox, args.oy)
+    else:
+        frame, geom = build_frame(args.src, args.scale, args.filter, args.rows, args.ox, args.oy)
     img_lin = to_lin(frame)
 
     if args.native:
@@ -682,11 +832,11 @@ def main():
         else:
             # k-means с одного зерна на 16 цветах заметно скачет — берём лучший
             # из нескольких запусков по ошибке ближайшего цвета
-            px = frame.reshape(-1, 3) / 255.0
+            px = perc(frame.reshape(-1, 3) / 255.0)
             best = None
             for k in range(args.tries):
                 cand = fit_palette(frame, n, pins=pins, seed=args.seed + k)
-                e = float(dist2(px, VEC_G[cand]).min(axis=1).mean())
+                e = float(dist2p(px, vec_perc()[cand]).min(axis=1).mean())
                 if best is None or e < best[0]:
                     best = (e, cand)
             pal_b = best[1]
@@ -740,8 +890,13 @@ def main():
     blur = lambda a: np.asarray(Image.fromarray(np.uint8(np.clip(a, 0, 255)))
                                 .filter(ImageFilter.GaussianBlur(1.0)), dtype=np.float64)
     errb = np.sqrt(np.mean((blur(out_srgb) - blur(frame)) ** 2))
+    # перцептивная мера: средний модуль разности в OkLab ПОСЛЕ размытия — то,
+    # что видит глаз. RMSE в sRGB систематически хвалит ту палитру, которую
+    # и подбирали в гамме, поэтому одной им мерить нельзя (см. §8 TITLE.md)
+    de = float(np.mean(np.sqrt(np.sum((oklab(to_lin(blur(out_srgb)))
+                                       - oklab(to_lin(blur(frame)))) ** 2, axis=-1)))) * 1000
     print(f'[{tag}] кадр {geom[2]}x{geom[3]} @ ({geom[0]},{geom[1]}), '
-          f'RMSE = {err:.2f}, RMSE после размытия = {errb:.2f}')
+          f'RMSE = {err:.2f}, RMSE после размытия = {errb:.2f}, dE(OkLab)x1000 = {de:.1f}')
 
     pal_bytes = snap(pal.reshape(-1, 3))
     used = sorted(set(int(v) for v in np.unique(ci)))
@@ -750,6 +905,60 @@ def main():
 
     # --- планарные файлы ----------------------------------------------------
     emit(args, tag, ci, pal_bytes)
+
+
+def run_zx(args, ap, tag):
+    """ZX-заставка .scr -> 16 цветов Вектора.
+
+    Горизонталь один к одному (256 = 256), вертикаль 192 -> rows. При rows=256
+    это ровно x4/3: три исходные строки дают четыре экранных, и рисунок
+    ложится регулярно — той неравномерности, которой рябил путь от C64 (x1.6),
+    здесь нет по построению.
+    """
+    global ALLOW_SETS
+    if args.mode != 'c16':
+        ap.error('--zx сделан для --mode c16')
+    nat = read_scr(args.src)                            # (192,256) номера цветов ZX
+    rgb = np.array(ZX_PAL, dtype=np.float64)
+
+    used = sorted(set(int(v) for v in np.unique(nat)))  # реально встретившиеся цвета ZX
+    if len(used) > 16:
+        ap.error('в .scr больше 16 цветов — не бывает')
+    remap = {c: i for i, c in enumerate(used)}
+    idx = np.vectorize(remap.get)(nat).astype(np.int16)
+
+    if args.zxres == 'nearest':
+        # каждая экранная строка берёт ту исходную, что накрыла её центр
+        ys = np.minimum(((np.arange(args.rows) + 0.5) * 192.0 / args.rows).astype(int), 191)
+        ci = idx[ys]
+        ref = rgb[np.array(used)][ci]
+    else:
+        # билинейно по вертикали в цвете, потом обратно к тем же 15 цветам
+        im = Image.fromarray(rgb[nat].astype(np.uint8)).resize((256, args.rows), Image.BILINEAR)
+        sm = np.asarray(im, dtype=np.float64)
+        ALLOW_SETS = {0: [True] * len(used)}
+        allowed = np.zeros((args.rows, 256), dtype=np.int8)
+        pl = to_lin(rgb[np.array(used)])
+        ci = (quant_fs(to_lin(sm), pl, allowed, args.strength) if args.strength > 0
+              else quant_none(to_lin(sm), pl, allowed)).astype(np.int16)
+        ref = sm
+
+    if args.palette:
+        pal_b = np.array([int(v, 0) for v in args.palette.split(',')])
+    elif args.zxpal == 'native':
+        pal_b = np.array(snap_g(rgb[np.array(used)] / 255.0))
+    else:
+        pal_b = fit_palette(rgb[np.array(used)][ci], len(used), seed=args.seed)
+    pal_b = np.concatenate([pal_b, np.zeros(16 - len(pal_b), dtype=int)])
+
+    out_srgb = to_srgb(VEC_LIN[pal_b][ci])
+    blur = lambda a: np.asarray(Image.fromarray(np.uint8(np.clip(a, 0, 255)))
+                                .filter(ImageFilter.GaussianBlur(1.0)), dtype=np.float64)
+    print(f'[{tag}] ZX 256x192 -> 256x{args.rows} ({args.zxres}), цветов {len(used)}: '
+          f'RMSE vs эталон {np.sqrt(np.mean((out_srgb - ref) ** 2)):.2f}, '
+          f'после размытия {np.sqrt(np.mean((blur(out_srgb) - blur(ref)) ** 2)):.2f}')
+    emit(args, tag, ci, pal_b, p2len_out=[0])
+    return
 
 
 def emit(args, tag, ci, pal_bytes, p2len_out=None):
