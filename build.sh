@@ -5,6 +5,8 @@
 #   ./build.sh release   — РЕЛИЗНЫЙ образ: 16-цветная заставка + та же игра, упакованная ZX0 (§33)
 #   ./build.sh roms      — release и vec, копии в rom/knightlore.c00 и rom/knightlore-notitle.c00
 #                          (образ памяти с 0x0000: на MiSTer — файл .C00, в эмуляторах — .r0m)
+#                          и rom/knightlore-0100.rom — тот же снимок без заставки, упакованный
+#                          в обычный образ с 0x0100 (tools/mkcom.py; Турбо+ из CP/M: -V T3)
 # Ассемблер — tools/sjasmplus (сборка под macOS arm64) или путь в SJASMPLUS.
 set -e
 cd "$(dirname "$0")"
@@ -15,6 +17,15 @@ if [ "$TARGET" = "roms" ]; then
   mkdir -p rom
   cp build/knightlore_title.r0m rom/knightlore.c00
   cp build/knightlore_vec.r0m rom/knightlore-notitle.c00
+  # образ с 0x0100 для загрузчиков, которые кладут программу с 0x0100 (обычный .rom Вектора,
+  # Вектор Турбо+ из CP/M с ключом -V): тот же снимок без заставки, упакованный tools/mkcom.py
+  python3 tools/mkcom.py build/knightlore_vec.r0m build/knightlore_com.asm
+  case "$SJ" in /*) SJA="$SJ" ;; */*) SJA="$PWD/$SJ" ;; *) SJA="$SJ" ;; esac
+  (cd build && "$SJA" --nologo --msg=war --i8080 knightlore_com.asm --lst=knightlore_com.lst)
+  cp build/knightlore_com.rom rom/knightlore-0100.rom
+  V06=${V06JS:-${V06:-$HOME/projects/vector06js}}
+  if [ -d "$V06" ]; then V06JS="$V06" node tools/comgate_vec.js rom/knightlore-0100.rom rom/knightlore-notitle.c00
+  else echo "comgate пропущен: нет vector06js ($V06)"; fi
   ls -l rom/
   exit 0
 fi
