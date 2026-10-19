@@ -11,7 +11,7 @@
 // KLDUMP2=<кадр> — то же на указанном кадре (объекты комнаты доставляются не сразу).
 "use strict";
 const fs = require("fs"), vm = require("vm");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06JS || require("path").join(require("os").homedir(), "projects/vector06js");
 const args = process.argv.slice(2);
 const ROM = args[0], N = +args[1] || 300;
 const opt = n => (args.find(a => a.startsWith("--" + n + "=")) || "").split("=")[1];

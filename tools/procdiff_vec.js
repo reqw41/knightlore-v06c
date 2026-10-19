@@ -9,7 +9,7 @@
 // поэтому сдвиг кода и переменных между сборками сравнению не мешает).
 "use strict";
 const fs = require("fs"), vm = require("vm");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06JS || require("path").join(require("os").homedir(), "projects/vector06js");
 const [RREF, SREF, RNEW, SNEW, LABEL, NS, SEEDS] = process.argv.slice(2);
 const N = +NS || 200, SEED0 = +SEEDS || 12345;
 const SENT = 0xFFF0;                                    // адрес возврата-часовой

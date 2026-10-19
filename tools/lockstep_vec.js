@@ -4,7 +4,7 @@
 // Использование: node tools/lockstep_vec.js build/knightlore_8080.r0m build/knightlore_8080.sld N [inputs.txt] [zx_states.bin]
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,NS,INPUTS,ZX]=process.argv.slice(2); const N=+NS||300;
 // LAG: на стенде MAME клавиша, выставленная в тапе итерации N, видна игре с итерации N+1 (латч порта по кадру)
 const LAG=+(process.env.KL_LAG||1);

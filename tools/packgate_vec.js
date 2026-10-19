@@ -13,7 +13,7 @@
 //   KLPG_FRAMES — сколько кадров держать заставку до нажатия (по умолчанию 120).
 "use strict";
 const fs = require("fs"), vm = require("vm"), zlib = require("zlib");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06JS || require("path").join(require("os").homedir(), "projects/vector06js");
 const TITLE = process.argv[2] || "build/knightlore_title.r0m";
 const VEC = process.argv[3] || "build/knightlore_vec.r0m";
 const SLD = process.argv[4] || "build/knightlore_vec.sld";

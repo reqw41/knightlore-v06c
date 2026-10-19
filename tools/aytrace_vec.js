@@ -20,7 +20,7 @@
 // в режиме ВИ53 драйвер в порты AY не пишет вовсе, а сверять с моделью MSX надо оба режима.
 "use strict";
 const fs = require("fs"), vm = require("vm");
-const base = "/Users/boris/projects/vector06js";
+const base = process.env.V06JS || require("path").join(require("os").homedir(), "projects/vector06js");
 const args = process.argv.slice(2);
 const ROM = args[0], NARG = +args[1] || 300;
 const opt = n => (args.find(a => a.startsWith("--" + n + "=")) || "").split("=")[1];

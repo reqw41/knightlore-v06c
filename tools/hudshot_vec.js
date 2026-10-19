@@ -12,7 +12,7 @@
 // Индекс палитры = p0<<3|p1<<2|p2<<1|p3 (p0 = 0x8000 ... p3 = 0xE000), байт палитры %BBGGGRRR.
 "use strict";
 const fs=require("fs"),vm=require("vm"),zlib=require("zlib");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,NS,OUT]=process.argv.slice(2); let N=+NS||300;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L)){L[n]=+p[5];}}}

@@ -22,7 +22,7 @@
 // Код возврата: 1, если есть окно-нарушитель или запись в HUD не от процедуры панели.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,NS,ROOMS]=process.argv.slice(2); const N=+NS||40;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");

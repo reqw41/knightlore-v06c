@@ -7,7 +7,7 @@
 // ни от скорости сборки, ни от того, что игра делает с меню.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,TAGA]=process.argv.slice(2);
 const TAG=TAGA||ROM.replace(/.*\//,"").replace(/\.r0m$/,"");
 const L={};

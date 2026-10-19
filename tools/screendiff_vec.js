@@ -7,7 +7,7 @@
 // и cmp двух .bin. Метка по умолчанию — базовое имя ROM + суффикс наличия ввода.
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,NS,INPUTS,TAGA]=process.argv.slice(2); const N=+NS||300;
 const WATCH=process.env.KLWATCH?process.env.KLWATCH.split("-").map(x=>parseInt(x,16)):null; let wn=0;
 const TAG=TAGA||(ROM.replace(/.*\//,"").replace(/\.r0m$/,"")+(INPUTS?"_alive":"_rest"));

@@ -4,7 +4,7 @@
 // Регионы памяти на запись задаются в RULES (по имени метки): список [имя, адрес-выражение, длина].
 "use strict";
 const fs=require("fs"),vm=require("vm");
-const base="/Users/boris/projects/vector06js";
+const base=process.env.V06JS||require("path").join(require("os").homedir(),"projects/vector06js");
 const [ROM,SLD,NS,INPUTS,LABELS]=process.argv.slice(2); const N=+NS||200;
 const L={};
 for(const l of fs.readFileSync(SLD,"latin1").split("\n")){const p=l.split("|");if(p.length>=8&&p[6]==="L"){const n=p[7].split(",")[1];if(n&&!(n in L))L[n]=+p[5];}}
