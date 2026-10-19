@@ -27,14 +27,19 @@ for (const f of ["i8080-js/i8080_trace.js", "i8080-js/i8080_disasm.js", "i8080-j
   vm.runInContext(fs.readFileSync(base + "/" + f, "utf8"), ctx, { filename: f });
 const memory = new ctx.Memory(), keyboard = new ctx.Keyboard(), timer = new ctx.I8253(), ay = new ctx.AY(),
   floppy = new (ctx.Floppy().FD1793)(), io = new ctx.IO(keyboard, timer, memory, ay, floppy);
-// ДЖОЙСТИК ВЕКТОРА (порт 0x0E, чтение) в vector06js СОБИРАЕТСЯ ИЗ МАТРИЦЫ (стрелки, пробел, W) —
-// в стенде это подмешивало бы джойстик к каждому нажатию клавиши, чего на живом Векторе нет
-// (там это отдельная микросхема). Подменяем чтение: по умолчанию покой, сценарий задаёт joy(...).
-// Биты порта active-low: 0 RIGHT, 1 LEFT, 2 UP, 3 DOWN, 6 FIRE1, 7 FIRE2; биты 4,5 схема держит в 1.
+// ДЖОЙСТИК «П» (с 2026-10-19): порт 6 за портом 5, как в ядре MiSTer (Vector-06C.sv, joyP_o):
+// биты 6:5 порта 5 выбирают 00 = A&B, 01 = A, 10 = B, 11 = никого. vector06js его не эмулирует —
+// подменяем: устройство A задаёт сценарий joy(...), B в покое. Порт 0x0E (прежний джойстик A)
+// отдаёт покой 0xFF, так что засчитаться может только путь через «П».
+// KL_JOYDEAD=1 — порт 6 молчит (негативный контроль: проверки джойстика обязаны покраснеть).
+// Биты active-low: 0 RIGHT, 1 LEFT, 2 UP, 3 DOWN, 6 FIRE1, 7 FIRE2; биты 4,5 в 1.
 const JOY_R=0x01, JOY_L=0x02, JOY_U=0x04, JOY_D=0x08, JOY_F1=0x40, JOY_F2=0x80, JOY_IDLE=0xFF;
 let JOY = JOY_IDLE;
 function joy(...bits){ JOY = JOY_IDLE; for(const b of bits) JOY &= ~b & 0xFF; return JOY; }
-{ const _rd = io.input.bind(io); io.input = p => ((p & 0xFF) === 0x0E ? JOY : _rd(p)); }
+let JSEL = 3;
+{ const _rd = io.input.bind(io), _wr = io.output.bind(io);
+  io.output = (p, v) => { if ((p & 0xFF) === 5) JSEL = (v >> 5) & 3; return _wr(p, v); };
+  io.input = p => { p &= 0xFF; if (p === 0x0E) return JOY_IDLE; if (p === 6) return (process.env.KL_JOYDEAD !== "1" && JSEL < 2) ? JOY : JOY_IDLE; return _rd(p); }; }
 const cpu = new ctx.I8080(memory, io), tape = { advance: () => {}, sample: 0, reset: () => {} },
   v06c = new ctx.Vector06c(cpu, memory, io, ay, tape);
 v06c.bmp = new Uint32Array(576 * 288); v06c.displayFrame = () => {}; v06c.check_breakpoint = () => false; v06c.dbg = null;
@@ -225,7 +230,9 @@ press([]); for (let f = 0; f < 4; f++) v06c.oneInterrupt(true);
   const CALL = 24, CALLI = 17;
   console.log(`ЦЕНА: vec_joy в кадре покоя ${cyc} + ${CALL} (call) = ${cyc + CALL} тактов Вектора ` +
               `(${i8} + ${CALLI} = ${i8 + CALLI} тактов i8080)`);
-  chk(cyc + CALL <= 112, `цена vec_joy в ISR ${cyc + CALL} тактов Вектора за кадр (бюджет 112)`);
+  // Бюджет 116 (было 112 = цена опроса порта 0x0E): джойстик «П» нормируется значением покоя —
+  // `xor n` (8 тактов) вместо `cpl` (4), 2026-10-19.
+  chk(cyc + CALL <= 116, `цена vec_joy в ISR ${cyc + CALL} тактов Вектора за кадр (бюджет 116)`);
 }
 
 // ================= часть 3: пауза на ВК =================
